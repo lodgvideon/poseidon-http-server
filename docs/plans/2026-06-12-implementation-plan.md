@@ -241,13 +241,25 @@ func (ss *ServerStream) Close() error
 #### B.1: Handler interface + request/response types
 
 **Objective:** Define the core handler interface and HTTP request/response abstractions.
+**Critical:** The `server` package MUST implement `net/http.Handler` compatibility
+so that any `chi.Router`, `http.Handler`, or `http.HandlerFunc` can be used as a
+drop-in handler. This is achieved via:
+
+1. `server.Request` wraps `*http.Request` (or implements `io.Reader` for body)
+2. `server.ResponseWriter` implements `http.ResponseWriter`
+3. `server.Server` accepts `http.Handler` in options
+4. Adapter converts `chi.Router` → `server.Handler` automatically
 
 **Files:**
 - Create: `server/handler.go`
 - Create: `server/handler_test.go`
+- Create: `server/adapter.go`       ← net/http compatibility layer
+- Create: `server/adapter_test.go`  ← chi/stdlib drop-in tests
 
 **Design:**
 ```go
+// --- Native Poseidon handler (zero-allocation path) ---
+
 // Handler processes a single HTTP/2 request.
 type Handler interface {
     ServeHTTP(ctx context.Context, req *Request, w *ResponseWriter) error
@@ -269,11 +281,60 @@ type ResponseWriter struct { ... }
 func (w *ResponseWriter) WriteHeaders(status int, headers []hpack.HeaderField) error
 func (w *ResponseWriter) WriteData(p []byte) error
 func (w *ResponseWriter) WriteTrailers(trailers []hpack.HeaderField) error
+
+// --- Drop-in net/http compatibility ---
+
+// ResponseWriter implements http.ResponseWriter.
+// This allows standard middleware (logging, recovery, CORS) to work unchanged.
+func (w *ResponseWriter) Header() http.Header
+func (w *ResponseWriter) Write(p []byte) (int, error)
+func (w *ResponseWriter) WriteHeader(statusCode int)
+
+// FromHTTPHandler adapts any http.Handler (chi.Router, http.HandlerFunc, etc.)
+// to a Poseidon Handler. Zero additional allocations on the adapter path.
+func FromHTTPHandler(h http.Handler) Handler
+
+// ToHTTPHandler adapts a Poseidon Handler to http.Handler.
+func ToHTTPHandler(h Handler) http.Handler
+
+// ServerOptions accepts either Handler or http.Handler:
+type ServerOptions struct {
+    // Handler is the native Poseidon handler (zero-allocation path).
+    Handler Handler
+    // HTTPHandler is a drop-in for chi.Router, http.ServeMux, etc.
+    // If both are set, Handler takes precedence.
+    HTTPHandler http.Handler
+}
 ```
 
-**Verify:** Unit test — HandlerFunc adapter works, ResponseWriter methods produce correct frames.
+**Drop-in usage with chi:**
+```go
+import (
+    "github.com/go-chi/chi/v5"
+    "github.com/lodgvideon/poseidon-http-server/server"
+)
 
-**Commit:** `feat(server): handler interface with request/response types`
+func main() {
+    r := chi.NewRouter()
+    r.Get("/hello", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("hi from Poseidon!"))
+    })
+
+    srv, _ := server.NewServer(server.ServerOptions{
+        Addr:       ":8443",
+        HTTPHandler: r,  // drop-in!
+    })
+    srv.ListenAndServe(context.Background())
+}
+```
+
+**Verify:**
+- Unit test: HandlerFunc adapter works, ResponseWriter methods produce correct frames
+- Integration test: `chi.NewRouter()` → `FromHTTPHandler(r)` → serve request → verify response
+- Verify `ResponseWriter` satisfies `http.ResponseWriter` interface at compile time
+- Verify `FromHTTPHandler(http.HandlerFunc(...))` roundtrip
+
+**Commit:** `feat(server): handler interface with net/http drop-in compatibility`
 
 ---
 
@@ -313,7 +374,8 @@ func Chain(mw ...Middleware) Middleware
 type ServerOptions struct {
     Addr              string
     TLSConfig         *tls.Config
-    Handler           Handler
+    Handler           Handler      // native Poseidon handler
+    HTTPHandler       http.Handler // drop-in for chi.Router, etc. (fallback)
     ConnOpts          conn.ServerConnOptions
     MaxConcurrentConn int
     IdleTimeout       time.Duration

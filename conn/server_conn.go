@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -51,8 +52,13 @@ type ServerConn struct {
 	// acceptCh delivers new client-initiated streams to AcceptStream.
 	acceptCh chan *ServerStream
 
-	// streamPool recycles *ServerStream structs.
-	streamPool sync.Pool
+	// pingMu guards pingWaiters. pingCounter produces unique payloads.
+	pingMu      sync.Mutex
+	pingWaiters map[[8]byte]chan struct{}
+	pingCounter atomic.Uint64
+
+	// goAwayRequested flags that the server has initiated GOAWAY.
+	goAwayRequested atomic.Bool
 
 	// Stats counters.
 	atomicBytesSent      atomic.Int64
@@ -68,6 +74,12 @@ type ServerConnOptions struct {
 	AdvertisedSettings AdvertisedSettings
 	// StreamEventBuffer is the per-stream event channel capacity.
 	StreamEventBuffer int
+	// KeepaliveInterval, when non-zero, enables a background keepalive
+	// loop. Zero disables keepalive.
+	KeepaliveInterval time.Duration
+	// KeepaliveTimeout is the max time to wait for PING ACK before
+	// closing the connection. Defaults to max(interval*5, 5s).
+	KeepaliveTimeout time.Duration
 }
 
 func (o ServerConnOptions) defaulted() ServerConnOptions {
@@ -81,6 +93,7 @@ func (o ServerConnOptions) defaulted() ServerConnOptions {
 }
 
 // ConnStats is a point-in-time counter snapshot.
+//nolint:revive // exported stutters with package; kept for API consistency with client.
 type ConnStats struct {
 	BytesSent       int64
 	BytesReceived   int64
@@ -122,6 +135,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		streams:            map[uint32]*ServerStream{},
 		readerDone:         make(chan struct{}),
 		acceptCh:           make(chan *ServerStream, 64),
+		pingWaiters:        make(map[[8]byte]chan struct{}),
 		connRecvWindow:     int32(connInitialRecvWindow),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
@@ -147,6 +161,9 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	sc.applyInitialPeerSettings(peer)
 
 	go sc.readerLoop()
+	if opts.KeepaliveInterval > 0 {
+		go sc.keepaliveLoop(opts.KeepaliveInterval)
+	}
 	return sc, nil
 }
 
@@ -270,6 +287,121 @@ func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
 	}
 }
 
+// IsAlive reports whether the connection is open.
+func (sc *ServerConn) IsAlive() bool {
+	return !sc.closed.Load()
+}
+
+// Ping sends a PING and blocks until the client's ACK arrives.
+func (sc *ServerConn) Ping(ctx context.Context) (time.Duration, error) {
+	if sc.closed.Load() {
+		return 0, ErrConnClosed
+	}
+	n := sc.pingCounter.Add(1)
+	var payload [8]byte
+	//nolint:gosec // ping counter is monotonic, overflow is fine
+	binary.BigEndian.PutUint64(payload[:], n)
+
+	ch := make(chan struct{})
+	sc.pingMu.Lock()
+	sc.pingWaiters[payload] = ch
+	sc.pingMu.Unlock()
+
+	sc.wmu.Lock()
+	if sc.closed.Load() {
+		sc.wmu.Unlock()
+		sc.pingMu.Lock()
+		delete(sc.pingWaiters, payload)
+		sc.pingMu.Unlock()
+		return 0, ErrConnClosed
+	}
+	start := time.Now()
+	err := sc.fr.WritePing(false, payload)
+	if err == nil {
+		sc.bumpFramesSent()
+	}
+	sc.wmu.Unlock()
+	if err != nil {
+		sc.pingMu.Lock()
+		delete(sc.pingWaiters, payload)
+		sc.pingMu.Unlock()
+		return 0, err
+	}
+
+	select {
+	case <-ch:
+		return time.Since(start), nil
+	case <-ctx.Done():
+		sc.pingMu.Lock()
+		delete(sc.pingWaiters, payload)
+		sc.pingMu.Unlock()
+		return 0, ctx.Err()
+	case <-sc.readerDone:
+		sc.pingMu.Lock()
+		delete(sc.pingWaiters, payload)
+		sc.pingMu.Unlock()
+		return 0, ErrConnClosed
+	}
+}
+
+// deliverPingAck signals any Ping call waiting for payload.
+func (sc *ServerConn) deliverPingAck(payload [8]byte) {
+	sc.pingMu.Lock()
+	ch, ok := sc.pingWaiters[payload]
+	if ok {
+		delete(sc.pingWaiters, payload)
+	}
+	sc.pingMu.Unlock()
+	if ok {
+		close(ch)
+	}
+}
+
+// GoAway sends GOAWAY with the given error code. After this call
+// AcceptStream returns ErrConnClosed but existing streams continue.
+func (sc *ServerConn) GoAway(code frame.ErrCode) error {
+	if !sc.goAwayRequested.CompareAndSwap(false, true) {
+		return nil // already sent
+	}
+	sc.wmu.Lock()
+	defer sc.wmu.Unlock()
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), code, nil)
+	if err == nil {
+		sc.bumpFramesSent()
+	}
+	return err
+}
+
+func (sc *ServerConn) keepaliveLoop(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			pingTimeout := sc.opts.KeepaliveTimeout
+			if pingTimeout == 0 {
+				pingTimeout = interval * 5
+				if pingTimeout < 5*time.Second {
+					pingTimeout = 5 * time.Second
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+			_, err := sc.Ping(ctx)
+			cancel()
+			if err != nil {
+				_ = sc.Close()
+				return
+			}
+		case <-sc.readerDone:
+			_ = sc.Close()
+			return
+		}
+	}
+}
+
 func (sc *ServerConn) bumpFramesSent() { sc.atomicFramesSent.Add(1) }
 
 // readerLoop reads frames from the connection and dispatches them.
@@ -286,7 +418,7 @@ func (sc *ServerConn) readerLoop() {
 	}
 }
 
-func (sc *ServerConn) shutdownStreams(reason error) {
+func (sc *ServerConn) shutdownStreams(_ error) {
 	sc.smu.Lock()
 	defer sc.smu.Unlock()
 	for _, s := range sc.streams {

@@ -34,7 +34,7 @@ docs/                # RFC coverage, benchmarks, design specs
 | Principle | How it's enforced |
 |-----------|-------------------|
 | **S** — Single Responsibility | Each package owns exactly one protocol concern: `frame` = codec, `conn` = connection state machine, `server` = accept loop + routing, `grpcserver` = gRPC framing |
-| **O** — Open/Closed | Handler interfaces + middleware chain; add behaviour without modifying core |
+| **O** — Open/Closed | Handler interfaces + middleware chain + `net/http.Handler` adapter; add behaviour without modifying core; chi/echo/gin drop-in via `FromHTTPHandler()` |
 | **L** — Liskov Substitution | `Handler` interface; `grpcserver.Handler` wraps `server.Handler`; any implementation is interchangeable |
 | **I** — Interface Segregation | Small focused interfaces: `FrameWriter`, `StreamReader`, `Handler`, `Middleware` — clients depend only on what they use |
 | **D** — Dependency Inversion | `conn.Conn` depends on `FrameWriter`/`FrameReader` interfaces, not concrete `frame.Framer`; `server.Server` depends on `Listener` interface, not `net.Listener` |
@@ -54,6 +54,8 @@ docs/                # RFC coverage, benchmarks, design specs
 
 ## Quick start
 
+### Native handler (zero-allocation path)
+
 ```go
 package main
 
@@ -67,15 +69,44 @@ import (
 func main() {
     srv, err := server.NewServer(server.ServerOptions{
         Addr: ":8443",
+        Handler: server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
+            return w.WriteHeaders(200, nil)
+        }),
     })
     if err != nil {
         log.Fatal(err)
     }
+    log.Fatal(srv.ListenAndServe(context.Background()))
+}
+```
 
-    srv.Handle("GET", "/hello", func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
-        return w.WriteHeaders(200, nil)
+### Drop-in with chi router
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "net/http"
+
+    "github.com/go-chi/chi/v5"
+    "github.com/lodgvideon/poseidon-http-server/server"
+)
+
+func main() {
+    r := chi.NewRouter()
+    r.Get("/hello", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("hi from Poseidon!"))
     })
 
+    srv, err := server.NewServer(server.ServerOptions{
+        Addr:       ":8443",
+        HTTPHandler: r, // drop-in — chi just works
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
     log.Fatal(srv.ListenAndServe(context.Background()))
 }
 ```

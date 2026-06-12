@@ -1,7 +1,6 @@
 package conn
 
 import (
-	"bufio"
 	"context"
 	"net"
 	"testing"
@@ -257,9 +256,3 @@ func (nilHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) err
 func (nilHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (nilHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 
-// readN reads exactly len(buf) bytes from c.
-func readN(c net.Conn, buf []byte) (int, error) {
-	// Use bufio to avoid multiple small reads.
-	r := bufio.NewReader(c)
-	return r.Read(buf)
-}

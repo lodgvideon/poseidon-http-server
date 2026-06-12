@@ -12,6 +12,7 @@ type serverConnOps interface {
 	markStreamDone(id uint32)
 	writeSettingsAck() error
 	writePingAck(payload [8]byte) error
+	deliverPingAck(payload [8]byte)
 	applyPeerSettings(s frame.SettingsParams) error
 	onWindowUpdate(streamID, increment uint32) error
 	onDataReceived(s *ServerStream, length uint32) error
@@ -59,10 +60,13 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	end := fh.Flags&frame.FlagHeadersEndStream != 0
 	endHeaders := fh.Flags&frame.FlagHeadersEndHeaders != 0
 
-	// Server receives client-initiated streams: odd stream IDs.
-	// If this stream is not registered yet, it's a new request.
 	s := h.streams.lookupStream(fh.StreamID)
 	isNew := s == nil
+
+	if isNew {
+		s = newServerStream(fh.StreamID, 8, nil, int32(connInitialRecvWindow))
+		h.streams.registerStream(fh.StreamID, s)
+	}
 
 	if !endHeaders {
 		h.pendingStreamID = fh.StreamID
@@ -73,19 +77,14 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	}
 
 	isTrailer := false
-	if isNew {
-		// Create and register a new stream.
-		// TODO: use pooled alloc + proper recvWindow from settings.
-		s = newServerStream(fh.StreamID, 8, nil, int32(connInitialRecvWindow))
-		h.streams.registerStream(fh.StreamID, s)
-	} else {
+	if !isNew {
 		isTrailer = s.headersReceived
 	}
 
 	if !isTrailer {
 		s.headersReceived = true
 	}
-	return h.emitHeaderBlock(s, hb, end, isTrailer, isNew)
+	return h.emitHeaderBlock(s, hb, end, isTrailer)
 }
 
 func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
@@ -102,10 +101,10 @@ func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.Header
 	if !isTrailer {
 		s.headersReceived = true
 	}
-	return h.emitHeaderBlock(s, h.pendingBuf, end, isTrailer, false)
+	return h.emitHeaderBlock(s, h.pendingBuf, end, isTrailer)
 }
 
-func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStream, isTrailer, isNew bool) error {
+func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStream, isTrailer bool) error {
 	h.scratch = h.scratch[:0]
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
 		h.scratch = append(h.scratch, f)
@@ -143,22 +142,11 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	}
 
 	s.push(StreamEvent{
-		Type:    evType,
-		Headers: copied,
-		Slab:    slabPtr,
+		Type:      evType,
+		Headers:   copied,
+		Slab:      slabPtr,
 		EndStream: endStream,
 	})
-
-	// If this is a new stream, deliver it to AcceptStream.
-	if isNew {
-		if sc := s.sc; sc != nil {
-			select {
-			case sc.acceptCh <- s:
-			default:
-				// Accept channel full — stream will be GC'd.
-			}
-		}
-	}
 	return nil
 }
 
@@ -191,6 +179,7 @@ func (h *serverConnHandler) OnPushPromise(frame.FrameHeader, uint32, frame.Heade
 
 func (h *serverConnHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
 	if fh.Flags&frame.FlagPingAck != 0 {
+		h.streams.deliverPingAck(payload)
 		return nil
 	}
 	return h.streams.writePingAck(payload)

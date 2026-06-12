@@ -1,16 +1,26 @@
 package conn
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
 // HeaderSlabPool recycles the byte backing for HPACK-decoded header fields.
 var HeaderSlabPool = &sync.Pool{
 	New: func() any {
 		b := make([]byte, 0, 512)
+		return &b
+	},
+}
+
+// encBufPool recycles the HPACK block-fragment buffer used by writeServerHeaders.
+var encBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 256)
 		return &b
 	},
 }
@@ -25,20 +35,27 @@ func (sc *ServerConn) lookupStream(id uint32) *ServerStream {
 }
 
 // registerStream adds a new stream to the registry and delivers it
-// to AcceptStream via acceptCh.
+// to AcceptStream via acceptCh. Seeds the stream's send window from
+// the peer's SETTINGS_INITIAL_WINDOW_SIZE.
 func (sc *ServerConn) registerStream(id uint32, s *ServerStream) {
+	// Seed per-stream send window from peer's INITIAL_WINDOW_SIZE.
+	sc.psMu.RLock()
+	initial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+	sc.psMu.RUnlock()
+	s.mu.Lock()
+		s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
+	s.mu.Unlock()
+
 	sc.smu.Lock()
 	sc.streams[id] = s
 	sc.smu.Unlock()
 	sc.atomicStreamsAccepted.Add(1)
 
-	// Wire the stream back to this conn (needed for handler -> acceptCh).
 	s.sc = sc
 
 	select {
 	case sc.acceptCh <- s:
 	default:
-		// Accept channel full — reject the stream.
 		_ = s.Close()
 	}
 }
@@ -78,15 +95,18 @@ func (sc *ServerConn) writePingAck(payload [8]byte) error {
 	return nil
 }
 
-// applyPeerSettings applies client SETTINGS after the handshake.
+// applyPeerSettings applies client SETTINGS. Handles retroactive
+// INITIAL_WINDOW_SIZE delta on all open streams (RFC 7540 §6.9.2).
 func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
 
 	sc.psMu.Lock()
+	oldInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := 0; i < s.N; i++ {
 		p := s.Pairs[i]
 		setPeerSetting(&sc.peerSettings, p.ID, p.Value)
 	}
+	newInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	sc.psMu.Unlock()
 
 	for i := 0; i < s.N; i++ {
@@ -94,6 +114,32 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 		if p.ID == frame.SettingHeaderTableSize {
 			sc.enc.SetMaxDynamicTableSize(p.Value)
 		}
+	}
+
+	// Retroactive INITIAL_WINDOW_SIZE delta on all open streams.
+	if newInitial != oldInitial {
+		delta := int64(newInitial) - int64(oldInitial)
+		sc.smu.Lock()
+		victims := make([]*ServerStream, 0, len(sc.streams))
+		for _, st := range sc.streams {
+			victims = append(victims, st)
+		}
+		sc.smu.Unlock()
+
+		for _, st := range victims {
+			st.mu.Lock()
+			newWin := int64(st.sendWindow) + delta
+			if newWin > maxWindow {
+				st.mu.Unlock()
+				return fmt.Errorf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)
+			}
+						st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
+			st.mu.Unlock()
+		}
+
+		sc.fcOutMu.Lock()
+		sc.fcOutCond.Broadcast()
+		sc.fcOutMu.Unlock()
 	}
 	return nil
 }
@@ -108,12 +154,11 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 			sc.fcOutMu.Unlock()
 			return fmt.Errorf("WINDOW_UPDATE overflowed connection send window")
 		}
-		sc.peerConnSendWindow = int32(newVal)
+				sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
 		sc.fcOutCond.Broadcast()
 		sc.fcOutMu.Unlock()
 		return nil
 	}
-	// Per-stream window update.
 	s := sc.lookupStream(streamID)
 	if s == nil {
 		return nil
@@ -124,7 +169,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		s.mu.Unlock()
 		return fmt.Errorf("stream %d: WINDOW_UPDATE overflow", streamID)
 	}
-	s.sendWindow = int32(newVal)
+		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
 	s.mu.Unlock()
 	sc.fcOutMu.Lock()
 	sc.fcOutCond.Broadcast()
@@ -134,7 +179,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 
 // onDataReceived debits flow-control windows for an inbound DATA frame.
 func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
-	debit := int32(length)
+		debit := int32(length) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
 
 	s.mu.Lock()
 	s.recvWindow -= debit
@@ -147,7 +192,7 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	if s.recvRefundPending >= recvWindowRefundThreshold {
 		streamRefund = s.recvRefundPending
 		s.recvRefundPending = 0
-		s.recvWindow += int32(streamRefund)
+				s.recvWindow += int32(streamRefund) //nolint:gosec // G115: refund ≤ initial
 	}
 	s.mu.Unlock()
 
@@ -162,7 +207,7 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	if sc.connRefundPending >= recvWindowRefundThreshold {
 		connRefund = sc.connRefundPending
 		sc.connRefundPending = 0
-		sc.connRecvWindow += int32(connRefund)
+				sc.connRecvWindow += int32(connRefund) //nolint:gosec // G115: refund ≤ initial
 	}
 	sc.fcMu.Unlock()
 
@@ -177,6 +222,161 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 		}
 	}
 	return nil
+}
+
+// --- Outbound write methods (called from ServerStream) ---
+
+// writeServerHeaders encodes and writes a HEADERS frame.
+func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fields []hpack.HeaderField, endStream bool) error {
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	sc.wmu.Lock()
+	defer sc.wmu.Unlock()
+
+	buf := encBufPool.Get().(*[]byte)
+	*buf = (*buf)[:0]
+	block := sc.enc.EncodeBlock(*buf, fields)
+	err := sc.fr.WriteHeaders(frame.WriteHeadersParams{
+		StreamID:      ss.id,
+		BlockFragment: block,
+		EndHeaders:    true,
+		EndStream:     endStream,
+	})
+	*buf = block[:0]
+	encBufPool.Put(buf)
+	if err != nil {
+		return err
+	}
+	sc.bumpFramesSent()
+	return nil
+}
+
+// writeServerData writes a DATA frame with chunking and flow control.
+func (sc *ServerConn) writeServerData(ctx context.Context, ss *ServerStream, p []byte, endStream bool) error {
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	// Determine max frame size.
+	sc.psMu.RLock()
+	peerMax := settingValue(sc.peerSettings, frame.SettingMaxFrameSize, 16384)
+	sc.psMu.RUnlock()
+	ourMax := sc.opts.AdvertisedSettings.MaxFrameSize
+	maxFrame := int(peerMax)
+	if int(ourMax) < maxFrame {
+		maxFrame = int(ourMax)
+	}
+	if maxFrame <= 0 {
+		maxFrame = 16384
+	}
+
+	// Empty DATA with END_STREAM.
+	if len(p) == 0 {
+		if !endStream {
+			return nil
+		}
+		sc.wmu.Lock()
+		defer sc.wmu.Unlock()
+		if sc.closed.Load() {
+			return ErrConnClosed
+		}
+		if err := sc.fr.WriteData(ss.id, true, nil); err != nil {
+			return err
+		}
+		sc.bumpFramesSent()
+		return nil
+	}
+
+	for len(p) > 0 {
+		want := len(p)
+		if want > maxFrame {
+			want = maxFrame
+		}
+		n, err := sc.acquireSendCredits(ctx, ss, want)
+		if err != nil {
+			return err
+		}
+		last := endStream && n == len(p)
+		sc.wmu.Lock()
+		if sc.closed.Load() {
+			sc.wmu.Unlock()
+			return ErrConnClosed
+		}
+		if werr := sc.fr.WriteData(ss.id, last, p[:n]); werr != nil {
+			sc.wmu.Unlock()
+			return werr
+		}
+		sc.bumpFramesSent()
+		sc.wmu.Unlock()
+		p = p[n:]
+	}
+	return nil
+}
+
+// writeServerRSTStream sends RST_STREAM for a server stream.
+func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	sc.wmu.Lock()
+	defer sc.wmu.Unlock()
+	if err := sc.fr.WriteRSTStream(ss.id, code); err != nil {
+		return err
+	}
+	sc.bumpFramesSent()
+	sc.markStreamDone(ss.id)
+	return nil
+}
+
+// acquireSendCredits blocks until both per-stream and connection-level
+// outbound send windows have credit, then deducts up to `want` bytes.
+func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, want int) (int, error) {
+	if want <= 0 {
+		return 0, nil
+	}
+	// Watchdog to wake on ctx cancel.
+	watchdog := make(chan struct{})
+	defer close(watchdog)
+	go func() {
+		select {
+		case <-ctx.Done():
+			sc.fcOutMu.Lock()
+			sc.fcOutCond.Broadcast()
+			sc.fcOutMu.Unlock()
+		case <-watchdog:
+		}
+	}()
+
+	sc.fcOutMu.Lock()
+	defer sc.fcOutMu.Unlock()
+	for {
+		if sc.closed.Load() {
+			return 0, ErrConnClosed
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		ss.mu.Lock()
+		streamWin := ss.sendWindow
+		ss.mu.Unlock()
+		connWin := sc.peerConnSendWindow
+		avail := streamWin
+		if connWin < avail {
+			avail = connWin
+		}
+		if avail > 0 {
+						n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+			if n > avail {
+				n = avail
+			}
+			sc.peerConnSendWindow -= n
+			ss.mu.Lock()
+			ss.sendWindow -= n
+			ss.mu.Unlock()
+			return int(n), nil
+		}
+		sc.fcOutCond.Wait()
+	}
 }
 
 // writeWindowUpdate emits a WINDOW_UPDATE frame.
