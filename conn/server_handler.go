@@ -174,7 +174,9 @@ func (h *serverConnHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsPar
 }
 
 func (h *serverConnHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
-	return nil // server never expects PUSH_PROMISE from client
+	// RFC 7540 §8.2: server must not receive PUSH_PROMISE from client.
+	// Connection error of type PROTOCOL_ERROR.
+	return connError{code: frame.ErrCodeProtocolError, msg: "server received PUSH_PROMISE"}
 }
 
 func (h *serverConnHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {

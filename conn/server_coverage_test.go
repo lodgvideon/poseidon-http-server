@@ -397,3 +397,40 @@ func (w *windowUpdateCapture) OnWindowUpdate(_ frame.FrameHeader, inc uint32) er
 	return nil
 }
 func (w *windowUpdateCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
+
+// TestServerConn_Ping_CancelledContext verifies that Ping returns an error
+// when the context is cancelled before the PING ACK arrives.
+func TestServerConn_Ping_CancelledContext(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer cli.Close()
+
+	go func() {
+		defer cli.Close()
+		pipeClient(t, cli, func(cliFr *frame.Framer) {
+			// Read the PING from server but do NOT send ACK.
+			// Just read one frame (the PING) and sit on it.
+			h := &dataCapture{}
+			cliFr.ReadFrame(context.Background(), h)
+			// Hold connection open briefly.
+			time.Sleep(500 * time.Millisecond)
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	sc, err := NewServerConn(ctx, srv, ServerConnOptions{}.defaulted())
+	if err != nil {
+		t.Fatalf("NewServerConn: %v", err)
+	}
+	defer sc.Close()
+
+	// Ping with a very short timeout — should expire before ACK.
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer pingCancel()
+
+	_, err = sc.Ping(pingCtx)
+	if err == nil {
+		t.Fatal("Ping should return error on cancelled context")
+	}
+}
