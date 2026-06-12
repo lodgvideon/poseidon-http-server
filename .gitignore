@@ -23,3 +23,6 @@ cover.out
 # Logs
 .logs/
 server-cov.out
+cov.out
+coverage.out
+coverage_server.out

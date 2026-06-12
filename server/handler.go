@@ -53,8 +53,9 @@ type Request struct {
 	Scheme     string // "https" or "http" (h2c)
 	Authority  string // :authority pseudo-header
 	Headers    []hpack.HeaderField
-	Body       []byte         // collected body; nil if streaming
-	BodyReader io.ReadCloser  // streaming body reader; nil if collected
+	Trailers   []hpack.HeaderField // trailing headers (after body)
+	Body       []byte              // collected body; nil if streaming
+	BodyReader io.ReadCloser       // streaming body reader; nil if collected
 
 	streamID uint32 // internal: HTTP/2 stream identifier
 }
