@@ -1,0 +1,19 @@
+mode: set
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:50.49,58.2 6 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:62.47,64.2 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:67.69,69.47 2 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:69.47,71.3 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:73.2,76.22 3 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:76.22,78.3 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:79.2,79.17 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:79.17,81.3 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:83.2,84.51 2 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:84.51,86.3 1 0
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:88.2,88.53 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:93.61,94.35 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:94.35,96.3 1 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:98.2,101.42 3 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:101.42,103.3 1 0
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:105.2,106.16 2 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:106.16,109.3 2 1
+github.com/lodgvideon/poseidon-http-server/grpcserver/framing.go:111.2,111.81 1 1
