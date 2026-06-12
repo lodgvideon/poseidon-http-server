@@ -1,0 +1,409 @@
+package conn
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/hpack"
+)
+
+// ServerConn manages a single server-side HTTP/2 connection.
+// Goroutine-safe for AcceptStream and Close; per-stream methods
+// are single-goroutine.
+type ServerConn struct {
+	transport net.Conn
+	fr        *frame.Framer
+	enc       *hpack.Encoder
+	dec       *hpack.Decoder
+	opts      ServerConnOptions
+
+	// peerSettings is the most recently observed client SETTINGS.
+	// Guarded by psMu.
+	psMu         sync.RWMutex
+	peerSettings frame.SettingsParams
+
+	wmu sync.Mutex // serializes all writes to fr
+
+	// smu guards streams map and stream ID tracking.
+	smu     sync.Mutex
+	streams map[uint32]*ServerStream
+
+	// fcMu guards the connection-level recv window.
+	fcMu              sync.Mutex
+	connRecvWindow    int32
+	connRefundPending uint32
+
+	// fcOutMu guards the outbound connection-level send window.
+	fcOutMu            sync.Mutex
+	fcOutCond          *sync.Cond
+	peerConnSendWindow int32
+
+	closed     atomic.Bool
+	readerDone chan struct{}
+
+	// acceptCh delivers new client-initiated streams to AcceptStream.
+	acceptCh chan *ServerStream
+
+	// streamPool recycles *ServerStream structs.
+	streamPool sync.Pool
+
+	// Stats counters.
+	atomicBytesSent      atomic.Int64
+	atomicBytesReceived  atomic.Int64
+	atomicFramesSent     atomic.Int64
+	atomicFramesReceived atomic.Int64
+	atomicStreamsAccepted atomic.Uint32
+}
+
+// ServerConnOptions configures the server-side connection.
+type ServerConnOptions struct {
+	// AdvertisedSettings are sent in the server's SETTINGS frame.
+	AdvertisedSettings AdvertisedSettings
+	// StreamEventBuffer is the per-stream event channel capacity.
+	StreamEventBuffer int
+}
+
+func (o ServerConnOptions) defaulted() ServerConnOptions {
+	if o.AdvertisedSettings.MaxConcurrentStreams == 0 {
+		o.AdvertisedSettings = o.AdvertisedSettings.defaulted()
+	}
+	if o.StreamEventBuffer <= 0 {
+		o.StreamEventBuffer = 8
+	}
+	return o
+}
+
+// ConnStats is a point-in-time counter snapshot.
+type ConnStats struct {
+	BytesSent       int64
+	BytesReceived   int64
+	FramesSent      int64
+	FramesReceived  int64
+	StreamsAccepted uint32
+}
+
+// clientPreface is the HTTP/2 connection preface sent by clients
+// (RFC 7540 §3.5).
+var clientPreface = []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+
+// NewServerConn performs the HTTP/2 server-side handshake over an
+// already-connected transport (typically a *tls.Conn or net.Conn for h2c):
+//
+//  1. Read the 24-byte client preface magic (RFC 7540 §3.5)
+//  2. Send server SETTINGS frame with advertised settings
+//  3. Read client SETTINGS frame
+//  4. Send SETTINGS ACK for client SETTINGS
+//  5. Read client SETTINGS ACK for our SETTINGS
+//  6. Start reader goroutine
+//
+// Returns ErrBadPreface if the client preface is invalid.
+func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*ServerConn, error) {
+	opts = opts.defaulted()
+
+	// Step 1: read and verify client preface.
+	if err := readClientPreface(nc); err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
+
+	sc := &ServerConn{
+		transport:          nc,
+		fr:                 frame.NewFramer(nc, nc),
+		enc:                hpack.NewEncoder(),
+		dec:                hpack.NewDecoder(),
+		opts:               opts,
+		streams:            map[uint32]*ServerStream{},
+		readerDone:         make(chan struct{}),
+		acceptCh:           make(chan *ServerStream, 64),
+		connRecvWindow:     int32(connInitialRecvWindow),
+		peerConnSendWindow: int32(connInitialRecvWindow),
+	}
+	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
+
+	// Step 2: send server SETTINGS.
+	myParams := encodeAdvertised(opts.AdvertisedSettings)
+	if err := sc.fr.WriteSettings(myParams); err != nil {
+		_ = nc.Close()
+		return nil, fmt.Errorf("server write settings: %w", err)
+	}
+	sc.atomicFramesSent.Add(1)
+
+	// Steps 3-5: handshake — read client SETTINGS, send ACK, read ACK.
+	peer, err := handshakeServerSettings(ctx, sc.fr)
+	if err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
+	sc.psMu.Lock()
+	sc.peerSettings = peer
+	sc.psMu.Unlock()
+	sc.applyInitialPeerSettings(peer)
+
+	go sc.readerLoop()
+	return sc, nil
+}
+
+// readClientPreface reads exactly 24 bytes and validates against
+// the HTTP/2 client preface magic (RFC 7540 §3.5).
+func readClientPreface(nc net.Conn) error {
+	buf := make([]byte, len(clientPreface))
+	if _, err := io.ReadFull(nc, buf); err != nil {
+		return fmt.Errorf("read preface: %w", err)
+	}
+	for i, b := range buf {
+		if b != clientPreface[i] {
+			return ErrBadPreface
+		}
+	}
+	return nil
+}
+
+// handshakeServerSettings runs the server-side SETTINGS exchange:
+//
+//   - Read client SETTINGS
+//   - Send SETTINGS ACK
+//   - Read client SETTINGS ACK for our SETTINGS
+//
+// Returns the client's SETTINGS.
+func handshakeServerSettings(ctx context.Context, fr *frame.Framer) (frame.SettingsParams, error) {
+	rec := &settingsRecorder{}
+	for !rec.peerSeen {
+		if err := readOneFrame(ctx, fr, rec); err != nil {
+			return frame.SettingsParams{}, fmt.Errorf("server read client settings: %w", err)
+		}
+	}
+	if err := fr.WriteSettingsAck(); err != nil {
+		return frame.SettingsParams{}, fmt.Errorf("server write settings ack: %w", err)
+	}
+	for !rec.ackSeen {
+		if err := readOneFrame(ctx, fr, rec); err != nil {
+			return frame.SettingsParams{}, fmt.Errorf("server read client ack: %w", err)
+		}
+	}
+	return rec.peer, nil
+}
+
+func readOneFrame(ctx context.Context, fr *frame.Framer, h frame.Handler) error {
+	_, err := fr.ReadFrame(ctx, h)
+	return err
+}
+
+// AcceptStream blocks until a new client-initiated stream arrives
+// (HEADERS frame on an idle stream ID). Returns the stream with
+// initial headers ready to read via Recv.
+func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
+	if sc.closed.Load() {
+		return nil, ErrConnClosed
+	}
+	select {
+	case ss, ok := <-sc.acceptCh:
+		if !ok {
+			return nil, ErrConnClosed
+		}
+		return ss, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Close sends GOAWAY(NO_ERROR) and closes the underlying connection.
+// Idempotent.
+func (sc *ServerConn) Close() error {
+	if !sc.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	sc.fcOutMu.Lock()
+	if sc.fcOutCond != nil {
+		sc.fcOutCond.Broadcast()
+	}
+	sc.fcOutMu.Unlock()
+
+	// Best-effort GOAWAY.
+	if dl, ok := sc.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
+	}
+	sc.wmu.Lock()
+	_ = sc.fr.WriteGoAway(sc.lastPeerStreamID(), frame.ErrCodeNoError, nil)
+	sc.wmu.Unlock()
+	_ = sc.transport.Close()
+	<-sc.readerDone
+	sc.fr.Close()
+	return nil
+}
+
+// Stats returns a point-in-time snapshot of connection counters.
+func (sc *ServerConn) Stats() ConnStats {
+	return ConnStats{
+		BytesSent:       sc.atomicBytesSent.Load(),
+		BytesReceived:   sc.atomicBytesReceived.Load(),
+		FramesSent:      sc.atomicFramesSent.Load(),
+		FramesReceived:  sc.atomicFramesReceived.Load(),
+		StreamsAccepted: sc.atomicStreamsAccepted.Load(),
+	}
+}
+
+func (sc *ServerConn) lastPeerStreamID() uint32 {
+	sc.smu.Lock()
+	defer sc.smu.Unlock()
+	maxID := uint32(0)
+	for id := range sc.streams {
+		if id > maxID {
+			maxID = id
+		}
+	}
+	return maxID
+}
+
+func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
+	for i := 0; i < peer.N; i++ {
+		p := peer.Pairs[i]
+		if p.ID == frame.SettingHeaderTableSize {
+			sc.enc.SetMaxDynamicTableSize(p.Value)
+		}
+	}
+}
+
+func (sc *ServerConn) bumpFramesSent() { sc.atomicFramesSent.Add(1) }
+
+// readerLoop reads frames from the connection and dispatches them.
+func (sc *ServerConn) readerLoop() {
+	defer close(sc.readerDone)
+	h := newServerConnHandler(sc, sc.dec)
+	for {
+		_, err := sc.fr.ReadFrame(context.Background(), h)
+		if err != nil {
+			sc.shutdownStreams(err)
+			return
+		}
+		sc.atomicFramesReceived.Add(1)
+	}
+}
+
+func (sc *ServerConn) shutdownStreams(reason error) {
+	sc.smu.Lock()
+	defer sc.smu.Unlock()
+	for _, s := range sc.streams {
+		select {
+		case s.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeInternalError, EndStream: true}:
+		default:
+		}
+		close(s.events)
+	}
+}
+
+// --- shared helpers ---
+
+// encodeAdvertised converts AdvertisedSettings to a SettingsParams frame payload.
+func encodeAdvertised(a AdvertisedSettings) frame.SettingsParams {
+	var p frame.SettingsParams
+	add := func(id frame.SettingID, v uint32) {
+		p.Pairs[p.N] = frame.SettingPair{ID: id, Value: v}
+		p.N++
+	}
+	add(frame.SettingHeaderTableSize, a.HeaderTableSize)
+	add(frame.SettingEnablePush, 0) // server never accepts push
+	add(frame.SettingMaxConcurrentStreams, a.MaxConcurrentStreams)
+	add(frame.SettingInitialWindowSize, a.InitialWindowSize)
+	add(frame.SettingMaxFrameSize, a.MaxFrameSize)
+	if a.MaxHeaderListSize != 0 {
+		add(frame.SettingMaxHeaderListSize, a.MaxHeaderListSize)
+	}
+	return p
+}
+
+// settingValue returns the value of `id` from `s` or `def` when not present.
+func settingValue(s frame.SettingsParams, id frame.SettingID, def uint32) uint32 {
+	for i := 0; i < s.N; i++ {
+		if s.Pairs[i].ID == id {
+			return s.Pairs[i].Value
+		}
+	}
+	return def
+}
+
+// AdvertisedSettings is what we send to the peer in our SETTINGS frame.
+// Zero values are replaced by RFC 7540 defaults.
+type AdvertisedSettings struct {
+	HeaderTableSize      uint32
+	MaxConcurrentStreams uint32
+	InitialWindowSize    uint32
+	MaxFrameSize         uint32
+	MaxHeaderListSize    uint32
+}
+
+func (s AdvertisedSettings) defaulted() AdvertisedSettings {
+	if s.HeaderTableSize == 0 {
+		s.HeaderTableSize = 4096
+	}
+	if s.MaxConcurrentStreams == 0 {
+		s.MaxConcurrentStreams = 100
+	}
+	if s.InitialWindowSize == 0 {
+		s.InitialWindowSize = 65535
+	}
+	if s.MaxFrameSize == 0 {
+		s.MaxFrameSize = 16384
+	}
+	return s
+}
+
+// connInitialRecvWindow is the connection-level recv window size.
+// RFC 7540 §6.9.2 fixes this at 65535.
+const connInitialRecvWindow = 65535
+
+// recvWindowRefundThreshold batches WINDOW_UPDATE at this granularity.
+const recvWindowRefundThreshold = 32768
+
+// closeGoAwayDeadline bounds GOAWAY write during Close.
+const closeGoAwayDeadline = 200 * time.Millisecond
+
+// settingsRecorder records the peer's SETTINGS and ACK state.
+type settingsRecorder struct {
+	peer     frame.SettingsParams
+	peerSeen bool
+	ackSeen  bool
+}
+
+func (r *settingsRecorder) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+func (r *settingsRecorder) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
+	return nil
+}
+func (r *settingsRecorder) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (r *settingsRecorder) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
+func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {
+	if fh.Flags&frame.FlagSettingsAck != 0 {
+		r.ackSeen = true
+		return nil
+	}
+	r.peer = s
+	r.peerSeen = true
+	return nil
+}
+func (r *settingsRecorder) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (r *settingsRecorder) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
+func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+
+var _ frame.Handler = (*settingsRecorder)(nil)
+
+// --- Error types ---
+
+var (
+	// ErrBadPreface is returned when the client sends an invalid
+	// HTTP/2 connection preface.
+	ErrBadPreface = errors.New("conn: invalid HTTP/2 client preface")
+	// ErrConnClosed is returned after the connection has been closed.
+	ErrConnClosed = errors.New("conn: connection closed")
+	// ErrStreamClosed is returned when operating on a closed stream.
+	ErrStreamClosed = errors.New("conn: stream already closed")
+)
