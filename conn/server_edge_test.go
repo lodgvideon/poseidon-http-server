@@ -3,6 +3,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -352,7 +353,7 @@ func TestServerConn_SendHeaders_AfterClosed(t *testing.T) {
 	// SendHeaders should fail.
 	if err := stream.SendHeaders(ctx, []hpack.HeaderField{
 		{Name: []byte(":status"), Value: []byte("200")},
-	}, true); err != ErrStreamClosed {
+	}, true); !errors.Is(err, ErrStreamClosed) {
 		t.Fatalf("SendHeaders after Close: err = %v, want ErrStreamClosed", err)
 	}
 }
@@ -400,7 +401,7 @@ func TestServerConn_SendData_AfterEndStream(t *testing.T) {
 	}
 
 	// SendData should fail because localEnded = true.
-	if err := stream.SendData(ctx, []byte("x"), false); err != ErrStreamClosed {
+	if err := stream.SendData(ctx, []byte("x"), false); !errors.Is(err, ErrStreamClosed) {
 		t.Fatalf("SendData after END_STREAM: err = %v, want ErrStreamClosed", err)
 	}
 }

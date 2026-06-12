@@ -3,6 +3,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -235,7 +236,7 @@ func TestServerConn_Ping_Roundtrip(t *testing.T) {
 	cli, srv := net.Pipe()
 	go pipeClient(t, cli, func(cliFr *frame.Framer) {
 		// Client reads server PING and echoes ACK.
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			ph := &pingCapture{}
 			fh, err := cliFr.ReadFrame(context.Background(), ph)
 			if err != nil {
@@ -281,7 +282,7 @@ func TestServerConn_Ping_AfterClose(t *testing.T) {
 	_ = sc.Close()
 
 	_, err = sc.Ping(ctx)
-	if err != ErrConnClosed {
+	if !errors.Is(err, ErrConnClosed) {
 		t.Fatalf("Ping after Close: err = %v, want ErrConnClosed", err)
 	}
 }

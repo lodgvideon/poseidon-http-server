@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -65,8 +66,8 @@ func TestServerConn_OnPushPromise_HandlerLevel(t *testing.T) {
 	if err == nil {
 		t.Fatal("OnPushPromise should return connection error")
 	}
-	ce, ok := err.(connError)
-	if !ok {
+	var ce connError
+	if !errors.As(err, &ce) {
 		t.Fatalf("error type = %T, want connError", err)
 	}
 	if ce.code != frame.ErrCodeProtocolError {

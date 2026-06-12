@@ -89,7 +89,7 @@ func TestServerConn_InboundFlowControl_WindowRefund(t *testing.T) {
 
 	// Read DATA events.
 	totalData := 0
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		ev, err = stream.Recv(ctx)
 		if err != nil {
 			t.Fatalf("Recv data[%d]: %v", i, err)
@@ -315,7 +315,7 @@ func TestServerConn_MultipleStreams(t *testing.T) {
 			}, true)
 		}
 		// Read responses.
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			hh := captureHandler{block: &bytes.Buffer{}}
 			if _, err := cliFr.ReadFrame(context.Background(), &hh); err != nil {
 				return
@@ -333,7 +333,7 @@ func TestServerConn_MultipleStreams(t *testing.T) {
 	}
 	defer sc.Close()
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		stream, err := sc.AcceptStream(ctx)
 		if err != nil {
 			t.Fatalf("AcceptStream[%d]: %v", i, err)

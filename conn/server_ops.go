@@ -102,14 +102,14 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 
 	sc.psMu.Lock()
 	oldInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	for i := 0; i < s.N; i++ {
+	for i := range s.N {
 		p := s.Pairs[i]
 		setPeerSetting(&sc.peerSettings, p.ID, p.Value)
 	}
 	newInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	sc.psMu.Unlock()
 
-	for i := 0; i < s.N; i++ {
+	for i := range s.N {
 		p := s.Pairs[i]
 		if p.ID == frame.SettingHeaderTableSize {
 			sc.enc.SetMaxDynamicTableSize(p.Value)
@@ -287,6 +287,11 @@ func (sc *ServerConn) writeServerData(ctx context.Context, ss *ServerStream, p [
 		return nil
 	}
 
+	return sc.writeServerDataChunks(ctx, ss, p, maxFrame, endStream)
+}
+
+// writeServerDataChunks sends p as one or more flow-controlled DATA frames.
+func (sc *ServerConn) writeServerDataChunks(ctx context.Context, ss *ServerStream, p []byte, maxFrame int, endStream bool) error {
 	for len(p) > 0 {
 		want := len(p)
 		if want > maxFrame {
@@ -395,7 +400,7 @@ func (sc *ServerConn) writeWindowUpdate(streamID, increment uint32) error {
 
 // setPeerSetting merges a SETTINGS pair into params.
 func setPeerSetting(params *frame.SettingsParams, id frame.SettingID, val uint32) {
-	for i := 0; i < params.N; i++ {
+	for i := range params.N {
 		if params.Pairs[i].ID == id {
 			params.Pairs[i].Value = val
 			return

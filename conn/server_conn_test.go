@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -137,7 +138,7 @@ func TestServerConn_AcceptStream_ReturnsErrAfterClose(t *testing.T) {
 	_ = sc.Close()
 
 	_, err = sc.AcceptStream(ctx)
-	if err != ErrConnClosed {
+	if !errors.Is(err, ErrConnClosed) {
 		t.Fatalf("AcceptStream after Close: err = %v, want ErrConnClosed", err)
 	}
 }

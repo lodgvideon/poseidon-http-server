@@ -6,42 +6,126 @@ run:
 linters:
   default: none
   enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - revive
-    - gosec
-    - unconvert
-    - misspell
-    - gocyclo
-    - unused
-    - prealloc
-    - ineffassign
+    # ─── Bugs & Correctness ───
+    - errcheck          # unchecked errors
+    - govet             # suspicious constructs
+    - staticcheck       # SA* diagnostics (bugs, perf, style)
+    - ineffassign        # dead assignments
+    - unused            # unused declarations
+    - nilerr            # return nil despite checking err != nil
+    - nilnil            # return (nil, nil) on failure
+    - nilnesserr        # checks err != nil but returns wrong nil
+    - wastedassign      # assignments overwritten before use
+    - copyloopvar       # loop variable copies (Go <1.22 compat)
+    - durationcheck     # duration * duration (always 0)
+    - makezero          # append to non-zero-length slice
+
+    # ─── Security ───
+    - gosec             # SQL injection, hardcoded creds, weak crypto
+
+    # ─── Code Quality & Smells ───
+    - revive            # golint replacement, configurable rules
+    - gocritic          # 100+ checks: bugs, perf, style
+    - gocyclo           # cyclomatic complexity
+    - gocognit          # cognitive complexity (harder metric)
+    - funlen            # function length
+    - nestif            # nesting depth
+    - unconvert         # unnecessary type conversions
+    - unparam           # unused function parameters
+    - prealloc          # slice preallocation hints
+    - misspell          # typos in comments
+    - dupl              # code clone detection
+    - goconst           # repeated strings → constants
+    - nakedret          # naked returns in long functions
+    - exhaustive        # switch exhaustiveness for enums
+    - errname           # Err prefix for sentinels, Error suffix for types
+    - errorlint         # proper error wrapping (errors.Is/As)
+    - maintidx          # maintainability index
+
+    # ─── Zero-allocation enforcement ───
+    - bodyclose         # HTTP response body closed (important for pooled conns)
+    - intrange          # for i := 0; i < n → for i := range n
+    - mirror            # wrong bytes/strings mirror (avoids copies)
+
+    # ─── Interface hygiene (SOLID) ───
+    - interfacebloat    # too many methods in interface (ISP violation)
+    - iface             # incorrect interface usage detection
+
   settings:
     gocyclo:
-      min-complexity: 25
+      min-complexity: 20
+    gocognit:
+      min-complexity: 30
+    funlen:
+      lines: 80
+      statements: 60
+    nestif:
+      min-depth: 4
+    dupl:
+      threshold: 100
+    goconst:
+      min-len: 3
+      min-occurrences: 4
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+      disabled-checks:
+        - hugeParam        # server streams are pointers by design
+        - rangeValCopy     # false positives on small structs
+        - exitAfterDefer   # test files use t.Fatal after defer
     gosec:
       excludes:
-        - G115
-        - G402
-        - G404
+        - G115             # int32/int64 overflow — flow control values always < 2^31
+        - G402             # TLS config — we manage TLS ourselves
+        - G404             # weak random — non-crypto use
     govet:
       enable-all: true
       disable:
-        - fieldalignment
-        - shadow
+        - fieldalignment   # structs ordered for readability, not padding
+        - shadow           # too many false positives
     revive:
       rules:
         - name: unused-parameter
-          disabled: true
+          disabled: true   # interfaces require full signatures
         - name: exported
           arguments:
             - disableStutteringCheck
             - disableChecksOnConstants
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: increment-decrement
+        - name: var-naming
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: unnecessary-stmt
+        - name: early-return
+    interfacebloat:
+      max: 12             # ISP: no interface > 12 methods
+    maintidx:
+      under: 20           # maintainability index threshold
+
   exclusions:
     rules:
       - path: _test\.go$
-        linters: [errcheck]
+        linters:
+          - errcheck
+          - dupl           # test code often has legitimate duplication
+          - funlen         # table-driven tests are long
+          - gocognit
+          - gocyclo
+          - maintidx
+          - goconst
 
 issues:
   max-issues-per-linter: 0

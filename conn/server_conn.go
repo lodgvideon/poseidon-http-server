@@ -279,7 +279,7 @@ func (sc *ServerConn) lastPeerStreamID() uint32 {
 }
 
 func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
-	for i := 0; i < peer.N; i++ {
+	for i := range peer.N {
 		p := peer.Pairs[i]
 		if p.ID == frame.SettingHeaderTableSize {
 			sc.enc.SetMaxDynamicTableSize(p.Value)
@@ -452,7 +452,7 @@ func encodeAdvertised(a AdvertisedSettings) frame.SettingsParams {
 
 // settingValue returns the value of `id` from `s` or `def` when not present.
 func settingValue(s frame.SettingsParams, id frame.SettingID, def uint32) uint32 {
-	for i := 0; i < s.N; i++ {
+	for i := range s.N {
 		if s.Pairs[i].ID == id {
 			return s.Pairs[i].Value
 		}
