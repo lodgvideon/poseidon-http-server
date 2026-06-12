@@ -32,6 +32,12 @@ type Options struct {
 	MaxConcurrentConnections int
 	GracefulShutdownTimeout  time.Duration
 	Logger                   Logger
+
+	// H2C enables HTTP/2 cleartext (prior knowledge + HTTP/1.1 Upgrade).
+	// When false (default), the server expects direct HTTP/2 connections
+	// (typically over TLS). When true, the server detects HTTP/1.1 Upgrade
+	// requests and responds with 101 Switching Protocols.
+	H2C bool
 }
 
 func (o Options) validate() error {
@@ -120,7 +126,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			nc.Close()
 			continue
 		}
-		go s.serveConn(ctx, nc)
+		go func() {
+			if s.opts.H2C {
+				s.detectAndServe(ctx, nc)
+			} else {
+				s.serveConn(ctx, nc)
+			}
+		}()
 	}
 }
 
