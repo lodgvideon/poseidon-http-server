@@ -1,0 +1,48 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gosec
+    - unconvert
+    - misspell
+    - gocyclo
+    - unused
+    - prealloc
+    - ineffassign
+  settings:
+    gocyclo:
+      min-complexity: 25
+    gosec:
+      excludes:
+        - G115
+        - G402
+        - G404
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+            - disableChecksOnConstants
+  exclusions:
+    rules:
+      - path: _test\.go$
+        linters: [errcheck]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
