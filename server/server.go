@@ -38,6 +38,10 @@ type Options struct {
 	// (typically over TLS). When true, the server detects HTTP/1.1 Upgrade
 	// requests and responds with 101 Switching Protocols.
 	H2C bool
+
+	// StreamingBody enables io.ReadCloser body instead of buffering.
+	// When true, Request.BodyReader is set and Body is nil.
+	StreamingBody bool
 }
 
 func (o Options) validate() error {
@@ -160,6 +164,36 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 
 func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 	var req *Request
+
+	// Read HEADERS first.
+	ev, err := stream.Recv(ctx)
+	if err != nil {
+		return
+	}
+	if ev.Type != conn.EventHeaders {
+		_ = stream.Close()
+		return
+	}
+
+	req = s.buildRequest(ev.Headers, stream.ID())
+	if ev.EndStream {
+		s.dispatchAndClose(ctx, stream, req)
+		return
+	}
+
+	// Streaming mode: attach io.ReadCloser and dispatch immediately.
+	if s.opts.StreamingBody {
+		req.BodyReader = newStreamBody(ctx, stream)
+		s.dispatchAndClose(ctx, stream, req)
+		return
+	}
+
+	// Buffered mode: collect DATA frames then dispatch.
+	s.serveStreamBuffered(ctx, stream, req)
+}
+
+// serveStreamBuffered collects DATA/Trailers frames and dispatches.
+func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStream, req *Request) {
 	var bodyChunks [][]byte
 	for {
 		ev, err := stream.Recv(ctx)
@@ -167,37 +201,27 @@ func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 			return
 		}
 		switch ev.Type {
-		case conn.EventHeaders:
-			req = s.buildRequest(ev.Headers, stream.ID())
-			if ev.EndStream {
-				s.dispatchAndClose(ctx, stream, req)
-				return
-			}
 		case conn.EventData:
 			if ev.Data != nil {
 				bodyChunks = append(bodyChunks, ev.Data)
 			}
 			if ev.EndStream {
-				if req != nil {
-					req.Body = joinChunks(bodyChunks)
-				}
+				req.Body = joinChunks(bodyChunks)
 				s.dispatchAndClose(ctx, stream, req)
 				return
 			}
 		case conn.EventTrailers:
-			if req != nil {
-				req.Trailers = ev.Headers
-			}
+			req.Trailers = ev.Headers
 			if ev.EndStream {
-				if req != nil {
-					req.Body = joinChunks(bodyChunks)
-				}
+				req.Body = joinChunks(bodyChunks)
 				s.dispatchAndClose(ctx, stream, req)
 				return
 			}
 		case conn.EventReset:
 			_ = stream.Close()
 			return
+		case conn.EventHeaders:
+			// Extra HEADERS (illegal mid-stream), ignore.
 		}
 	}
 }
