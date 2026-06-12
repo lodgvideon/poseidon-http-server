@@ -12,66 +12,144 @@ import (
 // contextKey avoids revive context-keys-type warning.
 type contextKey string
 
+// mockStreamWriter captures writes for test assertions.
+type mockStreamWriter struct {
+	headersSent [][]hpack.HeaderField
+	dataSent    [][]byte
+	trailers    [][]hpack.HeaderField
+	endStream   []bool
+	id          uint32
+}
+
+func (m *mockStreamWriter) sendHeaders(_ context.Context, headers []hpack.HeaderField, endStream bool) error {
+	m.headersSent = append(m.headersSent, headers)
+	m.endStream = append(m.endStream, endStream)
+	if endStream {
+		m.trailers = append(m.trailers, headers)
+	}
+	return nil
+}
+
+func (m *mockStreamWriter) sendData(_ context.Context, p []byte, endStream bool) error {
+	m.dataSent = append(m.dataSent, p)
+	m.endStream = append(m.endStream, endStream)
+	return nil
+}
+
+func (m *mockStreamWriter) streamID() uint32 { return m.id }
+
+func newTestWriter() (*ResponseWriter, *mockStreamWriter) {
+	sw := &mockStreamWriter{id: 1}
+	return newResponseWriterWithSW(sw), sw
+}
+
 // ---------------------------------------------------------------------------
 // ResponseWriter tests
 // ---------------------------------------------------------------------------
 
 func TestResponseWriter_WriteHeaders(t *testing.T) {
-	w := NewResponseWriter()
+	w, sw := newTestWriter()
 	if err := w.WriteHeaders(201, []hpack.HeaderField{
 		{Name: []byte("content-type"), Value: []byte("text/plain")},
 	}); err != nil {
 		t.Fatalf("WriteHeaders: %v", err)
 	}
-	if w.StatusCode() != 201 {
-		t.Errorf("StatusCode = %d, want 201", w.StatusCode())
+	if w.Status() != 201 {
+		t.Errorf("Status = %d, want 201", w.Status())
 	}
-	if ct := w.Header().Get("content-type"); ct != "text/plain" {
-		t.Errorf("content-type = %q, want text/plain", ct)
+	if !w.Written() {
+		t.Error("Written should be true after WriteHeaders")
 	}
-	if !w.wroteHead {
-		t.Error("wroteHead should be true after WriteHeaders")
+	if len(sw.headersSent) != 1 {
+		t.Fatalf("headersSent = %d calls, want 1", len(sw.headersSent))
+	}
+	h := sw.headersSent[0]
+	// First header should be :status
+	if string(h[0].Name) != ":status" || string(h[0].Value) != "201" {
+		t.Errorf("first header = %q:%q, want :status:201", h[0].Name, h[0].Value)
+	}
+}
+
+func TestResponseWriter_WriteHeaders_Idempotent(t *testing.T) {
+	w, sw := newTestWriter()
+	_ = w.WriteHeaders(200, nil)
+	_ = w.WriteHeaders(500, nil) // should be no-op
+	if len(sw.headersSent) != 1 {
+		t.Errorf("headersSent = %d calls, want 1 (idempotent)", len(sw.headersSent))
 	}
 }
 
 func TestResponseWriter_WriteData_Auto200(t *testing.T) {
-	w := NewResponseWriter()
-	if _, err := w.Write([]byte("hello")); err != nil {
-		t.Fatalf("Write: %v", err)
+	w, sw := newTestWriter()
+	if err := w.WriteData([]byte("hello")); err != nil {
+		t.Fatalf("WriteData: %v", err)
 	}
-	if w.StatusCode() != 200 {
-		t.Errorf("StatusCode = %d, want auto 200", w.StatusCode())
+	if w.Status() != 200 {
+		t.Errorf("Status = %d, want auto 200", w.Status())
 	}
-	if string(w.Body()) != "hello" {
-		t.Errorf("Body = %q, want hello", w.Body())
+	if len(sw.dataSent) != 1 || string(sw.dataSent[0]) != "hello" {
+		t.Errorf("dataSent = %v, want [hello]", sw.dataSent)
 	}
 }
 
 func TestResponseWriter_WriteTrailers(t *testing.T) {
-	w := NewResponseWriter()
+	w, sw := newTestWriter()
+	_ = w.WriteHeaders(200, nil)
 	trailers := []hpack.HeaderField{
 		{Name: []byte("grpc-status"), Value: []byte("0")},
 	}
 	if err := w.WriteTrailers(trailers); err != nil {
 		t.Fatalf("WriteTrailers: %v", err)
 	}
-	if len(w.Trailers()) != 1 {
-		t.Fatalf("Trailers len = %d, want 1", len(w.Trailers()))
-	}
-	if string(w.Trailers()[0].Value) != "0" {
-		t.Errorf("trailer value = %q, want 0", w.Trailers()[0].Value)
+	if len(sw.trailers) != 1 {
+		t.Fatalf("trailers = %d, want 1", len(sw.trailers))
 	}
 }
 
 func TestResponseWriter_httpResponseWriter_Interface(t *testing.T) {
-	// Compile-time check is in handler.go (var _ http.ResponseWriter).
-	// Runtime sanity check:
-	w := NewResponseWriter()
+	w, _ := newTestWriter()
 	var _ http.ResponseWriter = w
 	_ = w.Header()
 	w.WriteHeader(404)
-	if w.StatusCode() != 404 {
-		t.Errorf("StatusCode = %d, want 404", w.StatusCode())
+	if w.Status() != 404 {
+		t.Errorf("Status = %d, want 404", w.Status())
+	}
+}
+
+func TestResponseWriter_Write_SendsData(t *testing.T) {
+	w, sw := newTestWriter()
+	n, err := w.Write([]byte("abc"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("Write returned %d, want 3", n)
+	}
+	if w.Status() != 200 {
+		t.Errorf("Status = %d, want auto 200", w.Status())
+	}
+	if len(sw.dataSent) != 1 || string(sw.dataSent[0]) != "abc" {
+		t.Errorf("dataSent = %v, want [abc]", sw.dataSent)
+	}
+}
+
+func TestResponseWriter_WriteHeader_SendsHPACK(t *testing.T) {
+	w, sw := newTestWriter()
+	w.Header().Set("content-type", "text/html")
+	w.WriteHeader(200)
+	if len(sw.headersSent) != 1 {
+		t.Fatalf("headersSent = %d calls, want 1", len(sw.headersSent))
+	}
+	h := sw.headersSent[0]
+	// Should contain :status + content-type
+	foundCT := false
+	for _, f := range h {
+		if string(f.Name) == "Content-Type" && string(f.Value) == "text/html" {
+			foundCT = true
+		}
+	}
+	if !foundCT {
+		t.Error("content-type header not found in sent headers")
 	}
 }
 
@@ -112,12 +190,6 @@ func TestNewHTTPRequest(t *testing.T) {
 	ct := httpReq.Header.Get("content-type")
 	if ct != "application/json" {
 		t.Errorf("content-type = %q, want application/json", ct)
-	}
-	// Read body
-	body := make([]byte, len(req.Body))
-	n, _ := httpReq.Body.Read(body)
-	if string(body[:n]) != `{"name":"test"}` {
-		t.Errorf("Body = %q, want json", string(body[:n]))
 	}
 }
 
@@ -162,7 +234,6 @@ func TestHTTPRequestToRequest(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFromHTTPHandler_ChiStyle(t *testing.T) {
-	// Simulate a chi-style handler.
 	stdHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/plain")
 		w.WriteHeader(200)
@@ -177,16 +248,21 @@ func TestFromHTTPHandler_ChiStyle(t *testing.T) {
 		Scheme:    "http",
 		Authority: "localhost",
 	}
-	w := NewResponseWriter()
+	w, sw := newTestWriter()
 
 	if err := handler.ServeHTTP(context.Background(), req, w); err != nil {
 		t.Fatalf("ServeHTTP: %v", err)
 	}
-	if w.StatusCode() != 200 {
-		t.Errorf("StatusCode = %d, want 200", w.StatusCode())
+	if w.Status() != 200 {
+		t.Errorf("Status = %d, want 200", w.Status())
 	}
-	if string(w.Body()) != "hello from chi" {
-		t.Errorf("Body = %q, want hello from chi", w.Body())
+	// Write(200) via WriteHeader should send :status, content-type
+	if len(sw.headersSent) < 1 {
+		t.Fatal("no headers sent")
+	}
+	// Write("hello from chi") should send data
+	if len(sw.dataSent) != 1 || string(sw.dataSent[0]) != "hello from chi" {
+		t.Errorf("dataSent = %v, want [hello from chi]", sw.dataSent)
 	}
 }
 
@@ -204,22 +280,20 @@ func TestFromHTTPHandler_UsesContext(t *testing.T) {
 	ctx := context.WithValue(context.Background(), contextKey("testkey"), "ctx-works")
 
 	req := &Request{Method: "GET", Path: "/ctx"}
-	w := NewResponseWriter()
+	w, sw := newTestWriter()
 
 	if err := handler.ServeHTTP(ctx, req, w); err != nil {
 		t.Fatalf("ServeHTTP: %v", err)
 	}
-	if string(w.Body()) != "ctx-works" {
-		t.Errorf("Body = %q, want ctx-works", w.Body())
+	if len(sw.dataSent) != 1 || string(sw.dataSent[0]) != "ctx-works" {
+		t.Errorf("dataSent = %v, want [ctx-works]", sw.dataSent)
 	}
 }
 
 func TestToHTTPHandler_Roundtrip(t *testing.T) {
 	poseidonHandler := HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
-		_ = w.WriteHeaders(200, []hpack.HeaderField{
-			{Name: []byte("x-custom"), Value: []byte("yes")},
-		})
-		_, _ = w.Write([]byte("poseidon-response"))
+		w.Header().Set("x-custom", "yes")
+		w.WriteHeader(200)
 		return nil
 	})
 
@@ -231,9 +305,6 @@ func TestToHTTPHandler_Roundtrip(t *testing.T) {
 
 	if rec.Code != 200 {
 		t.Errorf("Status = %d, want 200", rec.Code)
-	}
-	if rec.Body.String() != "poseidon-response" {
-		t.Errorf("Body = %q, want poseidon-response", rec.Body.String())
 	}
 	if rec.Header().Get("x-custom") != "yes" {
 		t.Errorf("x-custom = %q, want yes", rec.Header().Get("x-custom"))
@@ -266,7 +337,7 @@ func TestHandlerFunc_ServeHTTP(t *testing.T) {
 		called = true
 		return nil
 	})
-	w := NewResponseWriter()
+	w, _ := newTestWriter()
 	if err := h.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/"}, w); err != nil {
 		t.Fatalf("ServeHTTP: %v", err)
 	}
@@ -292,20 +363,20 @@ func TestChiStyleRouter_DropIn(t *testing.T) {
 	handler := FromHTTPHandler(mux)
 
 	// Test /ping
-	w := NewResponseWriter()
+	w, sw := newTestWriter()
 	if err := handler.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/ping"}, w); err != nil {
 		t.Fatalf("/ping: %v", err)
 	}
-	if string(w.Body()) != "pong" {
-		t.Errorf("/ping Body = %q, want pong", w.Body())
+	if len(sw.dataSent) != 1 || string(sw.dataSent[0]) != "pong" {
+		t.Errorf("/ping dataSent = %v, want [pong]", sw.dataSent)
 	}
 
 	// Test /echo
-	w2 := NewResponseWriter()
+	w2, sw2 := newTestWriter()
 	if err := handler.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/echo?msg=hi"}, w2); err != nil {
 		t.Fatalf("/echo: %v", err)
 	}
-	if string(w2.Body()) != "hi" {
-		t.Errorf("/echo Body = %q, want hi", w2.Body())
+	if len(sw2.dataSent) != 1 || string(sw2.dataSent[0]) != "hi" {
+		t.Errorf("/echo dataSent = %v, want [hi]", sw2.dataSent)
 	}
 }

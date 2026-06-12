@@ -1,126 +1,239 @@
-// Package server provides a high-level HTTP/2 server built on the conn layer.
+// Package server provides a high-level HTTP/2 server built on the conn package.
 //
-// The server package accepts either a native [Handler] or any [http.Handler]
-// (chi.Router, http.ServeMux, http.HandlerFunc, etc.) and dispatches incoming
-// HTTP/2 streams to the handler. The [ResponseWriter] implements
-// [http.ResponseWriter], so standard middleware works unchanged.
+// It handles TLS + h2c listening, accepts connections, dispatches inbound
+// streams to registered handlers, and manages graceful shutdown.
+//
+// Design (SOLID):
+//   - S: owns only the accept loop + routing
+//   - O: extensible via Handler interface and Middleware chain
+//   - L: any Handler implementation is interchangeable
+//   - I: small interfaces — Handler, Middleware, Listener
+//   - D: depends on Listener and Handler interfaces, not concrete types
 package server
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-server/conn"
 )
 
 // ---------------------------------------------------------------------------
-// Native Poseidon handler (zero-allocation path)
+// Handler interface
 // ---------------------------------------------------------------------------
 
-// Handler processes a single HTTP/2 request.
+// Handler is the native zero-allocation HTTP/2 handler interface.
+// Implementations must be safe for concurrent use if registered on a
+// shared server; the server dispatches each stream to the handler in its
+// own goroutine.
 type Handler interface {
 	ServeHTTP(ctx context.Context, req *Request, w *ResponseWriter) error
 }
 
-// HandlerFunc is a convenience adapter for Handler.
+// HandlerFunc is a type adapter that allows the use of ordinary functions
+// as Handler values.
 type HandlerFunc func(ctx context.Context, req *Request, w *ResponseWriter) error
 
-// ServeHTTP implements Handler.
+// ServeHTTP calls f(ctx, req, w).
 func (f HandlerFunc) ServeHTTP(ctx context.Context, req *Request, w *ResponseWriter) error {
 	return f(ctx, req, w)
 }
 
 // ---------------------------------------------------------------------------
-// Request / Response types
+// Request
 // ---------------------------------------------------------------------------
 
 // Request represents a server-side HTTP/2 request.
 type Request struct {
-	// Method is the HTTP method (GET, POST, etc.).
-	Method string
+	Method     string
+	Path       string
+	Scheme     string // "https" or "http" (h2c)
+	Authority  string // :authority pseudo-header
+	Headers    []hpack.HeaderField
+	Body       []byte         // collected body; nil if streaming
+	BodyReader io.ReadCloser  // streaming body reader; nil if collected
 
-	// Path is the :path pseudo-header value.
-	Path string
-
-	// Scheme is the :scheme pseudo-header value ("http" or "https").
-	Scheme string
-
-	// Authority is the :authority pseudo-header value (host:port).
-	Authority string
-
-	// Headers contains all non-pseudo request headers.
-	Headers []hpack.HeaderField
-
-	// Body is the collected request body. Nil until fully received.
-	Body []byte
+	streamID uint32 // internal: HTTP/2 stream identifier
 }
 
-// ResponseWriter writes an HTTP/2 response. It also implements
-// [http.ResponseWriter] so that standard net/http middleware works.
+// StreamID returns the HTTP/2 stream identifier for this request.
+func (r *Request) StreamID() uint32 { return r.streamID }
+
+// ---------------------------------------------------------------------------
+// Internal stream writer abstraction
+// ---------------------------------------------------------------------------
+
+// streamWriter abstracts the underlying stream write operations so that
+// tests can provide mocks without needing a real conn.ServerStream.
+type streamWriter interface {
+	sendHeaders(ctx context.Context, headers []hpack.HeaderField, endStream bool) error
+	sendData(ctx context.Context, p []byte, endStream bool) error
+	streamID() uint32
+}
+
+// connStreamWriter adapts *conn.ServerStream to the streamWriter interface.
+type connStreamWriter struct {
+	stream *conn.ServerStream
+}
+
+func (w *connStreamWriter) sendHeaders(ctx context.Context, headers []hpack.HeaderField, endStream bool) error {
+	return w.stream.SendHeaders(ctx, headers, endStream)
+}
+
+func (w *connStreamWriter) sendData(ctx context.Context, p []byte, endStream bool) error {
+	return w.stream.SendData(ctx, p, endStream)
+}
+
+func (w *connStreamWriter) streamID() uint32 {
+	return w.stream.ID()
+}
+
+// ---------------------------------------------------------------------------
+// ResponseWriter
+// ---------------------------------------------------------------------------
+
+// ResponseWriter implements both native Poseidon methods and the
+// http.ResponseWriter interface, allowing handlers to use either API.
+//
+// Native (zero-allocation) path:
+//
+//	w.WriteHeaders(200, hpackHeaders)
+//	w.WriteData(body)
+//	w.WriteTrailers(trailers)
+//
+// Stdlib-compatible path:
+//
+//	w.Header().Set("Content-Type", "text/plain")
+//	w.WriteHeader(200)
+//	w.Write(body)
 type ResponseWriter struct {
-	statusCode int
-	headers    http.Header
-	wroteHead  bool
-	body       []byte
-	trailers   []hpack.HeaderField
+	sw      streamWriter
+	headers http.Header
+	status  int
+	written bool
 }
 
-// WriteHeaders sends the response HEADERS frame.
+// NewResponseWriter creates a ResponseWriter backed by the given ServerStream.
+func NewResponseWriter(stream *conn.ServerStream) *ResponseWriter {
+	return &ResponseWriter{
+		sw: &connStreamWriter{stream: stream},
+	}
+}
+
+// newResponseWriterWithSW creates a ResponseWriter with a custom streamWriter
+// (for testing).
+func newResponseWriterWithSW(sw streamWriter) *ResponseWriter {
+	return &ResponseWriter{sw: sw}
+}
+
+// StatusCode returns the HTTP status code that was set via WriteHeaders or
+// WriteHeader. Returns 0 if no status has been set yet.
+func (w *ResponseWriter) StatusCode() int { return w.status }
+
+// Compile-time interface check.
+var _ http.ResponseWriter = (*ResponseWriter)(nil)
+
+// --- Native Poseidon methods ------------------------------------------------
+
+// WriteHeaders sends response headers with the given status code and extra
+// HPACK header fields. If headers have already been sent this is a no-op.
 func (w *ResponseWriter) WriteHeaders(status int, headers []hpack.HeaderField) error {
-	w.statusCode = status
-	w.wroteHead = true
-	for _, h := range headers {
-		w.headers.Set(string(h.Name), string(h.Value))
+	if w.written {
+		return nil
 	}
-	return nil
+	w.status = status
+	w.written = true
+
+	fields := make([]hpack.HeaderField, 0, 1+len(headers))
+	fields = append(fields, hpack.HeaderField{
+		Name:  []byte(":status"),
+		Value: []byte(strconv.Itoa(status)),
+	})
+	fields = append(fields, headers...)
+
+	return w.sw.sendHeaders(context.Background(), fields, false)
 }
 
-// WriteData appends response body data.
+// WriteData sends response body data. If headers have not been sent yet it
+// auto-sends a 200 response before writing data.
 func (w *ResponseWriter) WriteData(p []byte) error {
-	if !w.wroteHead {
-		_ = w.WriteHeaders(200, nil)
+	if !w.written {
+		if err := w.WriteHeaders(http.StatusOK, nil); err != nil {
+			return err
+		}
 	}
-	w.body = append(w.body, p...)
-	return nil
+	return w.sw.sendData(context.Background(), p, false)
 }
 
-// WriteTrailers sets the response trailers.
+// WriteTrailers sends trailing headers using SendHeaders with endStream=true
+// (the conn package does not expose a dedicated trailer method).
 func (w *ResponseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
-	w.trailers = trailers
-	return nil
+	return w.sw.sendHeaders(context.Background(), trailers, true)
 }
 
-// StatusCode returns the status code set via WriteHeaders.
-func (w *ResponseWriter) StatusCode() int { return w.statusCode }
+// --- http.ResponseWriter interface ------------------------------------------
 
-// Body returns the accumulated response body.
-func (w *ResponseWriter) Body() []byte { return w.body }
+// Header returns the header map that will be sent by WriteHeader.
+// Lazy-initialised on first access.
+func (w *ResponseWriter) Header() http.Header {
+	if w.headers == nil {
+		w.headers = make(http.Header)
+	}
+	return w.headers
+}
 
-// Trailers returns the response trailers.
-func (w *ResponseWriter) Trailers() []hpack.HeaderField { return w.trailers }
-
-// ---------------------------------------------------------------------------
-// http.ResponseWriter compatibility
-// ---------------------------------------------------------------------------
-
-// Header implements http.ResponseWriter.
-func (w *ResponseWriter) Header() http.Header { return w.headers }
-
-// Write implements http.ResponseWriter.
+// Write sends response body data, implementing io.Writer. If headers have not
+// been sent yet, auto-sends a 200 response.
 func (w *ResponseWriter) Write(p []byte) (int, error) {
-	if err := w.WriteData(p); err != nil {
+	if !w.written {
+		w.WriteHeader(http.StatusOK)
+	}
+	if err := w.sw.sendData(context.Background(), p, false); err != nil {
 		return 0, err
 	}
 	return len(p), nil
 }
 
-// WriteHeader implements http.ResponseWriter.
+// WriteHeader sends an HTTP response header with the provided status code.
+// If headers have already been sent (via WriteHeaders or a prior WriteHeader
+// call) this is a no-op, matching stdlib behaviour.
 func (w *ResponseWriter) WriteHeader(statusCode int) {
-	_ = w.WriteHeaders(statusCode, nil)
+	if w.written {
+		return
+	}
+	w.status = statusCode
+	w.written = true
+
+	// Build HPACK fields from stored http.Header.
+	hdr := w.headers
+	if hdr == nil {
+		hdr = make(http.Header)
+	}
+	fields := make([]hpack.HeaderField, 0, 1+len(hdr))
+	fields = append(fields, hpack.HeaderField{
+		Name:  []byte(":status"),
+		Value: []byte(strconv.Itoa(statusCode)),
+	})
+	for k, vv := range hdr {
+		for _, v := range vv {
+			fields = append(fields, hpack.HeaderField{
+				Name:  []byte(k),
+				Value: []byte(v),
+			})
+		}
+	}
+
+	_ = w.sw.sendHeaders(context.Background(), fields, false)
 }
 
-// compile-time check
-var _ http.ResponseWriter = (*ResponseWriter)(nil)
+// Status returns the HTTP status code set via WriteHeaders or WriteHeader.
+func (w *ResponseWriter) Status() int { return w.status }
+
+// Written reports whether headers have been sent.
+func (w *ResponseWriter) Written() bool { return w.written }
 
 // ---------------------------------------------------------------------------
 // Adapters: http.Handler ↔ Handler
@@ -144,7 +257,8 @@ func FromHTTPHandler(h http.Handler) Handler {
 func ToHTTPHandler(h Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req := HTTPRequestToRequest(r)
-		pw := NewResponseWriter()
+		// We use a discard streamWriter since ToHTTPHandler is a bridge.
+		pw := newResponseWriterWithSW(&discardStreamWriter{})
 		if err := h.ServeHTTP(r.Context(), req, pw); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -154,21 +268,26 @@ func ToHTTPHandler(h Handler) http.Handler {
 				w.Header().Add(k, v)
 			}
 		}
-		if pw.StatusCode() > 0 {
-			w.WriteHeader(pw.StatusCode())
+		if pw.Status() > 0 {
+			w.WriteHeader(pw.Status())
 		}
-		_, _ = w.Write(pw.Body())
 	})
 }
+
+// discardStreamWriter is a no-op streamWriter for adapter use.
+type discardStreamWriter struct{}
+
+func (*discardStreamWriter) sendHeaders(_ context.Context, _ []hpack.HeaderField, _ bool) error {
+	return nil
+}
+func (*discardStreamWriter) sendData(_ context.Context, _ []byte, _ bool) error {
+	return nil
+}
+func (*discardStreamWriter) streamID() uint32 { return 0 }
 
 // ---------------------------------------------------------------------------
 // Conversion helpers
 // ---------------------------------------------------------------------------
-
-// NewResponseWriter creates a zero-value ResponseWriter.
-func NewResponseWriter() *ResponseWriter {
-	return &ResponseWriter{headers: make(http.Header)}
-}
 
 // NewHTTPRequest builds a standard [http.Request] from a Poseidon [Request].
 func NewHTTPRequest(req *Request) (*http.Request, error) {
@@ -223,7 +342,7 @@ type closeableReader struct {
 
 func (r *closeableReader) Read(p []byte) (int, error) {
 	if r.pos >= len(r.data) {
-		return 0, http.ErrBodyReadAfterClose
+		return 0, io.EOF
 	}
 	n := copy(p, r.data[r.pos:])
 	r.pos += n
