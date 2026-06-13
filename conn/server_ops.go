@@ -339,7 +339,50 @@ func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, 
 	if want <= 0 {
 		return 0, nil
 	}
-	// Watchdog to wake on ctx cancel.
+
+	sc.fcOutMu.Lock()
+	defer sc.fcOutMu.Unlock()
+	for {
+		if sc.closed.Load() {
+			return 0, ErrConnClosed
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		ss.mu.Lock()
+		streamWin := ss.sendWindow
+		ss.mu.Unlock()
+		connWin := sc.peerConnSendWindow
+		avail := streamWin
+		if connWin < avail {
+			avail = connWin
+		}
+		if avail > 0 {
+				n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+			if n > avail {
+				n = avail
+			}
+			sc.peerConnSendWindow -= n
+			ss.mu.Lock()
+			ss.sendWindow -= n
+			ss.mu.Unlock()
+			return int(n), nil
+		}
+		// Only spawn watchdog goroutine when we actually need to wait
+		// and the context might be cancelled (non-background contexts).
+		if ctx.Done() != nil {
+			sc.fcOutMu.Unlock()
+			n, err := sc.acquireSendCreditsSlow(ctx, ss, want)
+			sc.fcOutMu.Lock()
+			return n, err
+		}
+		sc.fcOutCond.Wait()
+	}
+}
+
+// acquireSendCreditsSlow is the slow path that spawns a watchdog goroutine
+// to wake the condition variable when the context is cancelled.
+func (sc *ServerConn) acquireSendCreditsSlow(ctx context.Context, ss *ServerStream, want int) (int, error) {
 	watchdog := make(chan struct{})
 	defer close(watchdog)
 	go func() {
@@ -370,7 +413,7 @@ func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, 
 			avail = connWin
 		}
 		if avail > 0 {
-						n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+				n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
 			if n > avail {
 				n = avail
 			}

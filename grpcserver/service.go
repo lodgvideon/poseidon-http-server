@@ -312,10 +312,12 @@ func isGRPCContentType(headers []hpack.HeaderField) bool {
 }
 
 // grpcResponseHeaders returns the required response headers for gRPC.
+var grpcResponseHeadersSlice = []hpack.HeaderField{
+	{Name: sContentType, Value: sContentGRPC},
+}
+
 func grpcResponseHeaders() []hpack.HeaderField {
-	return []hpack.HeaderField{
-		{Name: []byte(HeaderContentType), Value: []byte(ContentTypeGRPC)},
-	}
+	return grpcResponseHeadersSlice
 }
 
 // writeGRPCError sends a gRPC error as headers + trailers (no body).
@@ -332,10 +334,18 @@ func writeGRPCError(w *server.ResponseWriter, st RPCStatus) error {
 // statusToHPack converts an RPCStatus to HPACK trailer fields.
 func statusToHPack(st RPCStatus) []hpack.HeaderField {
 	return []hpack.HeaderField{
-		{Name: []byte(HeaderGRPCStatus), Value: []byte(codeToString(st.Code))},
-		{Name: []byte(HeaderGRPCMessage), Value: []byte(st.Message)},
+		{Name: sGRPCStatus, Value: []byte(uint32ToString(uint32(st.Code)))},
+		{Name: sGRPCMessage, Value: []byte(st.Message)},
 	}
 }
+
+// Pre-allocated header name byte slices (avoid per-call []byte conversion).
+var (
+	sGRPCStatus  = []byte(HeaderGRPCStatus)
+	sGRPCMessage = []byte(HeaderGRPCMessage)
+	sContentType = []byte(HeaderContentType)
+	sContentGRPC = []byte(ContentTypeGRPC)
+)
 
 // errToStatus converts an error to RPCStatus. If the error already is
 // an RPCStatus, it is returned directly; otherwise Internal is used.
@@ -377,12 +387,15 @@ func codeToString(c Code) string {
 
 // uint32ToString is a zero-allocation uint32 → string for small values.
 func uint32ToString(v uint32) string {
+	// Fast path: single digit (gRPC codes 0-9).
 	if v < 10 {
-		return string(rune('0' + v))
+		return digits[v : v+1]
 	}
-	if v < 100 {
-		return string(rune('0'+v/10)) + string(rune('0'+v%10))
+	// Two digits — use pre-computed table for values 10-99.
+	if v < uint32(len(twoDigitStrings)) {
+		return twoDigitStrings[v]
 	}
+	// General case (rare for gRPC).
 	buf := make([]byte, 0, 10)
 	for v > 0 {
 		buf = append(buf, byte('0'+v%10))
@@ -393,4 +406,20 @@ func uint32ToString(v uint32) string {
 		buf[i], buf[j] = buf[j], buf[i]
 	}
 	return string(buf)
+}
+
+// digits lookup table for zero-allocation single-digit uint32 → string.
+var digits = "0123456789"
+
+// twoDigitStrings pre-computed string representations for 0-99.
+var twoDigitStrings [100]string
+
+func init() {
+	for i := range twoDigitStrings {
+		if i < 10 {
+			twoDigitStrings[i] = digits[i : i+1]
+		} else {
+			twoDigitStrings[i] = string([]byte{byte('0' + i/10), byte('0' + i%10)})
+		}
+	}
 }

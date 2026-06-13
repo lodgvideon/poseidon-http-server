@@ -148,10 +148,13 @@ func (w *ResponseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	w.status = status
 	w.written = true
 
+	// Pre-computed :status value for common codes.
+	statusVal := statusBytes(status)
+
 	fields := make([]hpack.HeaderField, 0, 1+len(headers))
 	fields = append(fields, hpack.HeaderField{
-		Name:  []byte(":status"),
-		Value: []byte(strconv.Itoa(status)),
+		Name:  sColonStatus,
+		Value: statusVal,
 	})
 	fields = append(fields, headers...)
 
@@ -213,10 +216,11 @@ func (w *ResponseWriter) WriteHeader(statusCode int) {
 	if hdr == nil {
 		hdr = make(http.Header)
 	}
+	statusVal := statusBytes(statusCode)
 	fields := make([]hpack.HeaderField, 0, 1+len(hdr))
 	fields = append(fields, hpack.HeaderField{
-		Name:  []byte(":status"),
-		Value: []byte(strconv.Itoa(statusCode)),
+		Name:  sColonStatus,
+		Value: statusVal,
 	})
 	for k, vv := range hdr {
 		for _, v := range vv {
@@ -351,3 +355,61 @@ func (r *closeableReader) Read(p []byte) (int, error) {
 }
 
 func (r *closeableReader) Close() error { return nil }
+
+// ---------------------------------------------------------------------------
+// Pre-computed byte slices for zero-allocation hot paths
+// ---------------------------------------------------------------------------
+
+var sColonStatus = []byte(":status")
+
+// statusBytes returns pre-allocated byte slice for common HTTP status codes.
+// Falls back to strconv.AppendInt for uncommon codes.
+func statusBytes(code int) []byte {
+	switch code {
+	case 200:
+		return sStatus200
+	case 201:
+		return sStatus201
+	case 204:
+		return sStatus204
+	case 301:
+		return sStatus301
+	case 302:
+		return sStatus302
+	case 304:
+		return sStatus304
+	case 400:
+		return sStatus400
+	case 401:
+		return sStatus401
+	case 403:
+		return sStatus403
+	case 404:
+		return sStatus404
+	case 500:
+		return sStatus500
+	case 502:
+		return sStatus502
+	case 503:
+		return sStatus503
+	default:
+		var buf [6]byte
+		return strconv.AppendInt(buf[:0], int64(code), 10)
+	}
+}
+
+var (
+	sStatus200 = []byte("200")
+	sStatus201 = []byte("201")
+	sStatus204 = []byte("204")
+	sStatus301 = []byte("301")
+	sStatus302 = []byte("302")
+	sStatus304 = []byte("304")
+	sStatus400 = []byte("400")
+	sStatus401 = []byte("401")
+	sStatus403 = []byte("403")
+	sStatus404 = []byte("404")
+	sStatus500 = []byte("500")
+	sStatus502 = []byte("502")
+	sStatus503 = []byte("503")
+)
