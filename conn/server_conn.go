@@ -150,7 +150,10 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	sc.atomicFramesSent.Add(1)
 
 	// Steps 3-5: handshake — read client SETTINGS, send ACK, read ACK.
-	peer, err := handshakeServerSettings(ctx, sc.fr)
+	// Create the real frame handler early so that non-SETTINGS frames
+	// arriving during the handshake (e.g. HEADERS) are not lost.
+	h := newServerConnHandler(sc, sc.dec)
+	peer, err := handshakeServerSettings(ctx, sc.fr, h)
 	if err != nil {
 		_ = nc.Close()
 		return nil, err
@@ -189,8 +192,8 @@ func readClientPreface(nc net.Conn) error {
 //   - Read client SETTINGS ACK for our SETTINGS
 //
 // Returns the client's SETTINGS.
-func handshakeServerSettings(ctx context.Context, fr *frame.Framer) (frame.SettingsParams, error) {
-	rec := &settingsRecorder{}
+func handshakeServerSettings(ctx context.Context, fr *frame.Framer, delegate frame.Handler) (frame.SettingsParams, error) {
+	rec := &settingsRecorder{delegate: delegate}
 	for !rec.peerSeen {
 		if err := readOneFrame(ctx, fr, rec); err != nil {
 			return frame.SettingsParams{}, fmt.Errorf("server read client settings: %w", err)
@@ -497,18 +500,40 @@ const recvWindowRefundThreshold = 32768
 const closeGoAwayDeadline = 200 * time.Millisecond
 
 // settingsRecorder records the peer's SETTINGS and ACK state.
+// Non-SETTINGS frames that arrive during the handshake (e.g. the client's
+// request HEADERS sent in the same TCP segment as SETTINGS) are forwarded
+// to the delegate handler so they are not lost.
 type settingsRecorder struct {
 	peer     frame.SettingsParams
 	peerSeen bool
 	ackSeen  bool
+	delegate frame.Handler // optional; receives forwarded frames
 }
 
-func (r *settingsRecorder) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
-func (r *settingsRecorder) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
+func (r *settingsRecorder) OnData(fh frame.FrameHeader, data []byte, pad uint8) error {
+	if r.delegate != nil {
+		return r.delegate.OnData(fh, data, pad)
+	}
 	return nil
 }
-func (r *settingsRecorder) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
-func (r *settingsRecorder) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
+func (r *settingsRecorder) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, p *frame.Priority, flags uint8) error {
+	if r.delegate != nil {
+		return r.delegate.OnHeaders(fh, hb, p, flags)
+	}
+	return nil
+}
+func (r *settingsRecorder) OnPriority(fh frame.FrameHeader, p frame.Priority) error {
+	if r.delegate != nil {
+		return r.delegate.OnPriority(fh, p)
+	}
+	return nil
+}
+func (r *settingsRecorder) OnRSTStream(fh frame.FrameHeader, c frame.ErrCode) error {
+	if r.delegate != nil {
+		return r.delegate.OnRSTStream(fh, c)
+	}
+	return nil
+}
 func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {
 	if fh.Flags&frame.FlagSettingsAck != 0 {
 		r.ackSeen = true
@@ -518,13 +543,36 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 	r.peerSeen = true
 	return nil
 }
-func (r *settingsRecorder) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+func (r *settingsRecorder) OnPushPromise(fh frame.FrameHeader, sid uint32, hb frame.HeaderBlock, flags uint8) error {
+	if r.delegate != nil {
+		return r.delegate.OnPushPromise(fh, sid, hb, flags)
+	}
 	return nil
 }
-func (r *settingsRecorder) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
-func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
-func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
-func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+func (r *settingsRecorder) OnPing(fh frame.FrameHeader, payload [8]byte) error {
+	if r.delegate != nil {
+		return r.delegate.OnPing(fh, payload)
+	}
+	return nil
+}
+func (r *settingsRecorder) OnGoAway(fh frame.FrameHeader, sid uint32, c frame.ErrCode, d []byte) error {
+	if r.delegate != nil {
+		return r.delegate.OnGoAway(fh, sid, c, d)
+	}
+	return nil
+}
+func (r *settingsRecorder) OnWindowUpdate(fh frame.FrameHeader, inc uint32) error {
+	if r.delegate != nil {
+		return r.delegate.OnWindowUpdate(fh, inc)
+	}
+	return nil
+}
+func (r *settingsRecorder) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
+	if r.delegate != nil {
+		return r.delegate.OnContinuation(fh, hb)
+	}
+	return nil
+}
 
 var _ frame.Handler = (*settingsRecorder)(nil)
 

@@ -263,12 +263,16 @@ func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream
 		if !w.Written() {
 			_ = w.WriteHeaders(500, nil)
 		}
+		// Send EndStream via empty trailers.
+		_ = w.WriteTrailers(nil)
 		_ = stream.Close()
 		return
 	}
 	if !w.Written() {
 		_ = w.WriteHeaders(200, nil)
 	}
+	// Send EndStream via empty trailers.
+	_ = w.WriteTrailers(nil)
 	_ = stream.Close()
 }
 

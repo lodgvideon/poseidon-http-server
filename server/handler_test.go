@@ -144,12 +144,12 @@ func TestResponseWriter_WriteHeader_SendsHPACK(t *testing.T) {
 	// Should contain :status + content-type
 	foundCT := false
 	for _, f := range h {
-		if string(f.Name) == "Content-Type" && string(f.Value) == "text/html" {
+		if string(f.Name) == "content-type" && string(f.Value) == "text/html" {
 			foundCT = true
 		}
 	}
 	if !foundCT {
-		t.Error("content-type header not found in sent headers")
+		t.Errorf("content-type header not found in sent headers, got: %v", h)
 	}
 }
 

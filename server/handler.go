@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/conn"
@@ -223,9 +224,10 @@ func (w *ResponseWriter) WriteHeader(statusCode int) {
 		Value: statusVal,
 	})
 	for k, vv := range hdr {
+		lower := strings.ToLower(k)
 		for _, v := range vv {
 			fields = append(fields, hpack.HeaderField{
-				Name:  []byte(k),
+				Name:  []byte(lower),
 				Value: []byte(v),
 			})
 		}
