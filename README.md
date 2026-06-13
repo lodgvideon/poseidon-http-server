@@ -1,135 +1,114 @@
-# poseidon-http-server
+# Poseidon HTTP/2 Server
 
-A low-level, zero-allocation HTTP/2 and gRPC server for Go, built on top of
-[poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client) codec
-libraries. Implements RFC 7540 (HTTP/2) server-side from scratch — no `net/http`,
-no `golang.org/x/net/http2`.
+**Zero-allocation HTTP/2 + gRPC server for Go**, built on [poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client) codec.
 
-**Status:** Phase A — Frame layer reuse + server-side connection.
+Drop-in `http.Handler` replacement — compatible with **chi**, **echo**, **gin**, and any router built on `net/http`.
 
-## Design Principles
+## Features
 
-- **Zero-allocation** on hot paths: frame codec reuses buffers, sync.Pool for
-  stream structs, pre-allocated HPACK tables.
-- **HTTP/2 + gRPC**: native HTTP/2 server with gRPC framing (Length-Prefixed
-  Messages, trailered status codes) as a first-class citizen.
-- **Strict SOLID**: every package has a single responsibility; dependencies flow
-  inward through interfaces; extensibility via composition, not inheritance.
+- **Zero allocation** — hot paths (HPACK encode, flow control, status codes) achieve 0 allocs/op
+- **HTTP/2 + h2c** — TLS with ALPN negotiation + clear-text (h2c) with prior-knowledge and Upgrade
+- **gRPC** — Unary, Server-streaming, Client-streaming, Bidi-streaming
+- **Middleware** — Recovery, RequestID, AccessLog, CORS
+- **Graceful drain** — `Shutdown(ctx)` waits for in-flight streams, sends GOAWAY
+- **Idle timeout** — auto-close idle connections
+- **Connection limits** — `MaxConcurrentConnections`, `MaxConcurrentStreams`
 
-## Architecture (SOLID layers)
+## Quick Start
 
-```
-frame/               # Layer A: RFC 7540 frame codec (shared with client)
-hpack/               # Layer A: RFC 7541 HPACK encoder/decoder (shared with client)
-internal/bytesx/     # Layer A: big-endian helpers
-conn/                # Layer B: server-side HTTP/2 connection, streams, flow control
-server/              # Layer C: HTTP/2 server (listener, TLS, h2c, handler dispatch)
-grpcserver/          # Layer D: gRPC-over-HTTP/2 (LP messages, status codes, trailers)
-cmd/poseidon-server/ # Layer E: example binary
-docs/                # RFC coverage, benchmarks, design specs
-```
-
-### SOLID mapping
-
-| Principle | How it's enforced |
-|-----------|-------------------|
-| **S** — Single Responsibility | Each package owns exactly one protocol concern: `frame` = codec, `conn` = connection state machine, `server` = accept loop + routing, `grpcserver` = gRPC framing |
-| **O** — Open/Closed | Handler interfaces + middleware chain + `net/http.Handler` adapter; add behaviour without modifying core; chi/echo/gin drop-in via `FromHTTPHandler()` |
-| **L** — Liskov Substitution | `Handler` interface; `grpcserver.Handler` wraps `server.Handler`; any implementation is interchangeable |
-| **I** — Interface Segregation | Small focused interfaces: `FrameWriter`, `StreamReader`, `Handler`, `Middleware` — clients depend only on what they use |
-| **D** — Dependency Inversion | `conn.Conn` depends on `FrameWriter`/`FrameReader` interfaces, not concrete `frame.Framer`; `server.Server` depends on `Listener` interface, not `net.Listener` |
-
-## Phases
-
-- **A — Frame layer reuse + server conn** *(in progress)*: reuse `frame` and
-  `hpack` packages from poseidon-http-client; server-side `conn.Conn` with
-  inbound stream management, SETTINGS handshake (server perspective), flow
-  control.
-- **B — HTTP/2 server** *(planned)*: `server.Server` with TLS + h2c listen,
-  `Handler` interface, header/body routing, graceful shutdown, GOAWAY.
-- **C — gRPC framing** *(planned)*: `grpcserver` package with Length-Prefixed
-  Message codec, gRPC status trailer encoding/decoding, unary + streaming RPCs.
-- **D — Zero-allocation polish** *(planned)*: bench-gate enforcement, buffer
-  pools, HPACK slab allocator reuse, profile-guided optimization.
-
-## Quick start
-
-### Native handler (zero-allocation path)
+### HTTP/2 Server
 
 ```go
-package main
+srv, _ := server.NewServer(server.Options{
+    Handler:     myHandler,
+    IdleTimeout: 30 * time.Second,
+})
 
-import (
-    "context"
-    "log"
-
-    "github.com/lodgvideon/poseidon-http-server/server"
-)
-
-func main() {
-    srv, err := server.NewServer(server.ServerOptions{
-        Addr: ":8443",
-        Handler: server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
-            return w.WriteHeaders(200, nil)
-        }),
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    log.Fatal(srv.ListenAndServe(context.Background()))
-}
+ln, _ := net.Listen("tcp", ":8080")
+srv.Serve(context.Background(), ln)
 ```
 
-### Drop-in with chi router
+### TLS + ALPN
 
 ```go
-package main
+srv.ListenAndServeTLS(ctx, "cert.pem", "key.pem")
+```
 
-import (
-    "context"
-    "log"
-    "net/http"
+### gRPC Server
 
-    "github.com/go-chi/chi/v5"
-    "github.com/lodgvideon/poseidon-http-server/server"
+```go
+reg := grpcserver.NewServiceRegistrar()
+reg.Register(&grpcserver.ServiceDesc{
+    Name: "my.Service",
+    Methods: []grpcserver.MethodDesc{
+        {Name: "Echo", Handler: echoHandler},
+    },
+})
+
+srv, _ := server.NewServer(server.Options{
+    Handler: reg,
+})
+```
+
+### Middleware Chain
+
+```go
+chain := server.Chain(
+    middleware.Recovery(nil),
+    middleware.RequestID(),
+    middleware.AccessLog(logger),
 )
 
-func main() {
-    r := chi.NewRouter()
-    r.Get("/hello", func(w http.ResponseWriter, r *http.Request) {
-        w.Write([]byte("hi from Poseidon!"))
-    })
-
-    srv, err := server.NewServer(server.ServerOptions{
-        Addr:       ":8443",
-        HTTPHandler: r, // drop-in — chi just works
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    log.Fatal(srv.ListenAndServe(context.Background()))
-}
+srv, _ := server.NewServer(server.Options{
+    Handler: chain(myHandler),
+})
 ```
 
-## Limits and contracts
+### Graceful Drain
 
-- `conn.Conn` is goroutine-safe. Each stream is dispatched to a handler
-  goroutine; the handler must not hold the stream after returning.
-- Zero-allocation target: 0 allocs/op on the frame codec path, minimal
-  allocs on the request dispatch path (header slice from pool).
-- `frame.Framer` and `hpack.Encoder`/`Decoder` are NOT goroutine-safe —
-  `conn.Conn` serializes writes via mutex, each stream reads from its own
-  event channel.
+```go
+ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer cancel()
 
-## Commands
+go srv.Serve(ctx, ln)
 
-```bash
-make tidy        # go mod tidy
-make lint        # golangci-lint run
-make test-race   # go test -race ./...
-make bench       # benchmarks with bench-gate
+<-ctx.Done()
+shutdownCtx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer scancel()
+srv.Shutdown(shutdownCtx) // waits for active streams
 ```
+
+## Benchmarks
+
+### conn/ (per-frame operations)
+```
+BenchmarkWriteServerHeaders    5554 ns/op    0 B/op    0 allocs/op
+BenchmarkWriteServerData       5794 ns/op    0 B/op    0 allocs/op
+BenchmarkAcquireSendCredits      54 ns/op    0 B/op    0 allocs/op
+BenchmarkOnWindowUpdate           39 ns/op    0 B/op    0 allocs/op
+BenchmarkOnDataReceived           53 ns/op    0 B/op    0 allocs/op
+```
+
+### grpcserver/ (gRPC hot paths)
+```
+BenchmarkStatusToHPack      2 ns/op    0 B/op    0 allocs/op
+BenchmarkLookup            0 ns/op    0 B/op    0 allocs/op
+```
+
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| `conn` | HTTP/2 connection management (server-side streams, flow control, HPACK) |
+| `server` | `net.Handler`-compatible HTTP/2 server with middleware, TLS, h2c |
+| `grpcserver` | gRPC layer: ServiceRegistrar, 4 RPC patterns, framing |
+| `middleware` | Recovery, RequestID, AccessLog, CORS |
+
+## Requirements
+
+- Go 1.26+
+- [poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client) (codec: frame + hpack)
 
 ## License
 
-Proprietary — LodgVideoN
+MIT
