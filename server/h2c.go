@@ -104,13 +104,7 @@ func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Rea
 	s.trackConn(sc, true)
 	defer s.trackConn(sc, false)
 
-	for {
-		stream, err := sc.AcceptStream(ctx)
-		if err != nil {
-			return
-		}
-		go s.serveStream(ctx, stream)
-	}
+	s.acceptLoop(ctx, sc)
 }
 
 // bufioConn wraps a net.Conn with a bufio.Reader so that peeked bytes

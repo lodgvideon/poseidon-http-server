@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
@@ -42,6 +43,10 @@ type Options struct {
 	// StreamingBody enables io.ReadCloser body instead of buffering.
 	// When true, Request.BodyReader is set and Body is nil.
 	StreamingBody bool
+
+	// IdleTimeout is the maximum amount of time to wait for the
+	// next request/stream on an idle connection. Zero means no timeout.
+	IdleTimeout time.Duration
 }
 
 func (o Options) validate() error {
@@ -63,16 +68,18 @@ func (o Options) resolvedHandler() Handler {
 }
 
 type Server struct {
-	handler  Handler
-	connOpts conn.ServerConnOptions
-	opts     Options
-	logger   Logger
-	mu       sync.Mutex
-	closed   bool
-	listener net.Listener
-	conns    map[*conn.ServerConn]struct{}
-	done     chan struct{}
-	closeCh  chan struct{}
+	handler   Handler
+	connOpts  conn.ServerConnOptions
+	opts      Options
+	logger    Logger
+	mu        sync.Mutex
+	closed    bool
+	shutdown  bool
+	listener  net.Listener
+	conns     map[*conn.ServerConn]struct{}
+	inFlight  sync.WaitGroup // active streams being served
+	done      chan struct{}
+	closeCh   chan struct{}
 }
 
 func NewServer(opts Options) (*Server, error) {
@@ -153,6 +160,22 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 	}
 	s.trackConn(sc, true)
 	defer s.trackConn(sc, false)
+	s.acceptLoop(ctx, sc)
+}
+
+// acceptLoop reads streams from a ServerConn with optional idle timeout.
+func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
+	if s.opts.IdleTimeout > 0 {
+		for {
+			acceptCtx, cancel := context.WithTimeout(ctx, s.opts.IdleTimeout)
+			stream, err := sc.AcceptStream(acceptCtx)
+			cancel()
+			if err != nil {
+				return
+			}
+			go s.serveStream(ctx, stream)
+		}
+	}
 	for {
 		stream, err := sc.AcceptStream(ctx)
 		if err != nil {
@@ -163,6 +186,9 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 }
 
 func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
+	s.inFlight.Add(1)
+	defer s.inFlight.Done()
+
 	var req *Request
 
 	// Read HEADERS first.
@@ -322,5 +348,69 @@ func (s *Server) Close() error {
 		_ = sc.Close()
 		delete(s.conns, sc)
 	}
+	return nil
+}
+
+// Shutdown gracefully shuts down the server without interrupting active
+// streams. It closes the listener and waits for in-flight streams to
+// complete or the context to be cancelled.
+//
+// If the context expires before all streams are done, remaining
+// connections are forcibly closed (equivalent to Close).
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrServerClosed
+	}
+	s.shutdown = true
+	s.closed = true
+
+	// Close listener — stop accepting new connections.
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
+	close(s.closeCh)
+
+	// Snapshot current connections.
+	conns := make([]*conn.ServerConn, 0, len(s.conns))
+	for sc := range s.conns {
+		conns = append(conns, sc)
+	}
+	s.mu.Unlock()
+
+	// Send GOAWAY to all connections so clients stop opening new streams.
+	for _, sc := range conns {
+		_ = sc.GoAway(frame.ErrCodeNoError)
+	}
+
+	// Wait for in-flight streams to complete or context cancellation.
+	done := make(chan struct{})
+	go func() {
+		s.inFlight.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All streams completed gracefully.
+	case <-ctx.Done():
+		// Timeout — forcibly close remaining connections.
+		s.mu.Lock()
+		for _, sc := range conns {
+			_ = sc.Close()
+			delete(s.conns, sc)
+		}
+		s.mu.Unlock()
+		return ctx.Err()
+	}
+
+	// Close connections gracefully.
+	s.mu.Lock()
+	for _, sc := range conns {
+		_ = sc.Close()
+		delete(s.conns, sc)
+	}
+	s.mu.Unlock()
 	return nil
 }
