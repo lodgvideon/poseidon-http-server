@@ -153,6 +153,33 @@ func TestResponseWriter_WriteHeader_SendsHPACK(t *testing.T) {
 	}
 }
 
+// TestResponseWriter_LowercaseHeaders is a regression test for RFC 7540 §8.1.2:
+// response header field names MUST be lowercased before HPACK encoding.
+// Without this, real-world clients (curl, Chrome, Firefox) reject responses
+// with PROTOCOL_ERROR.
+func TestResponseWriter_LowercaseHeaders(t *testing.T) {
+	w, sw := newTestWriter()
+	w.Header()["X-Custom-Header"] = []string{"val1"}
+	w.Header()["Content-Length"] = []string{"42"}
+	w.WriteHeader(200)
+
+	if len(sw.headersSent) != 1 {
+		t.Fatalf("headersSent = %d calls, want 1", len(sw.headersSent))
+	}
+	for _, f := range sw.headersSent[0] {
+		name := string(f.Name)
+		// pseudo-headers start with ':' — skip
+		if name[0] == ':' {
+			continue
+		}
+		for _, c := range name {
+			if c >= 'A' && c <= 'Z' {
+				t.Errorf("header %q contains uppercase letter — RFC 7540 §8.1.2 violation", name)
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Request conversion tests
 // ---------------------------------------------------------------------------
