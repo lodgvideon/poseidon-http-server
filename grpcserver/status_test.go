@@ -11,8 +11,21 @@ func TestCode_String(t *testing.T) {
 	}{
 		{OK, "OK"},
 		{Canceled, "Canceled"},
-		{Internal, "Internal"},
+		{Unknown, "Unknown"},
+		{InvalidArgument, "InvalidArgument"},
+		{DeadlineExceeded, "DeadlineExceeded"},
+		{NotFound, "NotFound"},
+		{AlreadyExists, "AlreadyExists"},
+		{PermissionDenied, "PermissionDenied"},
+		{ResourceExhausted, "ResourceExhausted"},
+		{FailedPrecondition, "FailedPrecondition"},
+		{Aborted, "Aborted"},
+		{OutOfRange, "OutOfRange"},
 		{Unimplemented, "Unimplemented"},
+		{Internal, "Internal"},
+		{Unavailable, "Unavailable"},
+		{DataLoss, "DataLoss"},
+		{Unauthenticated, "Unauthenticated"},
 		{Code(99), "Code(99)"},
 	}
 	for _, tt := range tests {

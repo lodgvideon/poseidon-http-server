@@ -300,9 +300,10 @@ func (r *ServiceRegistrar) reflectionHandler(
 		// Decode the ServerReflectionRequest protobuf.
 		req, perr := decodeReflectionRequest(reqBytes)
 		if perr != nil {
-			// Send error response.
+			// Send error response. req is nil on the error path; use an
+			// empty host rather than dereferencing nil.
 			errResp := encodeErrorResponse(InvalidArgument, perr.Error())
-			fullResp := encodeReflectionResponse(req.host, reqBytes, errResp)
+			fullResp := encodeReflectionResponse("", reqBytes, errResp)
 			if serr := send(fullResp); serr != nil {
 				return serr
 			}

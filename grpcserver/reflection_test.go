@@ -3,6 +3,8 @@ package grpcserver
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"testing"
 )
 
@@ -239,4 +241,424 @@ func processReflectionRequestForTest(sr *ServiceRegistrar, reqBytes []byte) []by
 
 func containsSubstring(haystack, needle []byte) bool {
 	return bytes.Contains(haystack, needle)
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers (Batch 2 of coverage push)
+// ---------------------------------------------------------------------------
+
+func TestBytesEqual(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b []byte
+		want bool
+	}{
+		{"both nil", nil, nil, true},
+		{"equal", []byte("abc"), []byte("abc"), true},
+		{"different length", []byte("ab"), []byte("abc"), false},
+		{"same length different content", []byte("abc"), []byte("abd"), false},
+		{"empty", []byte{}, []byte{}, true},
+		{"empty vs non-empty", []byte{}, []byte("x"), false},
+		{"non-empty vs empty", []byte("x"), []byte{}, false},
+	}
+	for _, tc := range tests {
+		if got := bytesEqual(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: bytesEqual(%v,%v) = %v, want %v", tc.name, tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestBytesContains(t *testing.T) {
+	tests := []struct {
+		name     string
+		haystack []byte
+		needle   []byte
+		want     bool
+	}{
+		{"empty needle always matches", []byte("abc"), nil, true},
+		{"empty needle matches empty haystack", nil, nil, true},
+		{"needle longer than haystack", []byte("ab"), []byte("abc"), false},
+		{"prefix match", []byte("abcdef"), []byte("abc"), true},
+		{"middle match", []byte("xxABCyy"), []byte("ABC"), true},
+		{"suffix match", []byte("abcdef"), []byte("def"), true},
+		{"no match", []byte("abcdef"), []byte("xyz"), false},
+		{"haystack shorter than needle", []byte("a"), []byte("ab"), false},
+	}
+	for _, tc := range tests {
+		if got := bytesContains(tc.haystack, tc.needle); got != tc.want {
+			t.Errorf("%s: bytesContains(%v,%v) = %v, want %v", tc.name, tc.haystack, tc.needle, got, tc.want)
+		}
+	}
+}
+
+func TestProtoContainsService(t *testing.T) {
+	// Heuristic: looks for {byte(len(name)) + name} as a length-prefixed
+	// string in protobuf wire format. Names of length >= 128 will not match
+	// because the length field becomes 2 bytes; we only test short names.
+	tests := []struct {
+		name        string
+		protoBytes  []byte
+		serviceName string
+		want        bool
+	}{
+		{
+			name:        "match present",
+			protoBytes:  []byte{0x0a, 4, 'E', 'c', 'h', 'o'},
+			serviceName: "Echo",
+			want:        true,
+		},
+		{
+			name:        "match absent",
+			protoBytes:  []byte{0x0a, 4, 'M', 'a', 'i', 'n'},
+			serviceName: "Echo",
+			want:        false,
+		},
+		{
+			name:        "empty haystack",
+			protoBytes:  nil,
+			serviceName: "Echo",
+			want:        false,
+		},
+		{
+			name:        "wrong length prefix",
+			protoBytes:  []byte{0x0a, 3, 'E', 'c', 'h', 'o'},
+			serviceName: "Echo",
+			want:        false,
+		},
+	}
+	for _, tc := range tests {
+		if got := protoContainsService(tc.protoBytes, tc.serviceName); got != tc.want {
+			t.Errorf("%s: protoContainsService(%v,%q) = %v, want %v",
+				tc.name, tc.protoBytes, tc.serviceName, got, tc.want)
+		}
+	}
+}
+
+func TestAppendIfUnique(t *testing.T) {
+	// Fresh entries are appended.
+	got := appendIfUnique(nil, []byte("a"))
+	if len(got) != 1 || !bytesEqual(got[0], []byte("a")) {
+		t.Fatalf("after first append: %v", got)
+	}
+	// Duplicate is NOT appended (the dedup branch).
+	got = appendIfUnique(got, []byte("a"))
+	if len(got) != 1 {
+		t.Fatalf("after duplicate: len = %d, want 1", len(got))
+	}
+	// New entry appended alongside the existing one.
+	got = appendIfUnique(got, []byte("b"))
+	if len(got) != 2 {
+		t.Fatalf("after second new: len = %d, want 2", len(got))
+	}
+}
+
+func TestSkipField(t *testing.T) {
+	// Wire type 0 (VARINT): 1-byte varint 0x05, 2-byte varint 0x80 0x01.
+	if pos := skipField([]byte{0x05}, 0, 0); pos != 1 {
+		t.Errorf("VARINT 1-byte: pos = %d, want 1", pos)
+	}
+	if pos := skipField([]byte{0x80, 0x01}, 0, 0); pos != 2 {
+		t.Errorf("VARINT 2-byte: pos = %d, want 2", pos)
+	}
+	// VARINT with continuation bit set but no terminator → -1.
+	if pos := skipField([]byte{0x80}, 0, 0); pos != -1 {
+		t.Errorf("VARINT unterminated: pos = %d, want -1", pos)
+	}
+	// Wire type 1 (I64): skip 8 bytes.
+	if pos := skipField(make([]byte, 8), 0, 1); pos != 8 {
+		t.Errorf("I64: pos = %d, want 8", pos)
+	}
+	// Wire type 5 (I32): skip 4 bytes.
+	if pos := skipField(make([]byte, 4), 0, 5); pos != 4 {
+		t.Errorf("I32: pos = %d, want 4", pos)
+	}
+	// Wire type 2 (LEN): read varint length, advance past it.
+	// Field = { tag-varint already consumed, [0x03, 'a','b','c'] }
+	if pos := skipField([]byte{0x03, 'a', 'b', 'c'}, 0, 2); pos != 4 {
+		t.Errorf("LEN 3 bytes: pos = %d, want 4", pos)
+	}
+	// Wire type 2 with truncated length varint → -1.
+	if pos := skipField([]byte{0x80}, 0, 2); pos != -1 {
+		t.Errorf("LEN truncated varint: pos = %d, want -1", pos)
+	}
+	// Wire type 2 with length that overflows buffer → -1.
+	if pos := skipField([]byte{0x05, 'a'}, 0, 2); pos != -1 {
+		t.Errorf("LEN overflow: pos = %d, want -1", pos)
+	}
+	// Invalid wire type (3, start group) returns -1.
+	if pos := skipField([]byte{0x00}, 0, 3); pos != -1 {
+		t.Errorf("wire type 3: pos = %d, want -1", pos)
+	}
+}
+
+func TestEncodeExtensionNumberResponse(t *testing.T) {
+	// Empty numbers.
+	got := encodeExtensionNumberResponse("", nil)
+	if len(got) == 0 {
+		t.Fatal("got empty response for nil numbers")
+	}
+	// Non-empty type name and numbers.
+	got = encodeExtensionNumberResponse("grpc.reflection.v1alpha.ServerReflectionRequest", []int32{100, 200, 300})
+	if len(got) == 0 {
+		t.Fatal("got empty response for non-empty numbers")
+	}
+}
+
+func TestEncodeReflectionResponse(t *testing.T) {
+	// All args present.
+	got := encodeReflectionResponse("example.com", []byte{0x0a, 0x00}, []byte{0x0a, 0x00})
+	if len(got) == 0 {
+		t.Fatal("got empty response for full args")
+	}
+	// Empty host.
+	got = encodeReflectionResponse("", []byte{0x0a, 0x00}, []byte{0x0a, 0x00})
+	if len(got) == 0 {
+		t.Fatal("got empty response for empty host")
+	}
+	// Empty original request.
+	got = encodeReflectionResponse("example.com", nil, []byte{0x0a, 0x00})
+	if len(got) == 0 {
+		t.Fatal("got empty response for nil original")
+	}
+	// Empty message response.
+	got = encodeReflectionResponse("example.com", []byte{0x0a, 0x00}, nil)
+	if len(got) == 0 {
+		t.Fatal("got empty response for nil message")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// reflectionHandler integration (Batch 4 of coverage push)
+// ---------------------------------------------------------------------------
+
+// TestReflectionHandler_EOFReturnsNil verifies that a clean io.EOF from
+// recv terminates the loop with nil (graceful end-of-stream).
+func TestReflectionHandler_EOFReturnsNil(t *testing.T) {
+	r := NewServiceRegistrar()
+	var sent [][]byte
+	send := func(b []byte) error {
+		sent = append(sent, b)
+		return nil
+	}
+	recv := func() ([]byte, error) { return nil, io.EOF }
+
+	if err := r.reflectionHandler(context.Background(), recv, send); err != nil {
+		t.Fatalf("reflectionHandler(EOF) = %v, want nil", err)
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent %d responses on EOF, want 0", len(sent))
+	}
+}
+
+// TestReflectionHandler_MalformedThenGood drives the "send error response
+// then continue" branch (reflection.go:302-310).
+func TestReflectionHandler_MalformedThenGood(t *testing.T) {
+	r := NewServiceRegistrar()
+	// Register a service so the good request can produce a real response.
+	r.RegisterFileDescriptorSet(buildEchoFDS())
+
+	// recv returns: malformed bytes, then a valid list_services request,
+	// then io.EOF.
+	buildListReq := func() []byte {
+		// ServerReflectionRequest{ list_services = "*" }
+		// field 4 (string, LEN) tag = (4<<3)|2 = 0x22
+		// "*" = 1 byte
+		return []byte{0x22, 0x01, '*'}
+	}
+	calls := 0
+	recv := func() ([]byte, error) {
+		calls++
+		switch calls {
+		case 1:
+			return []byte{0xff, 0xfe, 0xfd}, nil // malformed
+		case 2:
+			return buildListReq(), nil // valid
+		default:
+			return nil, io.EOF
+		}
+	}
+	var sent [][]byte
+	send := func(b []byte) error {
+		sent = append(sent, b)
+		return nil
+	}
+
+	if err := r.reflectionHandler(context.Background(), recv, send); err != nil {
+		t.Fatalf("reflectionHandler = %v, want nil", err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("sent %d responses, want 2 (error + list_services)", len(sent))
+	}
+}
+
+// TestReflectionHandler_SendErrorPropagates verifies that a send error
+// stops the loop and is returned to the caller.
+func TestReflectionHandler_SendErrorPropagates(t *testing.T) {
+	r := NewServiceRegistrar()
+	recv := func() ([]byte, error) {
+		return []byte{0xff, 0xfe}, nil // malformed → triggers error response
+	}
+	wantErr := errors.New("send failed")
+	send := func(_ []byte) error { return wantErr }
+
+	err := r.reflectionHandler(context.Background(), recv, send)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("reflectionHandler = %v, want %v", err, wantErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decodeReflectionRequest error cases (Batch 7 of coverage push)
+// ---------------------------------------------------------------------------
+
+func TestDecodeReflectionRequest_Errors(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		// Tag varint with continuation bit set but no terminator.
+		{"tag varint unterminated", []byte{0x80}},
+		// pos >= len(data) when reading the length varint: a single tag
+		// byte with no body triggers the "truncated" branch (pos >= len
+		// after consuming the tag).
+		{"truncated length", []byte{0x0a}},
+		// Tag byte followed by truncated length varint.
+		{"length varint unterminated", []byte{0x0a, 0x80}},
+		// Length varint that overflows the buffer.
+		{"length overflow", []byte{0x0a, 0x05, 'a'}},
+		// Wire-type-0 as the first field with an unterminated varint
+		// payload.
+		{"wire type 0 unterminated", []byte{0x08, 0x80}},
+		// Wire type 1 (I64) is not allowed in this decoder.
+		{"wire type 1 rejected", []byte{0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+		// Wire type 3 (start group, deprecated) is not allowed.
+		{"wire type 3 rejected", []byte{0x0b, 0x00}},
+	}
+	for _, tc := range tests {
+		_, err := decodeReflectionRequest(tc.data)
+		if err == nil {
+			t.Errorf("%s: decodeReflectionRequest(%v) = nil, want error", tc.name, tc.data)
+		}
+	}
+}
+
+// buildEchoFDS constructs a minimal FileDescriptorSet containing a single
+// FileDescriptorProto named "echo.proto" in package "echo.v1" with one
+// service "Echo". All fields are encoded with literal bytes; do NOT use
+// appendStringField etc. to test the helper (that would be a tautology).
+func buildEchoFDS() []byte {
+	// ServiceDescriptorProto: { field 1 (name) = "Echo" }
+	// tag(1, LEN) = 0x0a
+	// length-prefixed bytes: 0x04 'E' 'c' 'h' 'o'
+	serviceProto := []byte{0x0a, 0x04, 'E', 'c', 'h', 'o'}
+
+	// FileDescriptorProto:
+	//   field 1 (name)   = "echo.proto"
+	//   field 2 (package) = "echo.v1"
+	//   field 6 (service) = serviceProto
+	// tag(1, LEN) = 0x0a; tag(2, LEN) = 0x12; tag(6, LEN) = 0x32
+	var fdp []byte
+	fdp = append(fdp, 0x0a)                            // field 1 tag (LEN)
+	fdp = append(fdp, byte(len("echo.proto")))         // length
+	fdp = append(fdp, "echo.proto"...)                 // value
+	fdp = append(fdp, 0x12)                            // field 2 tag (LEN)
+	fdp = append(fdp, byte(len("echo.v1")))            // length (7)
+	fdp = append(fdp, "echo.v1"...)                    // value
+	fdp = append(fdp, 0x32)                            // field 6 tag (LEN)
+	fdp = append(fdp, byte(len(serviceProto)))
+	fdp = append(fdp, serviceProto...)
+
+	// FileDescriptorSet: { field 1 (file) = FileDescriptorProto }
+	// tag(1, LEN) = 0x0a
+	fds := append([]byte{0x0a}, 0x00) // placeholder for length
+	fds = append(fds, fdp...)
+	fds[1] = byte(len(fdp))
+	return fds
+}
+
+func TestRegisterFileDescriptorSet_HappyPath(t *testing.T) {
+	r := NewServiceRegistrar()
+	fds := buildEchoFDS()
+
+	r.RegisterFileDescriptorSet(fds)
+
+	// Lookup by filename.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.reflection == nil {
+		t.Fatal("reflection registry not initialised")
+	}
+	if got, ok := r.reflection.filesByName["echo.proto"]; !ok || len(got) == 0 {
+		t.Errorf("filesByName[echo.proto] = (%v, %v), want (non-empty, true)", got, ok)
+	}
+	// Lookup by fully-qualified service name.
+	if got, ok := r.reflection.descriptors["echo.v1.Echo"]; !ok || len(got) == 0 {
+		t.Errorf("descriptors[echo.v1.Echo] = (%v, %v), want (non-empty, true)", got, ok)
+	}
+	// allFiles should have exactly one entry (no dedup yet).
+	if len(r.reflection.allFiles) != 1 {
+		t.Errorf("allFiles len = %d, want 1", len(r.reflection.allFiles))
+	}
+}
+
+func TestRegisterFileDescriptorSet_Idempotent(t *testing.T) {
+	r := NewServiceRegistrar()
+	fds := buildEchoFDS()
+
+	r.RegisterFileDescriptorSet(fds)
+	r.RegisterFileDescriptorSet(fds) // second call
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// Same FileDescriptorSet registered twice — allFiles should still be 1.
+	if len(r.reflection.allFiles) != 1 {
+		t.Errorf("allFiles len after double register = %d, want 1", len(r.reflection.allFiles))
+	}
+}
+
+func TestExtractFileProtos(t *testing.T) {
+	fds := buildEchoFDS()
+	files := extractFileProtos(fds)
+	if len(files) != 1 {
+		t.Fatalf("extractFileProtos returned %d files, want 1", len(files))
+	}
+	// The extracted file should be the inner FileDescriptorProto.
+	// Verify by checking that "echo.proto" can be extracted from it.
+	if name := extractStringField(files[0], 1); name != "echo.proto" {
+		t.Errorf("extractStringField(name) = %q, want echo.proto", name)
+	}
+	// Empty input.
+	if got := extractFileProtos(nil); len(got) != 0 {
+		t.Errorf("extractFileProtos(nil) = %d, want 0", len(got))
+	}
+	// Truncated varint (no continuation terminator).
+	truncated := []byte{0x80}
+	if got := extractFileProtos(truncated); len(got) != 0 {
+		t.Errorf("extractFileProtos(truncated varint) = %d, want 0", len(got))
+	}
+}
+
+func TestExtractServiceNames(t *testing.T) {
+	// Build a FileDescriptorProto directly (no FDS wrapper).
+	serviceProto := []byte{0x0a, 0x04, 'E', 'c', 'h', 'o'}
+	var fdp []byte
+	fdp = append(fdp, 0x12, byte(len("echo.v1")))
+	fdp = append(fdp, "echo.v1"...)
+	fdp = append(fdp, 0x32, byte(len(serviceProto)))
+	fdp = append(fdp, serviceProto...)
+
+	names := extractServiceNames(fdp)
+	if len(names) != 1 || names[0] != "echo.v1.Echo" {
+		t.Errorf("extractServiceNames = %v, want [echo.v1.Echo]", names)
+	}
+
+	// FileDescriptorProto with one service and no package — should be
+	// just the service name.
+	var fdpNoPkg []byte
+	fdpNoPkg = append(fdpNoPkg, 0x32, byte(len(serviceProto)))
+	fdpNoPkg = append(fdpNoPkg, serviceProto...)
+	names = extractServiceNames(fdpNoPkg)
+	if len(names) != 1 || names[0] != "Echo" {
+		t.Errorf("extractServiceNames(no pkg) = %v, want [Echo]", names)
+	}
 }
