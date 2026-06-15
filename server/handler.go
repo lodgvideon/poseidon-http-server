@@ -93,6 +93,15 @@ func (w *connStreamWriter) streamID() uint32 {
 	return w.stream.ID()
 }
 
+// canPush returns the underlying stream if it supports push.
+// This satisfies the pusher interface used by server.ResponseWriter.Push.
+func (w *connStreamWriter) canPush() (pushableStream, bool) {
+	if w.stream == nil {
+		return nil, false
+	}
+	return w.stream, true
+}
+
 // ---------------------------------------------------------------------------
 // ResponseWriter
 // ---------------------------------------------------------------------------

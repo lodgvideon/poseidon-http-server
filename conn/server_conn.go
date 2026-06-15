@@ -60,6 +60,9 @@ type ServerConn struct {
 	// goAwayRequested flags that the server has initiated GOAWAY.
 	goAwayRequested atomic.Bool
 
+	// pushIDs generates even stream IDs for server push (RFC 7540 §8.2).
+	pushIDs *pushIDCounter
+
 	// Stats counters.
 	atomicBytesSent      atomic.Int64
 	atomicBytesReceived  atomic.Int64
@@ -138,6 +141,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		pingWaiters:        make(map[[8]byte]chan struct{}),
 		connRecvWindow:     int32(connInitialRecvWindow),
 		peerConnSendWindow: int32(connInitialRecvWindow),
+		pushIDs:            newPushIDCounter(),
 	}
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
 
