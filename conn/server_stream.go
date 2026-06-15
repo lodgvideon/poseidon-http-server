@@ -3,6 +3,7 @@ package conn
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -21,11 +22,34 @@ type ServerStream struct {
 	closed        bool
 	headersSent   bool
 	headersReceived bool
+	// priority stores the RFC 7540 §5.3 priority payload received in
+	// the first HEADERS frame (or set by PushWithPriority), if any.
+	// nil if no priority was specified. Accessed atomically: written
+	// once by the reader goroutine (OnHeaders or PushWithPriority),
+	// read by handler goroutines.
+	priority atomic.Pointer[frame.Priority]
 
 	// Flow control.
 	recvWindow         int32
 	recvRefundPending  uint32
 	sendWindow         int32
+}
+
+// Priority returns the RFC 7540 §5.3 priority payload extracted from
+// the request's first HEADERS frame, or nil if the client did not
+// include a priority block. Useful for handlers that want to propagate
+// the client's priority hint into the response HEADERS, or into a
+// server-pushed PUSH_PROMISE.
+func (ss *ServerStream) Priority() *frame.Priority { return ss.priority.Load() }
+
+// setPriority stores the request's priority payload. Called by
+// serverConnHandler.OnHeaders exactly once, on the first HEADERS frame
+// of the stream, or by PushWithPriority for pushed streams.
+func (ss *ServerStream) setPriority(p *frame.Priority) {
+	if p == nil {
+		return
+	}
+	ss.priority.Store(p)
 }
 
 // StreamEventType discriminates the StreamEvent variants.
@@ -71,13 +95,21 @@ func (ss *ServerStream) ID() uint32 { return ss.id }
 // The first call on a stream seeds the per-stream send window from
 // the peer's SETTINGS_INITIAL_WINDOW_SIZE. Always sets END_HEADERS.
 func (ss *ServerStream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
+	return ss.SendHeadersWithPriority(ctx, fields, endStream, nil)
+}
+
+// SendHeadersWithPriority is like SendHeaders but embeds an RFC 7540
+// §5.3 priority block (E + StreamDep + Weight) into the first HEADERS
+// frame via the PRIORITY flag. Pass nil to omit the priority block
+// (equivalent to SendHeaders).
+func (ss *ServerStream) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	ss.mu.Lock()
 	if ss.closed || ss.localEnded {
 		ss.mu.Unlock()
 		return ErrStreamClosed
 	}
 	ss.mu.Unlock()
-	if err := ss.sc.writeServerHeaders(ctx, ss, fields, endStream); err != nil {
+	if err := ss.sc.writeServerHeaders(ctx, ss, fields, endStream, prio); err != nil {
 		return err
 	}
 	ss.mu.Lock()

@@ -226,10 +226,16 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 
 // --- Outbound write methods (called from ServerStream) ---
 
-// writeServerHeaders encodes and writes a HEADERS frame.
-func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fields []hpack.HeaderField, endStream bool) error {
+// writeServerHeaders encodes and writes a HEADERS frame. If prio is
+// non-nil it is embedded in the frame via the PRIORITY flag. If prio
+// is nil but the stream carries a stored priority (from the request
+// HEADERS, or set via PushWithPriority), that stored priority is used.
+func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	if sc.closed.Load() {
 		return ErrConnClosed
+	}
+	if prio == nil {
+		prio = ss.priority.Load()
 	}
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
@@ -242,6 +248,7 @@ func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fi
 		BlockFragment: block,
 		EndHeaders:    true,
 		EndStream:     endStream,
+		Priority:      prio,
 	})
 	*buf = block[:0]
 	encBufPool.Put(buf)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
@@ -31,6 +32,10 @@ func (m *mockPushableStream) Push(_ context.Context, fields []hpack.HeaderField)
 	m.headerSets = append(m.headerSets, fields)
 	// Return sentinel error; tests do not consume the stream.
 	return nil, errMockPushNotUsed
+}
+
+func (m *mockPushableStream) PushWithPriority(_ context.Context, fields []hpack.HeaderField, _ *frame.Priority) (*conn.ServerStream, error) {
+	return m.Push(context.Background(), fields)
 }
 
 // mockPusher is a streamWriter that also implements the pusher interface.
@@ -265,6 +270,57 @@ func TestResponseWriter_PushWithScheme_AfterHeadersFails(t *testing.T) {
 	_, err := w.PushWithScheme("/style.css", "https", nil)
 	if !errors.Is(err, ErrPushAlreadySent) {
 		t.Fatalf("err = %v, want ErrPushAlreadySent", err)
+	}
+}
+
+// TestResponseWriter_PushWithPriority_PropagatesPrio verifies that
+// the priority payload is forwarded to PushWithPriority on the
+// underlying conn stream.
+func TestResponseWriter_PushWithPriority_PropagatesPrio(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+
+	prio := &frame.Priority{StreamDep: 0, Exclusive: true, Weight: 200}
+	_, err := w.PushWithPriority("/style.css", nil, prio)
+	if err != nil {
+		// mockPushableStream returns errMockPushNotUsed — fine, we
+		// only care that the call reached it.
+		if !errors.Is(err, errMockPushNotUsed) {
+			t.Fatalf("err = %v, want errMockPushNotUsed", err)
+		}
+	}
+}
+
+// TestResponseWriter_PushWithPriority_AfterHeadersFails verifies that
+// PushWithPriority is gated by the same "must be before response
+// headers" rule as Push.
+func TestResponseWriter_PushWithPriority_AfterHeadersFails(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w.written = true
+
+	prio := &frame.Priority{StreamDep: 0, Exclusive: false, Weight: 100}
+	_, err := w.PushWithPriority("/style.css", nil, prio)
+	if !errors.Is(err, ErrPushAlreadySent) {
+		t.Fatalf("err = %v, want ErrPushAlreadySent", err)
+	}
+}
+
+// TestResponseWriter_PushWithPriority_NilIsEquivalentToPush verifies
+// that nil priority behaves the same as Push (no priority in flow).
+func TestResponseWriter_PushWithPriority_NilIsEquivalentToPush(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+
+	_, err := w.PushWithPriority("/style.css", nil, nil)
+	if !errors.Is(err, errMockPushNotUsed) {
+		t.Fatalf("err = %v, want errMockPushNotUsed", err)
 	}
 }
 

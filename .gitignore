@@ -27,3 +27,6 @@ cov.out
 coverage.out
 coverage_server.out
 http-server
+
+# codesearch local index
+.codesearch.db/

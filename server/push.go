@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
@@ -52,8 +53,9 @@ canPush() (pushableStream, bool)
 
 // pushableStream is the subset of conn.ServerStream we need for Push.
 type pushableStream interface {
-ID() uint32
-Push(ctx context.Context, fields []hpack.HeaderField) (*conn.ServerStream, error)
+	ID() uint32
+	Push(ctx context.Context, fields []hpack.HeaderField) (*conn.ServerStream, error)
+	PushWithPriority(ctx context.Context, fields []hpack.HeaderField, prio *frame.Priority) (*conn.ServerStream, error)
 }
 
 // pusher returns the underlying stream if this ResponseWriter can issue
@@ -120,6 +122,46 @@ func (w *ResponseWriter) PushWithScheme(promisePath, promiseScheme string, promi
 	return &ResponseWriter{
 		sw:      &connStreamWriter{stream: pushStream},
 		req:     w.req, // propagate request context for nested Push
+	}, nil
+}
+
+// PushWithPriority is like Push but lets the caller attach an RFC 7540
+// §5.3 priority payload to the pushed response. The priority is emitted
+// in the first response HEADERS frame of the push stream; the PUSH_PROMISE
+// frame itself does not carry the priority block.
+//
+// Pass nil for prio to behave like Push.
+func (w *ResponseWriter) PushWithPriority(promisePath string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (*ResponseWriter, error) {
+	return w.pushWithPriorityAndScheme(promisePath, w.deriveScheme(), promiseHeaders, prio)
+}
+
+// pushWithPriorityAndScheme is the merged implementation: scheme + priority.
+func (w *ResponseWriter) pushWithPriorityAndScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (*ResponseWriter, error) {
+	if w.written {
+		return nil, ErrPushAlreadySent
+	}
+	ps, ok := w.pusher()
+	if !ok {
+		return nil, ErrPushNotSupported
+	}
+	if promiseScheme == "" {
+		promiseScheme = schemeHTTPS
+	}
+	fields := make([]hpack.HeaderField, 0, 4+len(promiseHeaders))
+	fields = append(fields,
+		hpack.HeaderField{Name: []byte(":method"), Value: []byte("GET")},
+		hpack.HeaderField{Name: []byte(":path"), Value: []byte(promisePath)},
+		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(promiseScheme)},
+	)
+	fields = append(fields, promiseHeaders...)
+
+	pushStream, err := ps.PushWithPriority(context.Background(), fields, prio)
+	if err != nil {
+		return nil, fmt.Errorf("poseidon: push failed: %w", err)
+	}
+	return &ResponseWriter{
+		sw:  &connStreamWriter{stream: pushStream},
+		req: w.req,
 	}, nil
 }
 

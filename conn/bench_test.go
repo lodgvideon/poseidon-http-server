@@ -32,7 +32,7 @@ func BenchmarkWriteServerHeaders(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		if err := sc.writeServerHeaders(context.Background(), stream, headers, false); err != nil {
+		if err := sc.writeServerHeaders(context.Background(), stream, headers, false, nil); err != nil {
 			b.Fatal(err)
 		}
 	}

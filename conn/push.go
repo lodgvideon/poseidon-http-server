@@ -144,3 +144,21 @@ func (ss *ServerStream) Push(ctx context.Context, promiseHeaders []hpack.HeaderF
 	// Write PUSH_PROMISE and create the push stream.
 	return ss.sc.writePushPromise(ctx, ss, promisedID, promiseHeaders)
 }
+
+// PushWithPriority is like Push but also stores an RFC 7540 §5.3
+// priority payload on the returned pushed ServerStream. The priority
+// is emitted in the first response HEADERS frame on the push stream
+// (via SendHeadersWithPriority). The PUSH_PROMISE frame itself does
+// not carry the priority block — that is the canonical use of
+// §5.3: the server signals priority when it actually starts sending
+// the pushed response.
+//
+// Pass nil to leave the push stream without priority (equivalent to Push).
+func (ss *ServerStream) PushWithPriority(ctx context.Context, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (*ServerStream, error) {
+	ps, err := ss.Push(ctx, promiseHeaders)
+	if err != nil {
+		return nil, err
+	}
+	ps.setPriority(prio)
+	return ps, nil
+}

@@ -56,7 +56,7 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	return nil
 }
 
-func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
+func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, prio *frame.Priority, _ uint8) error {
 	end := fh.Flags&frame.FlagHeadersEndStream != 0
 	endHeaders := fh.Flags&frame.FlagHeadersEndHeaders != 0
 
@@ -68,11 +68,18 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 		h.streams.registerStream(fh.StreamID, s)
 	}
 
+	// RFC 7540 §5.3: priority block is sent only on the first HEADERS
+	// frame. Capture it once, before any CONTINUATION frames.
+	if isNew && prio != nil {
+		s.setPriority(prio)
+	}
+
 	if !endHeaders {
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
 		h.pendingTrailer = !isNew && s.headersReceived
+		// Only the first HEADERS carries priority; ignore any on trailers.
 		return nil
 	}
 
