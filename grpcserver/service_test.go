@@ -1,6 +1,7 @@
 package grpcserver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -178,6 +179,95 @@ func TestStreamReader_EmptyBody(t *testing.T) {
 	_, err := recv()
 	if !errors.Is(err, io.EOF) {
 		t.Errorf("recv() on empty body: err = %v, want EOF", err)
+	}
+}
+
+// TestStreamReader_BodyReader verifies the streaming BodyReader path of
+// streamReceiver (service.go:388-403). Two LP messages are encoded in a
+// pipe-like buffer; the receiver reads them sequentially.
+func TestStreamReader_BodyReader(t *testing.T) {
+	msg1 := LPMessage{Flag: FlagNone, Payload: []byte("hello")}
+	msg2 := LPMessage{Flag: FlagNone, Payload: []byte("world")}
+
+	var body []byte
+	body = EncodeLP(body, msg1)
+	body = EncodeLP(body, msg2)
+
+	req := &server.Request{BodyReader: io.NopCloser(bytes.NewReader(body))}
+	recv := streamReceiver(req)
+
+	got1, err := recv()
+	if err != nil {
+		t.Fatalf("recv() #1: %v", err)
+	}
+	if string(got1) != "hello" {
+		t.Errorf("recv() #1 = %q, want %q", got1, "hello")
+	}
+
+	got2, err := recv()
+	if err != nil {
+		t.Fatalf("recv() #2: %v", err)
+	}
+	if string(got2) != "world" {
+		t.Errorf("recv() #2 = %q, want %q", got2, "world")
+	}
+
+	_, err = recv()
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("recv() #3 err = %v, want EOF", err)
+	}
+}
+
+// TestStreamReader_BodyReader_ZeroLengthMessage exercises the
+// heartbeat branch: an LP frame with length=0 returns (nil, nil) so the
+// handler can loop without treating it as EOF.
+func TestStreamReader_BodyReader_ZeroLengthMessage(t *testing.T) {
+	// LP frame: flag(1) + length(4) + payload(0)
+	zeroFrame := []byte{0x00, 0x00, 0x00, 0x00, 0x00}
+	req := &server.Request{BodyReader: io.NopCloser(bytes.NewReader(zeroFrame))}
+	recv := streamReceiver(req)
+
+	got, err := recv()
+	if err != nil {
+		t.Fatalf("recv() on zero-length: err = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("recv() on zero-length: payload = %v, want nil", got)
+	}
+}
+
+// TestStreamReader_BodyReader_Truncated verifies that a truncated
+// header (fewer than 5 bytes) returns io.ErrUnexpectedEOF (from
+// io.ReadFull) rather than a custom error.
+func TestStreamReader_BodyReader_Truncated(t *testing.T) {
+	// Only 3 bytes available — io.ReadFull returns ErrUnexpectedEOF.
+	req := &server.Request{BodyReader: io.NopCloser(bytes.NewReader([]byte{0x00, 0x00, 0x00}))}
+	recv := streamReceiver(req)
+
+	_, err := recv()
+	if err == nil {
+		t.Fatal("recv() on truncated: err = nil, want non-nil")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("recv() truncated: err = %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+// TestStreamReader_BodyReader_TruncatedPayload exercises the
+// io.ReadFull failure on the payload read (length declared > 0 but
+// stream closes mid-payload).
+func TestStreamReader_BodyReader_TruncatedPayload(t *testing.T) {
+	// LP frame: flag=0, length=10, but only 4 bytes of payload follow.
+	trunc := []byte{0x00, 0x00, 0x00, 0x00, 0x0a, 'a', 'b', 'c', 'd'}
+	req := &server.Request{BodyReader: io.NopCloser(bytes.NewReader(trunc))}
+	recv := streamReceiver(req)
+
+	_, err := recv()
+	if err == nil {
+		t.Fatal("recv() on truncated payload: err = nil, want non-nil")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("recv() truncated payload: err = %v, want ErrUnexpectedEOF", err)
 	}
 }
 

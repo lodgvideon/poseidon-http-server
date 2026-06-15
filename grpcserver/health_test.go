@@ -207,3 +207,131 @@ func TestHealthServer_WatchHandler(t *testing.T) {
 		t.Fatal("watch did not receive update")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// HealthServer via the registered Handler (Batch 5 of coverage push)
+// ---------------------------------------------------------------------------
+
+// TestHealthServer_CheckHandler_KnownService drives the registered Check
+// unary handler for a known service and verifies the response.
+func TestHealthServer_CheckHandler_KnownService(t *testing.T) {
+	t.Parallel()
+
+	h := NewHealthServer()
+	h.SetServingStatus("svc.known", ServingStatusServing)
+	r := NewServiceRegistrar()
+	h.RegisterHealthService(r)
+
+	handler, ok := r.methods[healthPathCheck]
+	if !ok {
+		t.Fatal("Check handler not registered")
+	}
+
+	resp, err := handler.unary(context.Background(), encodeHealthCheckRequest("svc.known"))
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(resp) != 2 || resp[0] != 0x08 || resp[1] != byte(ServingStatusServing) {
+		t.Errorf("Check response = % x, want 0x08 0x01", resp)
+	}
+}
+
+// TestHealthServer_CheckHandler_UnknownService checks that an unknown
+// service returns ServingStatusServiceUnknown (the only way to hit this
+// branch from outside).
+func TestHealthServer_CheckHandler_UnknownService(t *testing.T) {
+	t.Parallel()
+
+	h := NewHealthServer()
+	r := NewServiceRegistrar()
+	h.RegisterHealthService(r)
+
+	handler := r.methods[healthPathCheck]
+	resp, err := handler.unary(context.Background(), encodeHealthCheckRequest("svc.unknown"))
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(resp) != 2 || resp[0] != 0x08 || resp[1] != byte(ServingStatusServiceUnknown) {
+		t.Errorf("Check(unknown) = % x, want 0x08 0x03", resp)
+	}
+}
+
+// TestHealthServer_Watch_BufferFull exercises the non-blocking send
+// branch (health.go:74-80). The watcher channel has buffer 4; calling
+// SetServingStatus 5+ times in a row fills it, the 5th call hits the
+// `default:` case, and SetServingStatus must NOT block.
+func TestHealthServer_Watch_BufferFull(t *testing.T) {
+	t.Parallel()
+
+	h := NewHealthServer()
+	// Subscribe first so the watcher is registered.
+	ch := h.subscribe("svc.full")
+
+	// Pre-fill the buffer (capacity 4) with 4 status updates.
+	for range 4 {
+		h.SetServingStatus("svc.full", ServingStatusServing)
+	}
+
+	// Channel is now full. The 5th SetServingStatus must not block —
+	// it hits the `default:` branch and returns immediately. We use
+	// a timer to assert it returns within a reasonable bound.
+	done := make(chan struct{})
+	go func() {
+		h.SetServingStatus("svc.full", ServingStatusNotServing)
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Expected: non-blocking send dropped the update.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("SetServingStatus blocked despite full watcher channel")
+	}
+
+	// Drain one item from the buffer to confirm it has at least the
+	// expected 4 capacity-fill items.
+	select {
+	case <-ch:
+		// good
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected at least one buffered status")
+	}
+}
+
+// TestHealthServer_UnsubscribeCleanup verifies that unsubscribe removes
+// the watcher channel from the registry and closes it.
+func TestHealthServer_UnsubscribeCleanup(t *testing.T) {
+	t.Parallel()
+
+	h := NewHealthServer()
+	ch := h.subscribe("svc.unsub")
+	if got := len(h.watchers["svc.unsub"]); got != 1 {
+		t.Fatalf("watchers len = %d, want 1", got)
+	}
+
+	h.unsubscribe("svc.unsub", ch)
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if got := len(h.watchers["svc.unsub"]); got != 0 {
+		t.Errorf("watchers len after unsubscribe = %d, want 0", got)
+	}
+	// The channel should be closed (a read returns the zero value).
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Error("unsubscribed channel still has a value")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("unsubscribed channel not closed")
+	}
+}
+
+// TestHealthServer_UnsubscribeUnknownChannel is a no-op safety check:
+// unsubscribing a channel that was never subscribed should not panic.
+func TestHealthServer_UnsubscribeUnknownChannel(t *testing.T) {
+	t.Parallel()
+
+	h := NewHealthServer()
+	other := make(chan ServingStatus, 1)
+	h.unsubscribe("svc.nothing", other) // should be a safe no-op
+}
