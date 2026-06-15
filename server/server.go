@@ -258,6 +258,7 @@ func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream
 		return
 	}
 	w := NewResponseWriter(stream)
+	w.req = req
 	if err := s.handler.ServeHTTP(ctx, req, w); err != nil {
 		s.logger.Printf("poseidon: handler error on stream %d: %v", stream.ID(), err)
 		if !w.Written() {
@@ -283,7 +284,14 @@ func (s *Server) buildRequest(headers []hpack.HeaderField, streamID uint32) *Req
 		case ":method":
 			req.Method = string(h.Value)
 		case ":path":
-			req.Path = string(h.Value)
+			// Raw :path per RFC 7540 §8.1.2.3; may include query string.
+			// Path stays raw for back-compat with chi-style routers
+			// that match routes by the full request line; RawQuery
+			// exposes the pre-parsed query string (without '?').
+			raw := string(h.Value)
+			_, query := splitPathQuery(raw)
+			req.Path = raw
+			req.RawQuery = query
 		case ":scheme":
 			req.Scheme = string(h.Value)
 		case ":authority":
@@ -291,6 +299,19 @@ func (s *Server) buildRequest(headers []hpack.HeaderField, streamID uint32) *Req
 		}
 	}
 	return req
+}
+
+// splitPathQuery splits an :path value into path and query string.
+// The query is returned without the leading '?'. Returns path only
+// if no query is present. Both inputs are safe with arbitrary user
+// data (no allocation beyond a single substring copy).
+func splitPathQuery(reqPath string) (path, rawQuery string) {
+	for i := range len(reqPath) {
+		if reqPath[i] == '?' {
+			return reqPath[:i], reqPath[i+1:]
+		}
+	}
+	return reqPath, ""
 }
 
 func joinChunks(chunks [][]byte) []byte {

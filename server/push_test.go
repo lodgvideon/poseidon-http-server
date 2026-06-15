@@ -182,3 +182,98 @@ func TestErrPushAlreadySent(t *testing.T) {
 		t.Fatal("ErrPushAlreadySent has empty message")
 	}
 }
+
+// -----------------------------------------------------------------------
+// PushWithScheme: explicit :scheme override (RFC 7540 §8.2)
+// -----------------------------------------------------------------------
+
+func TestResponseWriter_PushWithScheme_H2C(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{
+		sw:  &mockPusher{stream: stream},
+		req: &Request{Scheme: "http", Path: "/foo"}, // h2c request
+	}
+
+	_, _ = w.PushWithScheme("/style.css", "http", nil)
+
+	if len(stream.headerSets) != 1 {
+		t.Fatalf("headerSets len = %d, want 1", len(stream.headerSets))
+	}
+	scheme := schemeValue(stream.headerSets[0])
+	if scheme != "http" {
+		t.Errorf(":scheme = %q, want http (h2c must mirror request scheme)", scheme)
+	}
+}
+
+func TestResponseWriter_Push_DerivesSchemeFromRequest(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{
+		sw:  &mockPusher{stream: stream},
+		req: &Request{Scheme: "http", Path: "/foo"}, // h2c
+	}
+
+	_, _ = w.Push("/style.css", nil)
+
+	if len(stream.headerSets) != 1 {
+		t.Fatalf("headerSets len = %d, want 1", len(stream.headerSets))
+	}
+	scheme := schemeValue(stream.headerSets[0])
+	if scheme != "http" {
+		t.Errorf("Push().scheme = %q, want http (must mirror request scheme per RFC 7540 §8.2)", scheme)
+	}
+}
+
+func TestResponseWriter_Push_NoRequestContextDefaultsToHTTPS(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{sw: &mockPusher{stream: stream}} // req=nil
+
+	_, _ = w.Push("/style.css", nil)
+
+	scheme := schemeValue(stream.headerSets[0])
+	if scheme != "https" {
+		t.Errorf("scheme = %q, want https (default when no request context)", scheme)
+	}
+}
+
+func TestResponseWriter_PushWithScheme_EmptyDefaultsToHTTPS(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+
+	_, _ = w.PushWithScheme("/style.css", "", nil)
+
+	scheme := schemeValue(stream.headerSets[0])
+	if scheme != "https" {
+		t.Errorf("scheme = %q, want https (empty scheme defaults to https)", scheme)
+	}
+}
+
+func TestResponseWriter_PushWithScheme_AfterHeadersFails(t *testing.T) {
+	t.Parallel()
+
+	stream := &mockPushableStream{id: 1}
+	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w.written = true
+
+	_, err := w.PushWithScheme("/style.css", "https", nil)
+	if !errors.Is(err, ErrPushAlreadySent) {
+		t.Fatalf("err = %v, want ErrPushAlreadySent", err)
+	}
+}
+
+// schemeValue extracts the :scheme pseudo-header value from a header set.
+func schemeValue(headers []hpack.HeaderField) string {
+	for _, h := range headers {
+		if string(h.Name) == ":scheme" {
+			return string(h.Value)
+		}
+	}
+	return ""
+}

@@ -48,9 +48,17 @@ func (f HandlerFunc) ServeHTTP(ctx context.Context, req *Request, w *ResponseWri
 // ---------------------------------------------------------------------------
 
 // Request represents a server-side HTTP/2 request.
+//
+// Path is the raw :path pseudo-header value (RFC 7540 §8.1.2.3) and MAY
+// include the query string, mirroring net/http.Request.URL.RequestURI().
+// This is intentional for back-compat with chi/echo/gin-style routers
+// that match routes by the full request line. Use RawQuery to access
+// the query string separately, or url.ParseRequestURI(req.Path) for
+// structured access.
 type Request struct {
 	Method     string
-	Path       string
+	Path       string // raw :path (e.g. "/api/v1/users?limit=10")
+	RawQuery   string // query string without '?' (e.g. "limit=10"), "" if none
 	Scheme     string // "https" or "http" (h2c)
 	Authority  string // :authority pseudo-header
 	Headers    []hpack.HeaderField
@@ -125,6 +133,10 @@ type ResponseWriter struct {
 	headers http.Header
 	status  int
 	written bool
+	// req is the originating request; used to derive scheme for Push.
+	// Nil when constructed via NewResponseWriter (e.g. from tests); Push
+	// falls back to "https" in that case.
+	req *Request
 }
 
 // NewResponseWriter creates a ResponseWriter backed by the given ServerStream.
@@ -309,7 +321,7 @@ func (*discardStreamWriter) streamID() uint32 { return 0 }
 func NewHTTPRequest(req *Request) (*http.Request, error) {
 	scheme := req.Scheme
 	if scheme == "" {
-		scheme = "http"
+		scheme = schemeHTTP
 	}
 	host := req.Authority
 	if host == "" {
@@ -344,6 +356,7 @@ func HTTPRequestToRequest(r *http.Request) *Request {
 	return &Request{
 		Method:    r.Method,
 		Path:      r.URL.Path,
+		RawQuery:  r.URL.RawQuery,
 		Scheme:    r.URL.Scheme,
 		Authority: r.URL.Host,
 		Headers:   headers,

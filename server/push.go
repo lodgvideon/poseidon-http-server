@@ -37,6 +37,13 @@ var ErrPushNotSupported = errors.New("poseidon: server push not supported by thi
 // headers have been sent.
 var ErrPushAlreadySent = errors.New("poseidon: cannot push after response headers sent")
 
+// scheme constants — extracted for the goconst linter and to keep
+// "https" / "http" usage discoverable across the package.
+const (
+	schemeHTTPS = "https"
+	schemeHTTP  = "http"
+)
+
 // pusher is the subset of connStreamWriter that supports Push.
 // We use a separate type to keep the check explicit.
 type pusher interface {
@@ -66,7 +73,20 @@ return nil, false
 // to GET.
 //
 // Push must be called BEFORE the main response headers are sent.
+//
+// The :scheme pseudo-header is derived from the originating request's
+// scheme (RFC 7540 §8.2: "the server SHOULD use the same scheme as
+// the request"). If the writer has no request context (e.g. constructed
+// directly via NewResponseWriter for tests), "https" is used as a
+// safe default. Use PushWithScheme to override explicitly.
 func (w *ResponseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderField) (*ResponseWriter, error) {
+	return w.PushWithScheme(promisePath, w.deriveScheme(), promiseHeaders)
+}
+
+// PushWithScheme is like Push but lets the caller override the :scheme
+// pseudo-header on the PUSH_PROMISE. Useful when scheme negotiation
+// requires explicit signalling (e.g. h2c -> http).
+func (w *ResponseWriter) PushWithScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) (*ResponseWriter, error) {
 	if w.written {
 		return nil, ErrPushAlreadySent
 	}
@@ -77,12 +97,16 @@ func (w *ResponseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderF
 		return nil, ErrPushNotSupported
 	}
 
+	if promiseScheme == "" {
+		promiseScheme = schemeHTTPS
+	}
+
 	// Build the request headers for the promised response.
 	fields := make([]hpack.HeaderField, 0, 4+len(promiseHeaders))
 	fields = append(fields,
 		hpack.HeaderField{Name: []byte(":method"), Value: []byte("GET")},
 		hpack.HeaderField{Name: []byte(":path"), Value: []byte(promisePath)},
-		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte("https")},
+		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(promiseScheme)},
 	)
 	fields = append(fields, promiseHeaders...)
 
@@ -94,6 +118,17 @@ func (w *ResponseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderF
 
 	// Wrap it in a ResponseWriter.
 	return &ResponseWriter{
-		sw: &connStreamWriter{stream: pushStream},
+		sw:      &connStreamWriter{stream: pushStream},
+		req:     w.req, // propagate request context for nested Push
 	}, nil
+}
+
+// deriveScheme returns the request's :scheme if available, otherwise
+// "https" as a safe default. Mirrors the original request to comply
+// with RFC 7540 §8.2 (the server SHOULD use the same scheme).
+func (w *ResponseWriter) deriveScheme() string {
+	if w.req != nil && w.req.Scheme != "" {
+		return w.req.Scheme
+	}
+	return schemeHTTPS
 }

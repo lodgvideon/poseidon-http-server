@@ -651,3 +651,106 @@ func TestServer_MultiChunkBody(t *testing.T) {
 		t.Fatal("timeout")
 	}
 }
+
+// -----------------------------------------------------------------------
+// buildRequest: :path parsing (Path + RawQuery)
+// -----------------------------------------------------------------------
+
+func TestBuildRequest_PathWithQuery(t *testing.T) {
+	t.Parallel()
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	req := srv.buildRequest([]hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/api/v1/users?limit=10&offset=20")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+	}, 1)
+
+	// Back-compat: Path keeps the raw :path with query, mirroring net/http URL.RequestURI().
+	if req.Path != "/api/v1/users?limit=10&offset=20" {
+		t.Errorf("Path = %q, want %q (back-compat: raw :path)", req.Path, "/api/v1/users?limit=10&offset=20")
+	}
+	// New: RawQuery exposes the query string without '?'.
+	if req.RawQuery != "limit=10&offset=20" {
+		t.Errorf("RawQuery = %q, want %q", req.RawQuery, "limit=10&offset=20")
+	}
+}
+
+func TestBuildRequest_PathNoQuery(t *testing.T) {
+	t.Parallel()
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	req := srv.buildRequest([]hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/items/42")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+	}, 1)
+	if req.Path != "/items/42" {
+		t.Errorf("Path = %q, want /items/42", req.Path)
+	}
+	if req.RawQuery != "" {
+		t.Errorf("RawQuery = %q, want empty", req.RawQuery)
+	}
+}
+
+func TestBuildRequest_PathEmptyQuery(t *testing.T) {
+	t.Parallel()
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	req := srv.buildRequest([]hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/search?")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+	}, 1)
+	// Back-compat: Path keeps raw :path including trailing '?'.
+	if req.Path != "/search?" {
+		t.Errorf("Path = %q, want /search? (back-compat: raw :path)", req.Path)
+	}
+	if req.RawQuery != "" {
+		t.Errorf("RawQuery = %q, want empty (trailing ? is empty query)", req.RawQuery)
+	}
+}
+
+func TestBuildRequest_PathFragmentIsNotQuery(t *testing.T) {
+	t.Parallel()
+	// :path does NOT carry fragments in HTTP/2 (RFC 7540 §8.1.2.3).
+	// We should NOT mistake a '#' inside the path for a query separator.
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	req := srv.buildRequest([]hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/a%23b/c")}, // literal '#' encoded
+		{Name: []byte(":scheme"), Value: []byte("https")},
+	}, 1)
+	if req.Path != "/a%23b/c" {
+		t.Errorf("Path = %q, want /a%%23b/c", req.Path)
+	}
+	if req.RawQuery != "" {
+		t.Errorf("RawQuery = %q, want empty", req.RawQuery)
+	}
+}
+
+func TestSplitPathQuery(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in        string
+		wantPath  string
+		wantQuery string
+	}{
+		{"/foo", "/foo", ""},
+		{"/foo?", "/foo", ""},
+		{"/foo?x=1", "/foo", "x=1"},
+		{"/foo?x=1&y=2", "/foo", "x=1&y=2"},
+		{"/?x", "/", "x"},
+		{"", "", ""},
+		{"/", "/", ""},
+		{"/foo/bar?x", "/foo/bar", "x"},
+		// Encoded '#' must not be treated as query.
+		{"/a%23b/c", "/a%23b/c", ""},
+	}
+	for _, c := range cases {
+		gotPath, gotQuery := splitPathQuery(c.in)
+		if gotPath != c.wantPath || gotQuery != c.wantQuery {
+			t.Errorf("splitPathQuery(%q) = (%q, %q), want (%q, %q)",
+				c.in, gotPath, gotQuery, c.wantPath, c.wantQuery)
+		}
+	}
+}
