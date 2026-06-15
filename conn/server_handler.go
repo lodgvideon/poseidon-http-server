@@ -195,4 +195,9 @@ func (h *serverConnHandler) OnWindowUpdate(fh frame.FrameHeader, increment uint3
 	return h.streams.onWindowUpdate(fh.StreamID, increment)
 }
 
+// OnOrigin handles ORIGIN frames (RFC 8336). Silently ignored — server side.
+func (h *serverConnHandler) OnOrigin(frame.FrameHeader, []string) error { return nil }
+
+func (h *serverConnHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+
 var _ frame.Handler = (*serverConnHandler)(nil)

@@ -2,6 +2,7 @@ package grpcserver
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"sync"
@@ -84,9 +85,10 @@ type MethodDesc struct {
 //   - O: new services registered without modifying core
 //   - D: depends on server.Handler, not on server.Server
 type ServiceRegistrar struct {
-	mu       sync.RWMutex
-	methods  map[string]*methodDesc // "/pkg.Svc/Method" → desc
-	services map[string]bool         // "pkg.Svc" → registered
+	mu         sync.RWMutex
+	methods    map[string]*methodDesc // "/pkg.Svc/Method" → desc
+	services   map[string]bool        // "pkg.Svc" → registered
+	reflection *reflectionRegistry    // optional, for server reflection
 }
 
 // NewServiceRegistrar creates an empty registrar.
@@ -146,7 +148,16 @@ func (r *ServiceRegistrar) Handler() server.Handler {
 			return writeGRPCError(w, Statusf(Unimplemented, "unknown method %s", req.Path))
 		}
 
-		// Decode request body (LP message).
+		// For bidi/client-streaming, dispatch immediately without buffering body.
+		// The handler reads messages incrementally via recv().
+		switch {
+		case md.bidi != nil:
+			return r.handleBidiStream(ctx, w, md, req)
+		case md.clientS != nil:
+			return r.handleClientStream(ctx, w, md, req)
+		}
+
+		// For unary/server-streaming, read and decode the body first.
 		var reqPayload []byte
 		if req.BodyReader != nil {
 			data, err := io.ReadAll(req.BodyReader)
@@ -163,16 +174,11 @@ func (r *ServiceRegistrar) Handler() server.Handler {
 			reqPayload = msg.Payload
 		}
 
-		// Dispatch.
 		switch {
 		case md.unary != nil:
 			return r.handleUnary(ctx, w, md, reqPayload)
 		case md.serverS != nil:
 			return r.handleServerStream(ctx, w, md, reqPayload)
-		case md.clientS != nil:
-			return r.handleClientStream(ctx, w, md, req)
-		case md.bidi != nil:
-			return r.handleBidiStream(ctx, w, md, req)
 		default:
 			return writeGRPCError(w, Statusf(Unimplemented, "no handler for %s", md.fullPath))
 		}
@@ -358,8 +364,12 @@ func errToStatus(err error) RPCStatus {
 }
 
 // streamReceiver creates a recv function for client/bidi streaming.
+// In buffered mode (req.Body), LP messages are decoded from the buffered bytes.
+// In streaming mode (req.BodyReader), LP messages are decoded incrementally
+// from the stream — this is required for bidi-streaming where the client
+// sends messages interleaved with server responses.
 func streamReceiver(req *server.Request) func() ([]byte, error) {
-	// For buffered body, decode LP messages from the body.
+	// Buffered body mode — decode LP messages from pre-buffered body.
 	if len(req.Body) > 0 {
 		remaining := req.Body
 		return func() ([]byte, error) {
@@ -372,6 +382,24 @@ func streamReceiver(req *server.Request) func() ([]byte, error) {
 			}
 			remaining = remaining[n:]
 			return msg.Payload, nil
+		}
+	}
+	// Streaming body mode — read LP messages from BodyReader on demand.
+	if req.BodyReader != nil {
+		return func() ([]byte, error) {
+			hdr := make([]byte, grpcMessageHeader)
+			if _, err := io.ReadFull(req.BodyReader, hdr); err != nil {
+				return nil, err // io.EOF when stream closed
+			}
+			length := int(binary.BigEndian.Uint32(hdr[1:5]))
+			if length == 0 {
+				return nil, nil
+			}
+			payload := make([]byte, length)
+			if _, err := io.ReadFull(req.BodyReader, payload); err != nil {
+				return nil, err
+			}
+			return payload, nil
 		}
 	}
 	// No body → immediate EOF.

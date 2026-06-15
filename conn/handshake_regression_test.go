@@ -166,3 +166,6 @@ func (c *collectSettings) OnPing(frame.FrameHeader, [8]byte) error              
 func (c *collectSettings) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error          { return nil }
 func (c *collectSettings) OnWindowUpdate(frame.FrameHeader, uint32) error                           { return nil }
 func (c *collectSettings) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                { return nil }
+
+func (c *collectSettings) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (c *collectSettings) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }

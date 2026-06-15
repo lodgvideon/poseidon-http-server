@@ -574,6 +574,20 @@ func (r *settingsRecorder) OnContinuation(fh frame.FrameHeader, hb frame.HeaderB
 	return nil
 }
 
+func (r *settingsRecorder) OnOrigin(fh frame.FrameHeader, origins []string) error {
+	if r.delegate != nil {
+		return r.delegate.OnOrigin(fh, origins)
+	}
+	return nil
+}
+
+func (r *settingsRecorder) OnAltSvc(fh frame.FrameHeader, entries []frame.AltSvcEntry) error {
+	if r.delegate != nil {
+		return r.delegate.OnAltSvc(fh, entries)
+	}
+	return nil
+}
+
 var _ frame.Handler = (*settingsRecorder)(nil)
 
 // --- Error types ---

@@ -343,6 +343,9 @@ func (h *noopFrameHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []
 func (h *noopFrameHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                               { return nil }
 func (h *noopFrameHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                    { return nil }
 
+func (h *noopFrameHandler) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (h *noopFrameHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+
 // headerCollector decodes HEADERS frames and stores the result.
 type headerCollector struct {
 	fields     []hpack.HeaderField
@@ -371,6 +374,9 @@ func (c *headerCollector) OnPing(frame.FrameHeader, [8]byte) error              
 func (c *headerCollector) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error          { return nil }
 func (c *headerCollector) OnWindowUpdate(frame.FrameHeader, uint32) error                            { return nil }
 func (c *headerCollector) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                { return nil }
+
+func (c *headerCollector) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (c *headerCollector) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 func TestCORS_NonPreflight_PassesThrough(t *testing.T) {
 	done := make(chan struct{}, 1)

@@ -117,10 +117,15 @@ func main() {
 		},
 	})
 
+	// Enable gRPC server reflection so grpcurl list/describe work.
+	reg.RegisterReflection()
+	reg.RegisterFileDescriptorSet(helloFileDescriptor)
+
 	// --- Poseidon server ---
 	srv, err := server.NewServer(server.Options{
-		Handler:     reg.Handler(),
-		IdleTimeout: 60 * time.Second,
+		Handler:       reg.Handler(),
+		IdleTimeout:   60 * time.Second,
+		StreamingBody: true,
 	})
 	if err != nil {
 		log.Fatal(err)

@@ -735,6 +735,8 @@ func (h *collectHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _
 }
 
 func (h *collectHandler) OnContinuation(_ frame.FrameHeader, _ frame.HeaderBlock) error { return nil }
+func (h *collectHandler) OnOrigin(_ frame.FrameHeader, _ []string) error              { return nil }
+func (h *collectHandler) OnAltSvc(_ frame.FrameHeader, _ []frame.AltSvcEntry) error   { return nil }
 func (h *collectHandler) OnPriority(_ frame.FrameHeader, _ frame.Priority) error         { return nil }
 func (h *collectHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error         { return nil }
 func (h *collectHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error   { return nil }

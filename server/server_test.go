@@ -361,6 +361,9 @@ func (h *noopHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte)
 func (h *noopHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                               { return nil }
 func (h *noopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                    { return nil }
 
+func (h *noopHandler) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (h *noopHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+
 // headerCapture captures HEADERS frames and decodes them.
 type headerCapture struct {
 	headers []hpack.HeaderField
@@ -395,6 +398,9 @@ func (h *headerCapture) OnPing(frame.FrameHeader, [8]byte) error                
 func (h *headerCapture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error         { return nil }
 func (h *headerCapture) OnWindowUpdate(frame.FrameHeader, uint32) error                          { return nil }
 func (h *headerCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error               { return nil }
+
+func (h *headerCapture) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (h *headerCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 // TestServer_ServeStream_BodyData covers the EventData path in serveStream.
 func TestServer_ServeStream_BodyData(t *testing.T) {
