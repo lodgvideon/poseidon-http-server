@@ -1,0 +1,106 @@
+# Load / soak test harness
+
+Manual (and perf-CI) load and soak tests for **poseidon-server**. The server is
+**HTTP/2 cleartext (h2c)** — there is no TLS by default — so every tool here must
+speak **HTTP/2 over cleartext via prior-knowledge** (not the HTTP/1.1 `Upgrade`
+dance, and not ALPN-over-TLS). The one exception is k6, whose HTTP/2 path is
+TLS-only; see the caveat below.
+
+These scripts are **not wired into the blocking CI gates**. They run:
+
+- **manually** during perf investigations or before a release, or
+- in a dedicated, opt-in **perf CI job** (long-running, separate from the
+  unit/race/lint gates).
+
+The target tools (`h2load`, `ghz`, `k6`) are **not installed in normal CI**; each
+script no-ops with an install hint (exit 127) when its tool is absent, and the
+`make loadtest` target is likewise guarded.
+
+## What to measure
+
+| Metric | What it tells you |
+| --- | --- |
+| **RPS** (throughput) | requests/sec the server sustains at a given concurrency |
+| **p50 / p95 / p99 latency** | tail latency under load — the number that matters for SLOs |
+| **error rate** | should be ~0%; all responses 2xx (HTTP) / `OK` (gRPC) |
+| **0-alloc expectation** | Poseidon targets zero allocations in hot request paths. A load test does **not** measure allocs directly — pair it with `make bench` (which uses `-benchmem`) and/or run the server under `pprof` (`POSEIDON_ENABLE_PPROF=true`, then `go tool pprof http://127.0.0.1:8080/debug/pprof/allocs`). Steady, low `alloc/op` under sustained load is the signal. |
+
+For **soak** runs, use the duration knobs (`DURATION=…`) and watch RSS / goroutine
+count / GC pauses over time (via `/debug/pprof/` and `/metrics`) for leaks.
+
+## Prerequisites — start a server
+
+HTTP (the `cmd/poseidon-server` binary, default `:8080`, h2c):
+
+```sh
+# h2c cleartext on :8080
+POSEIDON_H2C=true go run ./cmd/poseidon-server --addr :8080 --h2c
+# or build first: make build && POSEIDON_H2C=true ./bin/poseidon-server --h2c
+```
+
+gRPC (the example service, `:9090`, h2c):
+
+```sh
+go run ./examples/grpc-server   # hello.HelloService on :9090
+```
+
+## a) HTTP/2 h2c — `h2load` (nghttp2)
+
+```sh
+loadtest/h2load.sh                                   # defaults: 100k reqs, 100 clients
+REQUESTS=500000 CLIENTS=200 loadtest/h2load.sh
+DURATION=30 CLIENTS=200 loadtest/h2load.sh http://127.0.0.1:8080/   # 30s soak
+```
+
+`h2load` is invoked with `--h2c`, forcing **HTTP/2 cleartext prior-knowledge**.
+Read `finished in … req/s` (RPS), the `time for request` percentile row
+(p50/p95/p99), and `status codes: N 2xx`.
+
+Install: `apt-get install -y nghttp2-client` / `brew install nghttp2` / `apk add nghttp2`.
+
+## b) gRPC — `ghz`
+
+```sh
+loadtest/ghz.sh                                      # SayHello, 100k reqs, 100 conc
+CONCURRENCY=200 TOTAL=500000 loadtest/ghz.sh
+DURATION=30s loadtest/ghz.sh 127.0.0.1:9090          # 30s soak
+CONFIG=loadtest/ghz.json loadtest/ghz.sh             # config-file mode
+```
+
+`ghz` runs with `--insecure` (plaintext **h2c**, no TLS) against
+`hello.HelloService/SayHello`, encoded from [`hello.proto`](./hello.proto).
+[`ghz.json`](./ghz.json) is an equivalent config-file form. Read `Requests/sec`,
+the `Latency distribution` percentiles, and `Status code distribution: OK N`.
+
+Install: `go install github.com/bojand/ghz/cmd/ghz@latest` / `brew install ghz`.
+
+## c) k6 (HTTP) — `k6_http2.js`
+
+```sh
+k6 run loadtest/k6_http2.js
+VUS=200 DURATION=30s k6 run loadtest/k6_http2.js
+BASE_URL=https://127.0.0.1:8443/ EXPECT_H2=true k6 run loadtest/k6_http2.js   # real HTTP/2 over TLS
+```
+
+> **HTTP/2 caveat:** k6 only negotiates HTTP/2 via **ALPN over TLS**. It does
+> **not** speak h2c prior-knowledge. Against the plain h2c listener it falls back
+> to HTTP/1.1 (still a useful latency/throughput smoke). For a genuine HTTP/2 path
+> through k6, run the server with TLS (`POSEIDON_TLS_CERT`/`POSEIDON_TLS_KEY`) and
+> point `BASE_URL` at `https://…` with `EXPECT_H2=true`. For HTTP/2 **cleartext**
+> load, use `h2load.sh` (option a) instead.
+
+Read `http_reqs` (RPS), `http_req_duration` (`p(50)/p(95)/p(99)`), and `checks`.
+
+Install: `brew install k6` / <https://k6.io/docs/get-started/installation/> /
+`docker run --rm -i grafana/k6 run - <loadtest/k6_http2.js`.
+
+## Run via Make
+
+```sh
+make loadtest                 # runs the h2c HTTP harness against a running server
+LOADTEST=ghz make loadtest    # runs the gRPC harness
+LOADTEST=k6  make loadtest    # runs the k6 harness
+```
+
+The target **no-ops with a hint** when the selected tool is not installed, so it
+is safe to invoke in environments without the perf tooling.
