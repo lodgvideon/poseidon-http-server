@@ -119,7 +119,7 @@ func (c *MetricsCollector) getOrCreateBytes(store map[string]*atomic.Int64, key 
 // Metrics returns a middleware that collects request metrics.
 func (c *MetricsCollector) Metrics() server.Middleware {
 	return func(next server.Handler) server.Handler {
-		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
+		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 			c.active.Add(1)
 			defer c.active.Add(-1)
 
@@ -220,7 +220,7 @@ func (c *MetricsCollector) WritePrometheus() string {
 // MetricsHandler returns an http.Handler-compatible server.HandlerFunc
 // that serves the Prometheus text exposition format at /metrics.
 func (c *MetricsCollector) MetricsHandler() server.HandlerFunc {
-	return server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	return server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		body := []byte(c.WritePrometheus())
 		headers := []hpack.HeaderField{
 			{Name: []byte("content-type"), Value: []byte("text/plain; version=0.0.4; charset=utf-8")},

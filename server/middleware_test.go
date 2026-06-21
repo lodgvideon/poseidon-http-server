@@ -16,7 +16,7 @@ func TestMiddleware_Chain_ExecutionOrder(t *testing.T) {
 	var order []string
 
 	mw1 := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+		return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 			order = append(order, "mw1-before")
 			err := next.ServeHTTP(ctx, req, w)
 			order = append(order, "mw1-after")
@@ -25,7 +25,7 @@ func TestMiddleware_Chain_ExecutionOrder(t *testing.T) {
 	}
 
 	mw2 := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+		return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 			order = append(order, "mw2-before")
 			err := next.ServeHTTP(ctx, req, w)
 			order = append(order, "mw2-after")
@@ -34,7 +34,7 @@ func TestMiddleware_Chain_ExecutionOrder(t *testing.T) {
 	}
 
 	mw3 := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+		return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 			order = append(order, "mw3-before")
 			err := next.ServeHTTP(ctx, req, w)
 			order = append(order, "mw3-after")
@@ -42,7 +42,7 @@ func TestMiddleware_Chain_ExecutionOrder(t *testing.T) {
 		})
 	}
 
-	final := HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error {
+	final := HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error {
 		order = append(order, "handler")
 		return nil
 	})
@@ -72,7 +72,7 @@ func TestMiddleware_Chain_ExecutionOrder(t *testing.T) {
 
 func TestMiddleware_Chain_Empty(t *testing.T) {
 	called := false
-	final := HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error {
+	final := HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error {
 		called = true
 		return nil
 	})
@@ -92,7 +92,7 @@ func TestMiddleware_Chain_Empty(t *testing.T) {
 func TestMiddleware_Chain_Single(t *testing.T) {
 	mark := ""
 	mw := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+		return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 			mark = "before-"
 			err := next.ServeHTTP(ctx, req, w)
 			mark += "-after"
@@ -100,7 +100,7 @@ func TestMiddleware_Chain_Single(t *testing.T) {
 		})
 	}
 
-	final := HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+	final := HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 		mark += "handler"
 		_ = w.WriteHeaders(200, nil)
 		return nil
@@ -122,7 +122,7 @@ func TestMiddleware_Chain_ShortCircuit(t *testing.T) {
 	handlerCalled := false
 
 	mw := func(_ Handler) Handler {
-		return HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		return HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			// Short-circuit: don't call next.
 			_ = w.WriteHeaders(403, []hpack.HeaderField{
 				{Name: []byte("x-blocked"), Value: []byte("true")},
@@ -131,7 +131,7 @@ func TestMiddleware_Chain_ShortCircuit(t *testing.T) {
 		})
 	}
 
-	final := HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error {
+	final := HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error {
 		handlerCalled = true
 		return nil
 	})
@@ -155,13 +155,13 @@ func TestMiddleware_Chain_ErrorPropagation(t *testing.T) {
 	testErr := context.DeadlineExceeded
 
 	mw := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+		return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 			err := next.ServeHTTP(ctx, req, w)
 			return err // propagate
 		})
 	}
 
-	final := HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error {
+	final := HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error {
 		return testErr
 	})
 
@@ -177,7 +177,7 @@ func TestMiddleware_Chain_ErrorPropagation(t *testing.T) {
 
 func TestMiddleware_Chain_ModifiesRequest(t *testing.T) {
 	mw := func(next Handler) Handler {
-		return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+		return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 			req.Headers = append(req.Headers, hpack.HeaderField{
 				Name:  []byte("x-injected"),
 				Value: []byte("by-middleware"),
@@ -187,7 +187,7 @@ func TestMiddleware_Chain_ModifiesRequest(t *testing.T) {
 	}
 
 	var capturedHeaders []hpack.HeaderField
-	final := HandlerFunc(func(_ context.Context, req *Request, _ *ResponseWriter) error {
+	final := HandlerFunc(func(_ context.Context, req *Request, _ ResponseWriter) error {
 		capturedHeaders = req.Headers
 		return nil
 	})

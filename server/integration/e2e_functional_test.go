@@ -31,7 +31,7 @@ import (
 func TestE2E_001_GetHelloWorld(t *testing.T) {
 	t.Parallel()
 
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		return w.WriteData([]byte("hello, world"))
 	}))
 
@@ -60,7 +60,7 @@ func TestE2E_002_PostJSON(t *testing.T) {
 	t.Parallel()
 
 	var seenMethod atomic.Value
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w server.ResponseWriter) error {
 		seenMethod.Store(req.Method)
 		if req.Method != "POST" {
 			// Warmup GET — return 200 with empty body.
@@ -95,7 +95,7 @@ func TestE2E_002_PostJSON(t *testing.T) {
 func TestE2E_003_ResponseHeaders(t *testing.T) {
 	t.Parallel()
 
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		w.Header().Set("X-Custom", "value-1")
 		w.Header().Set("X-Trace-Id", "abc-123")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -141,7 +141,7 @@ func TestE2E_004_LargeBody(t *testing.T) {
 		downloadBody[i] = byte(i % 251)
 	}
 
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w server.ResponseWriter) error {
 		// Read the request body fully. Without StreamingBody, the body is
 		// already buffered in req.Body; with it, BodyReader is set.
 		var got []byte
@@ -192,7 +192,7 @@ func TestE2E_005_KeepAliveConnectionReuse(t *testing.T) {
 	t.Parallel()
 
 	var counter atomic.Int64
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		counter.Add(1)
 		_, _ = fmt.Fprintf(w, "count=%d", counter.Load())
 		return nil
@@ -225,7 +225,7 @@ func TestE2E_006_ConcurrentStreams_100Parallel(t *testing.T) {
 	t.Parallel()
 
 	var counter atomic.Int64
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		n := counter.Add(1)
 		_, _ = fmt.Fprintf(w, "%d", n)
 		return nil
@@ -260,7 +260,7 @@ func TestE2E_006_ConcurrentStreams_100Parallel(t *testing.T) {
 func TestE2E_007_ClientCancelDuringRead(t *testing.T) {
 	t.Parallel()
 
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		// Stream a large response in chunks so the client can read partially
 		// and cancel.
 		for range 100 {
@@ -313,7 +313,7 @@ func TestE2E_008_GracefulShutdown_DrainsInflight(t *testing.T) {
 
 	srv, err := server.NewServer(server.Options{
 		Addr:                    ln.Addr().String(),
-		Handler:                 server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+		Handler:                 server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 			started <- struct{}{}
 			time.Sleep(200 * time.Millisecond)
 			_, _ = w.Write([]byte("done"))
@@ -391,7 +391,7 @@ func TestE2E_009_RSTStream_OnHandlerPanic(t *testing.T) {
 
 	logBuf := &bytes.Buffer{}
 	ts := startTestServer(t,
-		server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+		server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 			panic("boom")
 		}),
 		func(o *server.Options) {
@@ -421,7 +421,7 @@ func TestE2E_009_RSTStream_OnHandlerPanic(t *testing.T) {
 func TestE2E_010_NotFound(t *testing.T) {
 	t.Parallel()
 
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w server.ResponseWriter) error {
 		if req.Path == "/known" {
 			_, _ = w.Write([]byte("ok"))
 			return nil
@@ -445,7 +445,7 @@ func TestE2E_010_NotFound(t *testing.T) {
 func TestE2E_011_PathQueryAndHeaders(t *testing.T) {
 	t.Parallel()
 
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, req *server.Request, w server.ResponseWriter) error {
 		w.Header().Set("X-Path", req.Path)
 		w.Header().Set("X-Method", req.Method)
 		w.Header().Set("X-Authority", req.Authority)
@@ -485,7 +485,7 @@ func TestE2E_011_PathQueryAndHeaders(t *testing.T) {
 func TestE2E_012_MultipleConcurrentConnections(t *testing.T) {
 
 	var counter atomic.Int64
-	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	ts := startTestServer(t, server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		counter.Add(1)
 		_, _ = fmt.Fprintf(w, "%d", counter.Load())
 		return nil

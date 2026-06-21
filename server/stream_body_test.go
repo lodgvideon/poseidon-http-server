@@ -15,7 +15,7 @@ import (
 func TestStreamBody_ReadAll(t *testing.T) {
 	srv, err := NewServer(Options{
 		StreamingBody: true,
-		Handler: HandlerFunc(func(_ context.Context, req *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
 			if req.BodyReader == nil {
 				t.Error("BodyReader is nil, expected io.ReadCloser")
 				_ = w.WriteHeaders(500, nil)
@@ -74,7 +74,7 @@ func TestStreamBody_ReadAll(t *testing.T) {
 func TestStreamBody_BufferedMode(t *testing.T) {
 	srv, err := NewServer(Options{
 		StreamingBody: false,
-		Handler: HandlerFunc(func(_ context.Context, req *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
 			if req.BodyReader != nil {
 				t.Error("BodyReader should be nil in buffered mode")
 			}
@@ -125,7 +125,7 @@ func TestStreamBody_BufferedMode(t *testing.T) {
 func TestStreamBody_LargeChunk(t *testing.T) {
 	srv, err := NewServer(Options{
 		StreamingBody: true,
-		Handler: HandlerFunc(func(_ context.Context, req *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
 			body, _ := io.ReadAll(req.BodyReader)
 			_ = req.BodyReader.Close()
 			_ = w.WriteHeaders(200, nil)
@@ -177,7 +177,7 @@ func TestServeStreamBuffered_Trailers(t *testing.T) {
 	trailerReceived := make(chan string, 1)
 	srv, err := NewServer(Options{
 		StreamingBody: false,
-		Handler: HandlerFunc(func(_ context.Context, req *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
 			body := string(req.Body)
 			trailer := ""
 			for _, h := range req.Trailers {

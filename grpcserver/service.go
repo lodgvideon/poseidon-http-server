@@ -136,7 +136,7 @@ func (r *ServiceRegistrar) RegisterService(desc *ServiceDesc) {
 // The handler validates content-type, decodes LP framing, routes to
 // the registered method, and encodes the response.
 func (r *ServiceRegistrar) Handler() server.Handler {
-	return server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
+	return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 		// Validate content-type.
 		if !isGRPCContentType(req.Headers) {
 			return writeGRPCError(w, Statusf(Unimplemented, "invalid content-type"))
@@ -191,7 +191,7 @@ func (r *ServiceRegistrar) Handler() server.Handler {
 
 func (r *ServiceRegistrar) handleUnary(
 	ctx context.Context,
-	w *server.ResponseWriter,
+	w server.ResponseWriter,
 	md *methodDesc,
 	reqPayload []byte,
 ) error {
@@ -220,7 +220,7 @@ func (r *ServiceRegistrar) handleUnary(
 
 func (r *ServiceRegistrar) handleServerStream(
 	ctx context.Context,
-	w *server.ResponseWriter,
+	w server.ResponseWriter,
 	md *methodDesc,
 	reqPayload []byte,
 ) error {
@@ -244,7 +244,7 @@ func (r *ServiceRegistrar) handleServerStream(
 
 func (r *ServiceRegistrar) handleClientStream(
 	ctx context.Context,
-	w *server.ResponseWriter,
+	w server.ResponseWriter,
 	md *methodDesc,
 	req *server.Request,
 ) error {
@@ -273,7 +273,7 @@ func (r *ServiceRegistrar) handleClientStream(
 
 func (r *ServiceRegistrar) handleBidiStream(
 	ctx context.Context,
-	w *server.ResponseWriter,
+	w server.ResponseWriter,
 	md *methodDesc,
 	req *server.Request,
 ) error {
@@ -327,7 +327,7 @@ func grpcResponseHeaders() []hpack.HeaderField {
 }
 
 // writeGRPCError sends a gRPC error as headers + trailers (no body).
-func writeGRPCError(w *server.ResponseWriter, st RPCStatus) error {
+func writeGRPCError(w server.ResponseWriter, st RPCStatus) error {
 	// gRPC errors are sent via trailers-only response.
 	// Headers with :status 200 + content-type, then trailers with grpc-status.
 	hdrs := grpcResponseHeaders()

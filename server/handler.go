@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
@@ -31,15 +32,15 @@ import (
 // shared server; the server dispatches each stream to the handler in its
 // own goroutine.
 type Handler interface {
-	ServeHTTP(ctx context.Context, req *Request, w *ResponseWriter) error
+	ServeHTTP(ctx context.Context, req *Request, w ResponseWriter) error
 }
 
 // HandlerFunc is a type adapter that allows the use of ordinary functions
 // as Handler values.
-type HandlerFunc func(ctx context.Context, req *Request, w *ResponseWriter) error
+type HandlerFunc func(ctx context.Context, req *Request, w ResponseWriter) error
 
 // ServeHTTP calls f(ctx, req, w).
-func (f HandlerFunc) ServeHTTP(ctx context.Context, req *Request, w *ResponseWriter) error {
+func (f HandlerFunc) ServeHTTP(ctx context.Context, req *Request, w ResponseWriter) error {
 	return f(ctx, req, w)
 }
 
@@ -102,7 +103,7 @@ func (w *connStreamWriter) streamID() uint32 {
 }
 
 // canPush returns the underlying stream if it supports push.
-// This satisfies the pusher interface used by server.ResponseWriter.Push.
+// This satisfies the pusher interface used by responseWriter's Pusher methods.
 func (w *connStreamWriter) canPush() (pushableStream, bool) {
 	if w.stream == nil {
 		return nil, false
@@ -114,8 +115,14 @@ func (w *connStreamWriter) canPush() (pushableStream, bool) {
 // ResponseWriter
 // ---------------------------------------------------------------------------
 
-// ResponseWriter implements both native Poseidon methods and the
-// http.ResponseWriter interface, allowing handlers to use either API.
+// ResponseWriter is the interface handlers and middleware receive. It exposes
+// both the native (zero-allocation) Poseidon write path and the stdlib
+// http.ResponseWriter path, so handlers may use either API.
+//
+// Because ResponseWriter is an interface, middleware can intercept the response
+// by wrapping it — embedding a ResponseWriter and overriding the write methods
+// (this is how the Gzip middleware buffers and compresses the body). The
+// concrete implementation is unexported; obtain one via NewResponseWriter.
 //
 // Native (zero-allocation) path:
 //
@@ -128,7 +135,42 @@ func (w *connStreamWriter) canPush() (pushableStream, bool) {
 //	w.Header().Set("Content-Type", "text/plain")
 //	w.WriteHeader(200)
 //	w.Write(body)
-type ResponseWriter struct {
+//
+// Server Push is an optional capability exposed via the separate Pusher
+// interface (mirroring net/http.Pusher); type-assert to access it:
+//
+//	if p, ok := w.(server.Pusher); ok { p.Push("/style.css", nil) }
+type ResponseWriter interface {
+	http.ResponseWriter
+
+	// WriteHeaders sends response headers with the given status and extra
+	// HPACK fields. No-op if headers were already sent.
+	WriteHeaders(status int, headers []hpack.HeaderField) error
+	// WriteData sends a response body chunk, auto-sending a 200 if needed.
+	WriteData(p []byte) error
+	// WriteTrailers sends trailing headers and ends the stream.
+	WriteTrailers(trailers []hpack.HeaderField) error
+
+	// Status returns the status code set via WriteHeaders/WriteHeader (0 if unset).
+	Status() int
+	// StatusCode is an alias of Status kept for back-compat.
+	StatusCode() int
+	// Written reports whether headers have been sent.
+	Written() bool
+}
+
+// Pusher is the optional HTTP/2 Server Push capability (RFC 7540 §8.2),
+// implemented by ResponseWriters backed by a real stream. It is kept separate
+// from ResponseWriter (as net/http keeps Pusher/Flusher/Hijacker separate) so
+// the core interface stays small. Type-assert a ResponseWriter to reach it.
+type Pusher interface {
+	Push(promisePath string, promiseHeaders []hpack.HeaderField) (ResponseWriter, error)
+	PushWithScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) (ResponseWriter, error)
+	PushWithPriority(promisePath string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (ResponseWriter, error)
+}
+
+// responseWriter is the concrete ResponseWriter backed by a stream sink.
+type responseWriter struct {
 	sw      streamWriter
 	headers http.Header
 	status  int
@@ -140,30 +182,43 @@ type ResponseWriter struct {
 }
 
 // NewResponseWriter creates a ResponseWriter backed by the given ServerStream.
-func NewResponseWriter(stream *conn.ServerStream) *ResponseWriter {
-	return &ResponseWriter{
+func NewResponseWriter(stream *conn.ServerStream) ResponseWriter {
+	return &responseWriter{
 		sw: &connStreamWriter{stream: stream},
 	}
 }
 
-// newResponseWriterWithSW creates a ResponseWriter with a custom streamWriter
+// newConnResponseWriter creates the concrete writer for a stream, binding the
+// originating request (used to derive the Push :scheme). Internal to the server.
+func newConnResponseWriter(stream *conn.ServerStream, req *Request) *responseWriter {
+	return &responseWriter{
+		sw:  &connStreamWriter{stream: stream},
+		req: req,
+	}
+}
+
+// newResponseWriterWithSW creates a responseWriter with a custom streamWriter
 // (for testing).
-func newResponseWriterWithSW(sw streamWriter) *ResponseWriter {
-	return &ResponseWriter{sw: sw}
+func newResponseWriterWithSW(sw streamWriter) *responseWriter {
+	return &responseWriter{sw: sw}
 }
 
 // StatusCode returns the HTTP status code that was set via WriteHeaders or
 // WriteHeader. Returns 0 if no status has been set yet.
-func (w *ResponseWriter) StatusCode() int { return w.status }
+func (w *responseWriter) StatusCode() int { return w.status }
 
-// Compile-time interface check.
-var _ http.ResponseWriter = (*ResponseWriter)(nil)
+// Compile-time interface checks.
+var (
+	_ http.ResponseWriter = (*responseWriter)(nil)
+	_ ResponseWriter      = (*responseWriter)(nil)
+	_ Pusher              = (*responseWriter)(nil)
+)
 
 // --- Native Poseidon methods ------------------------------------------------
 
 // WriteHeaders sends response headers with the given status code and extra
 // HPACK header fields. If headers have already been sent this is a no-op.
-func (w *ResponseWriter) WriteHeaders(status int, headers []hpack.HeaderField) error {
+func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) error {
 	if w.written {
 		return nil
 	}
@@ -185,7 +240,7 @@ func (w *ResponseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 
 // WriteData sends response body data. If headers have not been sent yet it
 // auto-sends a 200 response before writing data.
-func (w *ResponseWriter) WriteData(p []byte) error {
+func (w *responseWriter) WriteData(p []byte) error {
 	if !w.written {
 		if err := w.WriteHeaders(http.StatusOK, nil); err != nil {
 			return err
@@ -196,7 +251,7 @@ func (w *ResponseWriter) WriteData(p []byte) error {
 
 // WriteTrailers sends trailing headers using SendHeaders with endStream=true
 // (the conn package does not expose a dedicated trailer method).
-func (w *ResponseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
+func (w *responseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
 	return w.sw.sendHeaders(context.Background(), trailers, true)
 }
 
@@ -204,7 +259,7 @@ func (w *ResponseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
 
 // Header returns the header map that will be sent by WriteHeader.
 // Lazy-initialised on first access.
-func (w *ResponseWriter) Header() http.Header {
+func (w *responseWriter) Header() http.Header {
 	if w.headers == nil {
 		w.headers = make(http.Header)
 	}
@@ -213,7 +268,7 @@ func (w *ResponseWriter) Header() http.Header {
 
 // Write sends response body data, implementing io.Writer. If headers have not
 // been sent yet, auto-sends a 200 response.
-func (w *ResponseWriter) Write(p []byte) (int, error) {
+func (w *responseWriter) Write(p []byte) (int, error) {
 	if !w.written {
 		w.WriteHeader(http.StatusOK)
 	}
@@ -226,7 +281,7 @@ func (w *ResponseWriter) Write(p []byte) (int, error) {
 // WriteHeader sends an HTTP response header with the provided status code.
 // If headers have already been sent (via WriteHeaders or a prior WriteHeader
 // call) this is a no-op, matching stdlib behaviour.
-func (w *ResponseWriter) WriteHeader(statusCode int) {
+func (w *responseWriter) WriteHeader(statusCode int) {
 	if w.written {
 		return
 	}
@@ -258,10 +313,10 @@ func (w *ResponseWriter) WriteHeader(statusCode int) {
 }
 
 // Status returns the HTTP status code set via WriteHeaders or WriteHeader.
-func (w *ResponseWriter) Status() int { return w.status }
+func (w *responseWriter) Status() int { return w.status }
 
 // Written reports whether headers have been sent.
-func (w *ResponseWriter) Written() bool { return w.written }
+func (w *responseWriter) Written() bool { return w.written }
 
 // ---------------------------------------------------------------------------
 // Adapters: http.Handler ↔ Handler
@@ -270,7 +325,7 @@ func (w *ResponseWriter) Written() bool { return w.written }
 // FromHTTPHandler adapts any [http.Handler] (chi.Router, http.ServeMux, etc.)
 // to a Poseidon [Handler].
 func FromHTTPHandler(h http.Handler) Handler {
-	return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+	return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 		httpReq, err := NewHTTPRequest(req)
 		if err != nil {
 			return err

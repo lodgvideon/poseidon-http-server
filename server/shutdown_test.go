@@ -17,7 +17,7 @@ import (
 
 func TestShutdown_NoActiveStreams(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			return w.WriteHeaders(200, nil)
 		}),
 	})
@@ -50,7 +50,7 @@ func TestShutdown_WaitsForStreams(t *testing.T) {
 	block := make(chan struct{})
 
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			close(started)
 			<-block // block until test unblocks
 			return w.WriteHeaders(200, nil)
@@ -116,7 +116,7 @@ func TestShutdown_ContextCancelled(t *testing.T) {
 	block := make(chan struct{})
 
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			close(started)
 			<-block
 			return w.WriteHeaders(200, nil)
@@ -167,7 +167,7 @@ func TestShutdown_ContextCancelled(t *testing.T) {
 
 func TestShutdown_DoubleShutdown(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			return w.WriteHeaders(200, nil)
 		}),
 	})
@@ -197,7 +197,7 @@ func TestShutdown_DoubleShutdown(t *testing.T) {
 
 func TestClose_DoubleClose(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			return w.WriteHeaders(200, nil)
 		}),
 	})

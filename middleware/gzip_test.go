@@ -149,7 +149,7 @@ func TestGzip_MiddlewareCompiles(t *testing.T) {
 		t.Fatal("Gzip returned nil middleware")
 	}
 
-	_ = mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	_ = mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		return nil
 	}))
 }

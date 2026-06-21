@@ -41,7 +41,7 @@ func TestNewServer_WithHTTPHandler(t *testing.T) {
 // TestServer_ConnCount verifies connection tracking starts at 0.
 func TestServer_ConnCount(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
@@ -66,7 +66,7 @@ func TestServer_AcceptAndDispatch(t *testing.T) {
 	var gotReq *Request
 
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, req *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
 			gotReq = req
 			_ = w.WriteHeaders(200, []hpack.HeaderField{
 				{Name: []byte("content-type"), Value: []byte("text/plain")},
@@ -148,7 +148,7 @@ func TestServer_AcceptAndDispatch(t *testing.T) {
 // a 500 response when headers haven't been sent yet.
 func TestServer_HandlerError_Sends500(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error {
 			return context.DeadlineExceeded
 		}),
 	})
@@ -269,7 +269,7 @@ func TestServer_HTTPHandler_DropIn(t *testing.T) {
 // TestServer_Shutdown verifies graceful shutdown on context cancel.
 func TestServer_Shutdown(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
@@ -406,7 +406,7 @@ func (h *headerCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error {
 func TestServer_ServeStream_BodyData(t *testing.T) {
 	bodyReceived := make(chan []byte, 1)
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, req *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
 			bodyReceived <- req.Body
 			_ = w.WriteHeaders(200, nil)
 			return nil
@@ -452,14 +452,14 @@ func TestServer_ServeStream_BodyData(t *testing.T) {
 func TestServer_WithMiddleware(t *testing.T) {
 	var order []string
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			order = append(order, "handler")
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
 		Middleware: []Middleware{
 			func(next Handler) Handler {
-				return HandlerFunc(func(ctx context.Context, req *Request, w *ResponseWriter) error {
+				return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 					order = append(order, "mw1")
 					return next.ServeHTTP(ctx, req, w)
 				})
@@ -506,7 +506,7 @@ func TestServer_WithMiddleware(t *testing.T) {
 // TestServer_MaxConcurrentConnections verifies connection rejection.
 func TestServer_MaxConcurrentConnections(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			time.Sleep(500 * time.Millisecond)
 			_ = w.WriteHeaders(200, nil)
 			return nil
@@ -558,7 +558,7 @@ func TestServer_MaxConcurrentConnections(t *testing.T) {
 func TestServer_ListenAndServe(t *testing.T) {
 	srv, err := NewServer(Options{
 		Addr: "127.0.0.1:0",
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
@@ -612,7 +612,7 @@ func TestJoinChunks_Multi(t *testing.T) {
 func TestServer_MultiChunkBody(t *testing.T) {
 	bodyReceived := make(chan []byte, 1)
 	srv, _ := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, req *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
 			bodyReceived <- req.Body
 			_ = w.WriteHeaders(200, nil)
 			return nil
@@ -658,7 +658,7 @@ func TestServer_MultiChunkBody(t *testing.T) {
 
 func TestBuildRequest_PathWithQuery(t *testing.T) {
 	t.Parallel()
-	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error { return nil })})
 	req := srv.buildRequest([]hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/api/v1/users?limit=10&offset=20")},
@@ -678,7 +678,7 @@ func TestBuildRequest_PathWithQuery(t *testing.T) {
 
 func TestBuildRequest_PathNoQuery(t *testing.T) {
 	t.Parallel()
-	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error { return nil })})
 	req := srv.buildRequest([]hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/items/42")},
@@ -695,7 +695,7 @@ func TestBuildRequest_PathNoQuery(t *testing.T) {
 
 func TestBuildRequest_PathEmptyQuery(t *testing.T) {
 	t.Parallel()
-	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error { return nil })})
 	req := srv.buildRequest([]hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/search?")},
@@ -714,7 +714,7 @@ func TestBuildRequest_PathFragmentIsNotQuery(t *testing.T) {
 	t.Parallel()
 	// :path does NOT carry fragments in HTTP/2 (RFC 7540 §8.1.2.3).
 	// We should NOT mistake a '#' inside the path for a query separator.
-	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error { return nil })})
+	srv, _ := NewServer(Options{Handler: HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error { return nil })})
 	req := srv.buildRequest([]hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/a%23b/c")}, // literal '#' encoded
