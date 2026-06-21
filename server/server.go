@@ -67,6 +67,15 @@ type Options struct {
 	//   <0 => unlimited / disabled
 	//   >0 => explicit limit in bytes
 	MaxRequestBodyBytes int64
+
+	// OnDrainStart, if set, is invoked exactly once at the very START of
+	// Shutdown — before the listener is closed and before GOAWAY is sent —
+	// so callers can flip readiness to NOT-ready (e.g.
+	// HealthState.SetNotReady and/or grpc health SetServingStatus(NotServing)).
+	// This lets Kubernetes stop routing new traffic to this instance while
+	// in-flight streams continue to drain. It runs synchronously while the
+	// server lock is held, so it must not block or call back into the server.
+	OnDrainStart func()
 }
 
 // defaultMaxRequestBodyBytes is the secure-by-default cap on buffered request
@@ -466,6 +475,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.shutdown = true
 	s.closed = true
+
+	// Drain start: flip readiness to NOT-ready BEFORE closing the listener or
+	// sending GOAWAY, so k8s removes this instance from Service endpoints and
+	// stops routing new traffic while in-flight streams continue to drain.
+	if s.opts.OnDrainStart != nil {
+		s.opts.OnDrainStart()
+	}
 
 	// Close listener — stop accepting new connections.
 	if s.listener != nil {
