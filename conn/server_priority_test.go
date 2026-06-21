@@ -1,4 +1,5 @@
 package conn
+
 import (
 	"context"
 	"net"
@@ -217,7 +218,7 @@ func TestServerStream_PushWithPriority_StoredOnPushStream(t *testing.T) {
 			defer cancel()
 			sawPush := false
 			sawPriority := false
-			for !(sawPush && sawPriority) {
+			for !sawPush || !sawPriority {
 				if _, err := cliFr.ReadFrame(ctx, h); err != nil {
 					t.Logf("ReadFrame: %v", err)
 					return
@@ -363,17 +364,19 @@ func (h *captureAllHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	h.lastType, h.lastFlags, h.lastBody = fh.Type, fh.Flags, append([]byte(nil), hb...)
 	return nil
 }
-func (h *captureAllHandler) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
-func (h *captureAllHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
+func (h *captureAllHandler) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (h *captureAllHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
 func (h *captureAllHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
-func (h *captureAllHandler) OnSettingsAck(frame.FrameHeader) error              { return nil }
-func (h *captureAllHandler) OnPing(frame.FrameHeader, [8]byte) error            { return nil }
-func (h *captureAllHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
-func (h *captureAllHandler) OnWindowUpdate(frame.FrameHeader, uint32) error      { return nil }
+func (h *captureAllHandler) OnSettingsAck(frame.FrameHeader) error                    { return nil }
+func (h *captureAllHandler) OnPing(frame.FrameHeader, [8]byte) error                  { return nil }
+func (h *captureAllHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (h *captureAllHandler) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
 func (h *captureAllHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
 func (h *captureAllHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	h.lastType, h.lastFlags, h.lastBody = frame.FramePushPromise, 0, nil
 	return nil
 }
-func (h *captureAllHandler) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (h *captureAllHandler) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (h *captureAllHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }

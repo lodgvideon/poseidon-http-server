@@ -228,18 +228,22 @@ func (h *collectHeadersHandler) OnHeaders(_ frame.FrameHeader, hb frame.HeaderBl
 func (h *collectHeadersHandler) OnData(_ frame.FrameHeader, _ []byte, _ uint8) error {
 	return nil
 }
-func (h *collectHeadersHandler) OnPriority(frame.FrameHeader, frame.Priority) error  { return nil }
-func (h *collectHeadersHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error  { return nil }
+func (h *collectHeadersHandler) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (h *collectHeadersHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
 func (h *collectHeadersHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
-func (h *collectHeadersHandler) OnSettingsAck(frame.FrameHeader) error               { return nil }
-func (h *collectHeadersHandler) OnPing(frame.FrameHeader, [8]byte) error             { return nil }
-func (h *collectHeadersHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
-func (h *collectHeadersHandler) OnWindowUpdate(frame.FrameHeader, uint32) error      { return nil }
-func (h *collectHeadersHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
+func (h *collectHeadersHandler) OnSettingsAck(frame.FrameHeader) error                    { return nil }
+func (h *collectHeadersHandler) OnPing(frame.FrameHeader, [8]byte) error                  { return nil }
+func (h *collectHeadersHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (h *collectHeadersHandler) OnWindowUpdate(frame.FrameHeader, uint32) error { return nil }
+func (h *collectHeadersHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error {
+	return nil
+}
 func (h *collectHeadersHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
 }
-func (h *collectHeadersHandler) OnOrigin(frame.FrameHeader, []string) error          { return nil }
+func (h *collectHeadersHandler) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (h *collectHeadersHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 // ---------------------------------------------------------------------------
@@ -276,9 +280,9 @@ func TestIntegration_UnaryRPC(t *testing.T) {
 
 	hb := enc.EncodeBlock(nil, headers)
 	if err := fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID:   1,
+		StreamID:      1,
 		BlockFragment: hb,
-		EndHeaders: true,
+		EndHeaders:    true,
 	}); err != nil {
 		t.Fatalf("WriteHeaders: %v", err)
 	}
@@ -315,12 +319,13 @@ func TestIntegration_UnaryRPC(t *testing.T) {
 	}
 
 	var respBody []byte
-	if fh2.Type == frame.FrameData {
+	switch fh2.Type {
+	case frame.FrameData:
 		respBody = collector2.dataBuf.Bytes()
 		// Read trailers.
 		collector3 := &collectHandler{}
 		_, _ = fr.ReadFrame(ctx, collector3)
-	} else if fh2.Type == frame.FrameHeaders {
+	case frame.FrameHeaders:
 		// Trailers-only (error case).
 		// This is fine, just check trailers.
 		_ = fh2
@@ -371,10 +376,10 @@ func TestIntegration_UnaryRPC_Error(t *testing.T) {
 
 	hb := enc.EncodeBlock(nil, headers)
 	_ = fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID:   1,
+		StreamID:      1,
 		BlockFragment: hb,
-		EndHeaders: true,
-		EndStream:  true,
+		EndHeaders:    true,
+		EndStream:     true,
 	})
 
 	// Read response: first HEADERS (response headers), second HEADERS (trailers).
@@ -437,10 +442,10 @@ func TestIntegration_UnknownMethod(t *testing.T) {
 
 	hb := enc.EncodeBlock(nil, headers)
 	_ = fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID:   1,
+		StreamID:      1,
 		BlockFragment: hb,
-		EndHeaders: true,
-		EndStream:  true,
+		EndHeaders:    true,
+		EndStream:     true,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -515,9 +520,9 @@ func TestIntegration_ServerStreaming(t *testing.T) {
 
 	hb := enc.EncodeBlock(nil, headers)
 	_ = fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID:   1,
+		StreamID:      1,
 		BlockFragment: hb,
-		EndHeaders: true,
+		EndHeaders:    true,
 	})
 	_ = fr.WriteData(1, false, body)
 	_ = fr.WriteData(1, true, nil)
@@ -782,10 +787,10 @@ func TestIntegration_InvalidContentType(t *testing.T) {
 
 	hb := enc.EncodeBlock(nil, headers)
 	_ = fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID:   1,
+		StreamID:      1,
 		BlockFragment: hb,
-		EndHeaders: true,
-		EndStream:  true,
+		EndHeaders:    true,
+		EndStream:     true,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -868,15 +873,15 @@ func (h *collectHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _
 }
 
 func (h *collectHandler) OnContinuation(_ frame.FrameHeader, _ frame.HeaderBlock) error { return nil }
-func (h *collectHandler) OnOrigin(_ frame.FrameHeader, _ []string) error              { return nil }
-func (h *collectHandler) OnAltSvc(_ frame.FrameHeader, _ []frame.AltSvcEntry) error   { return nil }
-func (h *collectHandler) OnPriority(_ frame.FrameHeader, _ frame.Priority) error         { return nil }
-func (h *collectHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error         { return nil }
-func (h *collectHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error   { return nil }
+func (h *collectHandler) OnOrigin(_ frame.FrameHeader, _ []string) error                { return nil }
+func (h *collectHandler) OnAltSvc(_ frame.FrameHeader, _ []frame.AltSvcEntry) error     { return nil }
+func (h *collectHandler) OnPriority(_ frame.FrameHeader, _ frame.Priority) error        { return nil }
+func (h *collectHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error        { return nil }
+func (h *collectHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error  { return nil }
 func (h *collectHandler) OnPushPromise(_ frame.FrameHeader, _ uint32, _ frame.HeaderBlock, _ uint8) error {
 	return nil
 }
-func (h *collectHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error          { return nil }
+func (h *collectHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error { return nil }
 func (h *collectHandler) OnGoAway(_ frame.FrameHeader, _ uint32, _ frame.ErrCode, _ []byte) error {
 	return nil
 }

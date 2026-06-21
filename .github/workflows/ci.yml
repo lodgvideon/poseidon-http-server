@@ -49,9 +49,12 @@ jobs:
           go-version: '1.26'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v7+ of the action runs golangci-lint v2, which the .golangci.yml
+        # (version: "2" schema) requires. v6 installs the last v1 binary and
+        # rejects the v2 config at `config verify`. Pin the linter to match local.
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.3.0
           args: --timeout 5m
 
   coverage-gate:

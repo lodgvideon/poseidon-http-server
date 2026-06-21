@@ -551,7 +551,7 @@ func encodeExtensionNumberResponse(typeName string, numbers []int32) []byte {
 //   ServerReflectionRequest original_request = 2;
 //   oneof message_response { ... }
 // }
-func encodeReflectionResponse(host string, originalRequest []byte, messageResponse []byte) []byte {
+func encodeReflectionResponse(host string, originalRequest, messageResponse []byte) []byte {
 	var buf []byte
 	if host != "" {
 		buf = appendStringField(buf, 1, host)
@@ -578,7 +578,7 @@ func appendVarint(buf []byte, v uint64) []byte {
 }
 
 // decodeVarint decodes a base-128 varint. Returns (value, bytesConsumed).
-func decodeVarint(data []byte) (uint64, int) {
+func decodeVarint(data []byte) (value uint64, consumed int) {
 	var result uint64
 	var shift uint
 	for i, b := range data {
@@ -597,7 +597,7 @@ func decodeVarint(data []byte) (uint64, int) {
 // appendTag encodes a protobuf field tag.
 //
 //nolint:gosec // field numbers are small constants, no overflow risk
-func appendTag(buf []byte, fieldNum int, wireType int) []byte {
+func appendTag(buf []byte, fieldNum, wireType int) []byte {
 	return appendVarint(buf, uint64(fieldNum)<<3|uint64(wireType))
 }
 

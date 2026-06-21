@@ -433,7 +433,7 @@ func NewHTTPRequest(req *Request) (*http.Request, error) {
 		host = "localhost"
 	}
 	urlStr := scheme + "://" + host + req.Path
-	httpReq, err := http.NewRequest(req.Method, urlStr, nil)
+	httpReq, err := http.NewRequest(req.Method, urlStr, http.NoBody)
 	if err != nil {
 		return nil, err
 	}

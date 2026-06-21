@@ -14,8 +14,12 @@ import (
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
 
+// ErrServerClosed is returned by Serve and ListenAndServe after the server
+// has been shut down via Close.
 var ErrServerClosed = errors.New("server: server closed")
 
+// Logger is the minimal logging interface the server writes diagnostics to.
+// A nil Options.Logger falls back to the standard library log package.
 type Logger interface {
 	Printf(format string, args ...interface{})
 }
@@ -24,6 +28,8 @@ type stdLogger struct{}
 
 func (stdLogger) Printf(format string, args ...interface{}) { log.Printf(format, args...) }
 
+// Options configures a Server. The zero value is usable; each field documents
+// its default when left empty.
 type Options struct {
 	Addr                     string
 	Handler                  Handler
@@ -117,6 +123,8 @@ func (o Options) resolvedHandler() Handler {
 	return h
 }
 
+// Server is an HTTP/2 (optionally h2c) server built on the poseidon conn layer.
+// Construct one with NewServer, then drive it with Serve or ListenAndServe.
 type Server struct {
 	handler      Handler
 	connOpts     conn.ServerConnOptions
@@ -133,6 +141,8 @@ type Server struct {
 	closeCh   chan struct{}
 }
 
+// NewServer validates opts and returns a ready-to-serve Server. It returns a
+// non-nil error if opts is invalid.
 func NewServer(opts Options) (*Server, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
@@ -169,6 +179,8 @@ func (s *Server) idleTimeout() time.Duration {
 	return s.opts.IdleTimeout
 }
 
+// ListenAndServe listens on opts.Addr (TCP) and serves connections until ctx
+// is cancelled or Close is called, returning ErrServerClosed on clean shutdown.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.opts.Addr)
 	if err != nil {
@@ -178,13 +190,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return s.Serve(ctx, ln)
 }
 
+// Serve accepts connections from ln until ctx is cancelled or Close is called,
+// returning ErrServerClosed on clean shutdown. It takes ownership of ln.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.mu.Lock()
 	s.listener = ln
 	s.mu.Unlock()
 	go func() {
 		<-ctx.Done()
-		s.Close()
+		_ = s.Close()
 	}()
 	for {
 		nc, err := ln.Accept()
@@ -199,7 +213,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		if s.opts.MaxConcurrentConnections > 0 &&
 			s.ConnCount() >= s.opts.MaxConcurrentConnections {
 			s.logger.Printf("poseidon: rejecting %s: max connections", nc.RemoteAddr())
-			nc.Close()
+			_ = nc.Close()
 			continue
 		}
 		go func() {
@@ -220,7 +234,7 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 	sc, err := conn.NewServerConn(ctx, nc, opts)
 	if err != nil {
 		s.logger.Printf("poseidon: handshake failed for %s: %v", nc.RemoteAddr(), err)
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 	s.trackConn(sc, true)
@@ -300,7 +314,6 @@ func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStr
 				// and drop the (already-collected) chunks immediately.
 				total += int64(len(ev.Data))
 				if s.maxBodyBytes >= 0 && total > s.maxBodyBytes {
-					bodyChunks = nil
 					s.rejectTooLarge(stream)
 					return
 				}
@@ -427,6 +440,7 @@ func (s *Server) trackConn(sc *conn.ServerConn, add bool) {
 	}
 }
 
+// ConnCount returns the number of connections the server is currently tracking.
 func (s *Server) ConnCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -443,6 +457,9 @@ func (s *Server) Addr() net.Addr {
 	return nil
 }
 
+// Close stops accepting new connections and tears down the listener, causing
+// Serve/ListenAndServe to return ErrServerClosed. It is safe to call multiple
+// times; only the first call has an effect.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

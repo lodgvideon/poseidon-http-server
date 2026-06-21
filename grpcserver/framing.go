@@ -51,8 +51,7 @@ func EncodeLP(dst []byte, msg LPMessage) []byte {
 	n := len(msg.Payload)
 	// Prepend header: flag(1) + length(4)
 	buf := make([]byte, 0, grpcMessageHeader+n)
-	buf = append(buf, msg.Flag)
-	buf = append(buf, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	buf = append(buf, msg.Flag, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 	buf = append(buf, msg.Payload...)
 	return append(dst, buf...)
 }

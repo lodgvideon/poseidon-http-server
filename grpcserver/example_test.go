@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/lodgvideon/poseidon-http-server/grpcserver"
-	"github.com/lodgvideon/poseidon-http-server/server"
 )
 
 // ExampleEncodeLP shows the gRPC Length-Prefixed (LP) wire framing: a 1-byte
@@ -103,7 +102,7 @@ func ExampleServiceRegistrar() {
 	})
 
 	// reg.Handler() is a server.Handler ready to pass to server.NewServer.
-	var h server.Handler = reg.Handler()
+	var h = reg.Handler()
 	fmt.Println(h != nil)
 	// Output: true
 }
