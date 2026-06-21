@@ -3,6 +3,7 @@ package grpcserver
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"testing"
 )
 
@@ -58,6 +59,10 @@ func FuzzDecodeLP(f *testing.F) {
 			if n != grpcMessageHeader+len(msg2.Payload) {
 				t.Fatalf("DecodeLPFromBytes consumed=%d but header+payload=%d", n, grpcMessageHeader+len(msg2.Payload))
 			}
+			// The byte-slice path must enforce the same size bound as DecodeLP.
+			if len(msg2.Payload) > maxRecvMessageSize {
+				t.Fatalf("DecodeLPFromBytes returned payload exceeding maxRecvMessageSize: %d", len(msg2.Payload))
+			}
 		}
 
 		// Round-trip: anything we successfully decode must re-encode to the
@@ -101,4 +106,15 @@ func FuzzTrailersToStatus(f *testing.F) {
 		// Code.String() must never panic for any code value.
 		_ = st.Code.String()
 	})
+}
+
+// TestDecodeLPFromBytes_RejectsOversized verifies the byte-slice decoder enforces
+// maxRecvMessageSize (matching the streaming DecodeLP path), even when the input
+// slice actually carries the over-limit payload.
+func TestDecodeLPFromBytes_RejectsOversized(t *testing.T) {
+	data := make([]byte, grpcMessageHeader+maxRecvMessageSize+1)
+	binary.BigEndian.PutUint32(data[1:5], uint32(maxRecvMessageSize+1))
+	if _, _, err := DecodeLPFromBytes(data); !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("DecodeLPFromBytes on oversized message: err = %v, want ErrMessageTooLarge", err)
+	}
 }

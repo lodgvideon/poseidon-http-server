@@ -98,6 +98,12 @@ func DecodeLPFromBytes(data []byte) (LPMessage, int, error) {
 	flag := data[0]
 	length := int(binary.BigEndian.Uint32(data[1:5]))
 
+	// Enforce the message-size limit consistently with DecodeLP/DecodeLPWithLimit
+	// so the byte-slice path cannot return an over-limit payload. Checking this
+	// before the comparison below also avoids any grpcMessageHeader+length overflow.
+	if length > maxRecvMessageSize {
+		return LPMessage{}, 0, ErrMessageTooLarge
+	}
 	if len(data) < grpcMessageHeader+length {
 		return LPMessage{}, 0, ErrInvalidHeader
 	}
