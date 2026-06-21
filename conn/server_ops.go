@@ -49,6 +49,7 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) {
 	sc.smu.Lock()
 	sc.streams[id] = s
 	sc.smu.Unlock()
+	sc.noteClientStreamID(id)
 	sc.atomicStreamsAccepted.Add(1)
 
 	s.sc = sc
@@ -58,6 +59,33 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) {
 	default:
 		_ = s.Close()
 	}
+}
+
+// onClientRSTStream accounts a client-initiated RST_STREAM for Rapid Reset
+// (CVE-2023-44487) detection. Only resets that tore a stream down before it
+// produced useful work (rapid == true) are counted toward the budget;
+// benign post-completion cancellations are ignored. Returns a connError with
+// ErrCodeEnhanceYourCalm once the per-connection budget is exceeded so the
+// reader loop sends GOAWAY and tears the connection down.
+//
+// Hot path: a single atomic load of the budget and, for rapid resets, one
+// atomic increment plus a comparison. No allocations.
+func (sc *ServerConn) onClientRSTStream(_ uint32, rapid bool) error {
+	budget := sc.opts.rapidResetBudget()
+	if budget == 0 {
+		return nil // mitigation disabled
+	}
+	if !rapid {
+		return nil
+	}
+	n := sc.rapidResetCount.Add(1)
+	if int(n) > budget {
+		return connError{
+			code: frame.ErrCodeEnhanceYourCalm,
+			msg:  "HTTP/2 rapid reset flood detected (CVE-2023-44487)",
+		}
+	}
+	return nil
 }
 
 // markStreamDone cleans up a finished stream.

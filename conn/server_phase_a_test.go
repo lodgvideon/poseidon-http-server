@@ -263,8 +263,12 @@ func TestServerConn_Ping_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-	if rtt <= 0 {
-		t.Fatalf("RTT = %v, want > 0", rtt)
+	// A successful Ping means the ACK with the matching payload was received, so the
+	// round-trip provably happened. RTT can legitimately measure 0 on platforms with a
+	// coarse monotonic clock (e.g. Windows) when the in-memory net.Pipe round-trip
+	// completes within the clock's resolution; only a negative RTT indicates a bug.
+	if rtt < 0 {
+		t.Fatalf("RTT = %v, want >= 0", rtt)
 	}
 }
 

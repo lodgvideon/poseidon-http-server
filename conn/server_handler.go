@@ -16,6 +16,11 @@ type serverConnOps interface {
 	applyPeerSettings(s frame.SettingsParams) error
 	onWindowUpdate(streamID, increment uint32) error
 	onDataReceived(s *ServerStream, length uint32) error
+	// onClientRSTStream accounts a client-initiated RST_STREAM for Rapid
+	// Reset (CVE-2023-44487) detection. Returns a non-nil error when the
+	// per-connection budget is exceeded; the reader loop then sends
+	// GOAWAY(ENHANCE_YOUR_CALM) and tears the connection down.
+	onClientRSTStream(streamID uint32, rapid bool) error
 }
 
 // serverConnHandler bridges frame.Handler into per-ServerStream events.
@@ -162,12 +167,23 @@ func (h *serverConnHandler) OnPriority(frame.FrameHeader, frame.Priority) error 
 func (h *serverConnHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) error {
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
-		return nil
+		// RST_STREAM for an unknown/already-finished stream. A flood of
+		// these (e.g. resetting streams the server already closed) is the
+		// classic Rapid Reset signature, so still account it as rapid.
+		return h.streams.onClientRSTStream(fh.StreamID, true)
 	}
+	// A reset is "rapid" (cheap-to-trigger, no useful work) when the
+	// client tears the stream down before completing its request
+	// (END_STREAM not yet observed). A reset arriving after the request
+	// fully completed is a normal, benign cancellation.
+	s.mu.Lock()
+	rapid := !s.remoteEnded
+	s.mu.Unlock()
+
 	s.markRemoteEnd()
 	h.streams.markStreamDone(fh.StreamID)
 	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
-	return nil
+	return h.streams.onClientRSTStream(fh.StreamID, rapid)
 }
 
 func (h *serverConnHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {

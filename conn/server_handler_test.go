@@ -118,6 +118,8 @@ type mockConnOps struct {
 	streams           map[uint32]*ServerStream
 	settingsAckCalled bool
 	pingAckCalled     bool
+	rapidResetCount   int
+	rapidResetBudget  int // 0 => unlimited (never trips)
 }
 
 func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
@@ -129,3 +131,13 @@ func (m *mockConnOps) deliverPingAck(_ [8]byte)                          {}
 func (m *mockConnOps) applyPeerSettings(_ frame.SettingsParams) error    { return nil }
 func (m *mockConnOps) onWindowUpdate(_, _ uint32) error                   { return nil }
 func (m *mockConnOps) onDataReceived(_ *ServerStream, _ uint32) error    { return nil }
+func (m *mockConnOps) onClientRSTStream(_ uint32, rapid bool) error {
+	if !rapid {
+		return nil
+	}
+	m.rapidResetCount++
+	if m.rapidResetBudget > 0 && m.rapidResetCount > m.rapidResetBudget {
+		return connError{code: frame.ErrCodeEnhanceYourCalm, msg: "rapid reset"}
+	}
+	return nil
+}
