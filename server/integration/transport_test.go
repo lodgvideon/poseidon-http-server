@@ -404,19 +404,12 @@ func TestTransport_LargeResponse_WithinInitialWindow(t *testing.T) {
 // net/http client. net/http drains the body and emits stream-level
 // WINDOW_UPDATE frames as it does so.
 //
-// KNOWN LIMITATION (skipped): the current server marks the request stream
-// "done" when the GET request HEADERS carry END_STREAM, which removes the
-// stream from the connection's stream table. Stream-level WINDOW_UPDATE frames
-// that net/http sends afterwards therefore find no stream and are dropped, so
-// the server's outbound send window for that stream is never replenished and a
-// response larger than the initial window stalls until the client times out.
-// (The conn-level TestDepth_FlowControl_LargeResponse_CrossesInitialWindow test
-// works around this by keeping the request stream open.) This test is skipped
-// until the server replenishes the response stream's send window independent of
-// request completion; flip the t.Skip to turn it into a regression guard.
+// REGRESSION GUARD: a stream is now released only when BOTH halves end (RFC 7540
+// §5.1). After the GET request HEADERS carry END_STREAM the stream is half-closed
+// (remote) and stays registered, so the stream-level WINDOW_UPDATE frames net/http
+// sends still reach it and replenish the server's outbound send window — a response
+// larger than the initial window completes instead of stalling.
 func TestTransport_LargeResponse_CrossesFlowControlWindow(t *testing.T) {
-	t.Skip("known limitation: server drops stream WINDOW_UPDATE after request END_STREAM, stalling >64KiB responses")
-
 	t.Parallel()
 
 	const size = 512 * 1024 // 512 KiB ≫ 64 KiB initial window
