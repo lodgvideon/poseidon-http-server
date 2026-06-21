@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"bytes"
-	"errors"
 	"net/http"
 	"testing"
 
@@ -80,6 +79,14 @@ func (f *fakePusherRW) PushWithPriority(path string, _ []hpack.HeaderField, _ *f
 	f.pushed = append(f.pushed, path)
 	return nil, nil //nolint:nilnil // mock: tests only assert the recorded push path
 }
+
+// flushableRW additionally implements http.Flusher, recording flush calls.
+type flushableRW struct {
+	*fakeRW
+	flushed int
+}
+
+func (f *flushableRW) Flush() { f.flushed++ }
 
 func hasField(headers []hpack.HeaderField, name, value string) bool {
 	for _, h := range headers {
@@ -213,44 +220,63 @@ func TestGzipWrapper_SmallBodyIdentity(t *testing.T) {
 	}
 }
 
-// TestGzipWrapper_PushDelegation verifies Push forwards to a Pusher-capable
-// underlying writer, and reports ErrPushNotSupported otherwise.
-func TestGzipWrapper_PushDelegation(t *testing.T) {
+// TestGzipWrapper_PushThroughPusherOf verifies the Pusher is reachable through
+// the gzip wrapper via server.PusherOf (the Unwrap convention), and that a
+// wrapper with no pushable base reports (nil, false).
+func TestGzipWrapper_PushThroughPusherOf(t *testing.T) {
 	t.Parallel()
 
-	// Underlying writer supports push.
+	// Underlying writer supports push: PusherOf walks gzip's Unwrap() to it.
 	pusher := &fakePusherRW{fakeRW: newFakeRW()}
 	gw := &gzipResponseWriter{ResponseWriter: pusher, cfg: DefaultGzipConfig()}
-	if _, err := gw.Push("/style.css", nil); err != nil {
+	p, ok := server.PusherOf(gw)
+	if !ok {
+		t.Fatal("PusherOf did not find the Pusher through the gzip wrapper")
+	}
+	if _, err := p.Push("/style.css", nil); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	if _, err := gw.PushWithScheme("/a.js", "https", nil); err != nil {
+	if _, err := p.PushWithScheme("/a.js", "https", nil); err != nil {
 		t.Fatalf("PushWithScheme: %v", err)
 	}
-	if _, err := gw.PushWithPriority("/b.css", nil, nil); err != nil {
+	if _, err := p.PushWithPriority("/b.css", nil, nil); err != nil {
 		t.Fatalf("PushWithPriority: %v", err)
 	}
 	if len(pusher.pushed) != 3 {
 		t.Fatalf("pushed = %v, want 3 paths", pusher.pushed)
 	}
 
-	// Underlying writer does NOT support push.
+	// Underlying writer does NOT support push: PusherOf returns (nil, false).
 	noPush := &gzipResponseWriter{ResponseWriter: newFakeRW(), cfg: DefaultGzipConfig()}
-	if _, err := noPush.Push("/x", nil); !errors.Is(err, server.ErrPushNotSupported) {
-		t.Fatalf("Push err = %v, want ErrPushNotSupported", err)
-	}
-	if _, err := noPush.PushWithScheme("/x", "http", nil); !errors.Is(err, server.ErrPushNotSupported) {
-		t.Fatalf("PushWithScheme err = %v, want ErrPushNotSupported", err)
-	}
-	if _, err := noPush.PushWithPriority("/x", nil, nil); !errors.Is(err, server.ErrPushNotSupported) {
-		t.Fatalf("PushWithPriority err = %v, want ErrPushNotSupported", err)
+	if pp, ok := server.PusherOf(noPush); ok || pp != nil {
+		t.Fatalf("PusherOf = (%v, %v), want (nil, false)", pp, ok)
 	}
 }
 
 // TestGzipWrapper_ImplementsInterfaces is a compile-time-ish guard that the
-// wrapper satisfies both ResponseWriter and Pusher.
+// wrapper satisfies ResponseWriter, exposes Unwrap, and implements http.Flusher.
 func TestGzipWrapper_ImplementsInterfaces(t *testing.T) {
 	t.Parallel()
 	var _ server.ResponseWriter = (*gzipResponseWriter)(nil)
-	var _ server.Pusher = (*gzipResponseWriter)(nil)
+	var _ interface{ Unwrap() server.ResponseWriter } = (*gzipResponseWriter)(nil)
+	var _ http.Flusher = (*gzipResponseWriter)(nil)
+}
+
+// TestGzipWrapper_FlushDrainsAndForwards verifies Flush emits the buffered body
+// (compressed) and then flushes the underlying writer if it is an http.Flusher.
+func TestGzipWrapper_FlushDrainsAndForwards(t *testing.T) {
+	t.Parallel()
+	under := &flushableRW{fakeRW: newFakeRW()}
+	gw := &gzipResponseWriter{ResponseWriter: under, cfg: DefaultGzipConfig()}
+
+	_ = gw.WriteHeaders(200, nil)
+	_ = gw.WriteData(gzipBigBody)
+	gw.Flush()
+
+	if len(under.data) != 1 || len(under.data[0]) >= len(gzipBigBody) {
+		t.Fatal("Flush should drain the compressed body to the underlying writer")
+	}
+	if under.flushed != 1 {
+		t.Fatalf("underlying Flush calls = %d, want 1", under.flushed)
+	}
 }

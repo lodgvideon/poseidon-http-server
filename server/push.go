@@ -14,14 +14,15 @@ import (
 // Server Push — high-level API (RFC 7540 §8.2)
 //
 // This wraps the low-level conn.ServerStream.Push with a ResponseWriter
-// for the pushed response. Push lives on the optional Pusher interface, so a
-// handler type-asserts the writer to promise additional resources.
+// for the pushed response. Push lives on the optional Pusher interface, which a
+// handler reaches via PusherOf (it walks any middleware wrappers' Unwrap chain)
+// to promise additional resources.
 //
 // Example:
 //
 //   func handler(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 //       // Push style.css the client will need, if the writer supports it.
-//       if p, ok := w.(server.Pusher); ok {
+//       if p, ok := server.PusherOf(w); ok {
 //           if pushed, err := p.Push("/style.css", nil); err == nil {
 //               pushed.WriteData([]byte("body { color: red }"))
 //           }

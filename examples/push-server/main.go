@@ -1,8 +1,9 @@
 // Package main demonstrates HTTP/2 Server Push (RFC 7540 §8.2) with priority
 // hints (RFC 7540 §5.3) on the Poseidon server.
 //
-// When a client requests GET /, the handler type-asserts the ResponseWriter to
-// server.Pusher and proactively PUSH_PROMISEs the two sub-resources the page
+// When a client requests GET /, the handler reaches the server.Pusher
+// capability via server.PusherOf (which walks any middleware wrappers) and
+// proactively PUSH_PROMISEs the two sub-resources the page
 // needs (/style.css and /app.js) BEFORE sending the HTML — so they arrive
 // without a second round trip. Each pushed stream carries an RFC 7540 priority
 // payload via Pusher.PushWithPriority, so the client can hint that the
@@ -10,7 +11,7 @@
 //
 // Server Push is exposed on the OPTIONAL server.Pusher interface (mirroring
 // net/http.Pusher): the core server.ResponseWriter stays small, and a handler
-// reaches Push only after a successful type assertion. Push MUST be called
+// reaches Push only after a successful PusherOf lookup. Push MUST be called
 // before the main response headers are written.
 //
 // NOTE: most browsers have deprecated HTTP/2 Server Push, but it remains valid
@@ -57,7 +58,7 @@ func main() {
 		case "/":
 			// Promise the sub-resources before sending the HTML, if the writer
 			// supports push. Push must happen before WriteHeaders/WriteData.
-			if p, ok := w.(server.Pusher); ok {
+			if p, ok := server.PusherOf(w); ok {
 				pushWithPriority(p, "/style.css", "text/css", styleCSS,
 					// Render-blocking CSS: highest weight (255), depends on the
 					// root stream (0), non-exclusive.

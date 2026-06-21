@@ -4,7 +4,6 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/server"
 )
@@ -205,31 +204,12 @@ func (s *securityResponseWriter) Write(p []byte) (int, error) {
 	return s.ResponseWriter.Write(p)
 }
 
-// --- Push delegation (server.Pusher) ----------------------------------------
-//
-// Pushed responses are forwarded unchanged so enabling SecurityHeaders does not
-// silently disable Server Push.
-
-func (s *securityResponseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderField) (server.ResponseWriter, error) {
-	if p, ok := s.ResponseWriter.(server.Pusher); ok {
-		return p.Push(promisePath, promiseHeaders)
-	}
-	return nil, server.ErrPushNotSupported
-}
-
-func (s *securityResponseWriter) PushWithScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) (server.ResponseWriter, error) {
-	if p, ok := s.ResponseWriter.(server.Pusher); ok {
-		return p.PushWithScheme(promisePath, promiseScheme, promiseHeaders)
-	}
-	return nil, server.ErrPushNotSupported
-}
-
-func (s *securityResponseWriter) PushWithPriority(promisePath string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (server.ResponseWriter, error) {
-	if p, ok := s.ResponseWriter.(server.Pusher); ok {
-		return p.PushWithPriority(promisePath, promiseHeaders, prio)
-	}
-	return nil, server.ErrPushNotSupported
-}
+// Unwrap returns the wrapped writer so server.PusherOf / server.FlusherOf can
+// walk the chain to reach optional capabilities (Server Push, flushing) through
+// this wrapper. This is the net/http ResponseController convention; it replaces
+// hand-written Push/PushWithScheme/PushWithPriority forwarders so enabling
+// SecurityHeaders does not silently disable Server Push.
+func (s *securityResponseWriter) Unwrap() server.ResponseWriter { return s.ResponseWriter }
 
 // fieldPresent reports whether headers already contains a field with the given
 // (lower-cased) name.

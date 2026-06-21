@@ -137,9 +137,14 @@ func (w *connStreamWriter) canPush() (pushableStream, bool) {
 //	w.Write(body)
 //
 // Server Push is an optional capability exposed via the separate Pusher
-// interface (mirroring net/http.Pusher); type-assert to access it:
+// interface (mirroring net/http.Pusher). For a directly-supplied writer a type
+// assertion works; to reach it reliably through middleware wrappers use the
+// [PusherOf] finder, which walks the Unwrap() chain:
 //
-//	if p, ok := w.(server.Pusher); ok { p.Push("/style.css", nil) }
+//	if p, ok := server.PusherOf(w); ok { p.Push("/style.css", nil) }
+//
+// The analogous [FlusherOf] returns the [http.Flusher] capability. Wrapping
+// writers cooperate by implementing Unwrap() ResponseWriter (see responsewriter.go).
 type ResponseWriter interface {
 	http.ResponseWriter
 
@@ -162,7 +167,9 @@ type ResponseWriter interface {
 // Pusher is the optional HTTP/2 Server Push capability (RFC 7540 §8.2),
 // implemented by ResponseWriters backed by a real stream. It is kept separate
 // from ResponseWriter (as net/http keeps Pusher/Flusher/Hijacker separate) so
-// the core interface stays small. Type-assert a ResponseWriter to reach it.
+// the core interface stays small. Reach it with the [PusherOf] finder (which
+// works through middleware wrappers) or, for a directly-supplied writer, a
+// w.(Pusher) type assertion.
 type Pusher interface {
 	Push(promisePath string, promiseHeaders []hpack.HeaderField) (ResponseWriter, error)
 	PushWithScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) (ResponseWriter, error)
@@ -212,6 +219,7 @@ var (
 	_ http.ResponseWriter = (*responseWriter)(nil)
 	_ ResponseWriter      = (*responseWriter)(nil)
 	_ Pusher              = (*responseWriter)(nil)
+	_ http.Flusher        = (*responseWriter)(nil)
 )
 
 // --- Native Poseidon methods ------------------------------------------------
@@ -318,6 +326,15 @@ func (w *responseWriter) Status() int { return w.status }
 // Written reports whether headers have been sent.
 func (w *responseWriter) Written() bool { return w.written }
 
+// Flush implements [http.Flusher]. The native HTTP/2 write path sends each
+// WriteData/Write frame to the connection immediately (there is no
+// response-side buffering on conn.ServerStream), so for the concrete writer
+// Flush is a no-op kept for stdlib compatibility: handlers and middleware that
+// type-assert http.Flusher (or call FlusherOf) get a writer that satisfies the
+// contract. Buffering wrappers (e.g. the Gzip middleware) override Flush to
+// drain their own buffer first.
+func (w *responseWriter) Flush() {}
+
 // ---------------------------------------------------------------------------
 // Adapters: http.Handler ↔ Handler
 // ---------------------------------------------------------------------------
@@ -337,36 +354,69 @@ func FromHTTPHandler(h http.Handler) Handler {
 }
 
 // ToHTTPHandler adapts a Poseidon [Handler] to [http.Handler].
+//
+// The Poseidon handler is run against a buffering streamWriter that captures
+// the status, extra HPACK header fields, and the full response body. Once the
+// handler returns, the captured values are replayed onto the real
+// [http.ResponseWriter]: headers set via the stdlib path (w.Header()) are
+// copied, any header fields emitted via the native WriteHeaders path are merged
+// in, the status is written, and the buffered body bytes are flushed — so the
+// response body round-trips instead of being discarded.
 func ToHTTPHandler(h Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		req := HTTPRequestToRequest(r)
-		// We use a discard streamWriter since ToHTTPHandler is a bridge.
-		pw := newResponseWriterWithSW(&discardStreamWriter{})
+		buf := &bufferStreamWriter{}
+		pw := newResponseWriterWithSW(buf)
 		if err := h.ServeHTTP(r.Context(), req, pw); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Copy stdlib-path headers (set via w.Header()).
 		for k, vv := range pw.Header() {
 			for _, v := range vv {
 				w.Header().Add(k, v)
 			}
 		}
+		// Merge native-path header fields (from WriteHeaders), skipping the
+		// :status pseudo-header which is conveyed via WriteHeader below.
+		for _, f := range buf.headerFields {
+			name := string(f.Name)
+			if name != "" && name[0] == ':' {
+				continue
+			}
+			w.Header().Add(name, string(f.Value))
+		}
 		if pw.Status() > 0 {
 			w.WriteHeader(pw.Status())
+		}
+		if len(buf.body) > 0 {
+			_, _ = w.Write(buf.body)
 		}
 	})
 }
 
-// discardStreamWriter is a no-op streamWriter for adapter use.
-type discardStreamWriter struct{}
+// bufferStreamWriter is a streamWriter that buffers the status, header fields
+// and body bytes a handler writes, for ToHTTPHandler to replay onto a real
+// http.ResponseWriter. It is not concurrency-safe; one is used per request.
+type bufferStreamWriter struct {
+	headerFields []hpack.HeaderField
+	body         []byte
+}
 
-func (*discardStreamWriter) sendHeaders(_ context.Context, _ []hpack.HeaderField, _ bool) error {
+func (b *bufferStreamWriter) sendHeaders(_ context.Context, headers []hpack.HeaderField, _ bool) error {
+	// Capture the first (response) HEADERS frame's fields. Trailers (endStream)
+	// also arrive here; appending them is harmless since the status comes from
+	// responseWriter.Status() and pseudo-headers are filtered on replay.
+	b.headerFields = append(b.headerFields, headers...)
 	return nil
 }
-func (*discardStreamWriter) sendData(_ context.Context, _ []byte, _ bool) error {
+
+func (b *bufferStreamWriter) sendData(_ context.Context, p []byte, _ bool) error {
+	b.body = append(b.body, p...)
 	return nil
 }
-func (*discardStreamWriter) streamID() uint32 { return 0 }
+
+func (*bufferStreamWriter) streamID() uint32 { return 0 }
 
 // ---------------------------------------------------------------------------
 // Conversion helpers
