@@ -1,8 +1,17 @@
-.PHONY: lint test test-race bench bench-gate coverage coverage-gate tidy
+.PHONY: build lint test test-race bench bench-gate coverage coverage-gate tidy
 
 COVERAGE_MIN ?= 80
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
+
+# Version metadata injected into the binary via -ldflags.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
+COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null)
+DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+
+build:
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/poseidon-server ./cmd/poseidon-server
 
 tidy:
 	$(GO) mod tidy
