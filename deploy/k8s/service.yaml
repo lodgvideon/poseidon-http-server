@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: poseidon-server
+  labels:
+    app.kubernetes.io/name: poseidon-server
+    app.kubernetes.io/instance: poseidon-server
+spec:
+  type: ClusterIP
+  ports:
+    - name: h2c
+      port: 8080
+      targetPort: h2c
+      protocol: TCP
+      # Advertise cleartext HTTP/2 (h2c) to HTTP/2-aware ingress / mesh.
+      appProtocol: kubernetes.io/h2c
+  selector:
+    app.kubernetes.io/name: poseidon-server
+    app.kubernetes.io/instance: poseidon-server

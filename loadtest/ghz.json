@@ -1,0 +1,11 @@
+{
+  "proto": "loadtest/hello.proto",
+  "call": "hello.HelloService/SayHello",
+  "insecure": true,
+  "total": 100000,
+  "concurrency": 100,
+  "connections": 4,
+  "data": {
+    "name": "poseidon"
+  }
+}

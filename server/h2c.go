@@ -30,7 +30,7 @@ func (s *Server) detectAndServe(ctx context.Context, nc net.Conn) {
 	head, err := br.Peek(len(h2cPreface))
 	if err != nil {
 		// Short read — likely connection closed or timeout.
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 
@@ -55,7 +55,7 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 
@@ -69,7 +69,7 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 			"Content-Length: 19\r\n\r\n"+
 			"Only h2c supported\n")
 		_, _ = nc.Write([]byte(resp))
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 
@@ -97,7 +97,7 @@ func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Rea
 	sc, err := conn.NewServerConn(ctx, rwc, opts)
 	if err != nil {
 		s.logger.Printf("poseidon: h2c handshake failed for %s: %v", nc.RemoteAddr(), err)
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 

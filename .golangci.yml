@@ -60,7 +60,9 @@ linters:
       lines: 80
       statements: 60
     nestif:
-      min-depth: 4
+      # nestif's only valid setting is min-complexity (the earlier `min-depth`
+      # key was silently ignored → ran at the default 5; we keep that here).
+      min-complexity: 5
     dupl:
       threshold: 100
     goconst:
@@ -116,6 +118,11 @@ linters:
       under: 20           # maintainability index threshold
 
   exclusions:
+    paths:
+      # Demonstration code: kept compiling + vet-clean by CI, but not subject to
+      # the library's strict style/security gate (examples favour pedagogical
+      # clarity over hardening, and are already excluded from the coverage gate).
+      - examples
     rules:
       - path: _test\.go$
         linters:
@@ -126,6 +133,10 @@ linters:
           - gocyclo
           - maintidx
           - goconst
+          - gosec          # tests use throwaway TLS configs/listeners and ignore I/O errors
+          - gocritic       # test-only style (unlabelled switches, etc.) is not production code
+          - exhaustive     # test switches need not enumerate every frame type
+          - makezero       # fuzz/test buffers are deliberately pre-sized
 
 issues:
   max-issues-per-linter: 0

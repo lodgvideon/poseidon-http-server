@@ -53,8 +53,10 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
 	dataCopy := append([]byte(nil), p...)
-	if end {
-		s.markRemoteEnd()
+	if end && s.markRemoteEnd() {
+		// Release only once the server has also ended; until then the stream
+		// stays registered (half-closed remote) so its WINDOW_UPDATE and
+		// RST_STREAM still reach it (RFC 7540 §5.1).
 		h.streams.markStreamDone(fh.StreamID)
 	}
 	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
@@ -131,8 +133,9 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	if isTrailer {
 		evType = EventTrailers
 	}
-	if endStream {
-		s.markRemoteEnd()
+	if endStream && s.markRemoteEnd() {
+		// Half-closed (remote): keep the stream registered until the server
+		// also ends, so WINDOW_UPDATE/RST_STREAM still reach it (RFC 7540 §5.1).
 		h.streams.markStreamDone(s.id)
 	}
 
@@ -176,11 +179,10 @@ func (h *serverConnHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode
 	// client tears the stream down before completing its request
 	// (END_STREAM not yet observed). A reset arriving after the request
 	// fully completed is a normal, benign cancellation.
-	s.mu.Lock()
-	rapid := !s.remoteEnded
-	s.mu.Unlock()
-
-	s.markRemoteEnd()
+	// Atomically end the remote half and learn whether the request was still
+	// open (the rapid-reset signal), then hard-close the stream — RST is an
+	// unconditional close regardless of the local half.
+	rapid := s.markRemoteEndReset()
 	h.streams.markStreamDone(fh.StreamID)
 	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
 	return h.streams.onClientRSTStream(fh.StreamID, rapid)

@@ -51,8 +51,7 @@ func EncodeLP(dst []byte, msg LPMessage) []byte {
 	n := len(msg.Payload)
 	// Prepend header: flag(1) + length(4)
 	buf := make([]byte, 0, grpcMessageHeader+n)
-	buf = append(buf, msg.Flag)
-	buf = append(buf, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	buf = append(buf, msg.Flag, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 	buf = append(buf, msg.Payload...)
 	return append(dst, buf...)
 }
@@ -98,6 +97,12 @@ func DecodeLPFromBytes(data []byte) (LPMessage, int, error) {
 	flag := data[0]
 	length := int(binary.BigEndian.Uint32(data[1:5]))
 
+	// Enforce the message-size limit consistently with DecodeLP/DecodeLPWithLimit
+	// so the byte-slice path cannot return an over-limit payload. Checking this
+	// before the comparison below also avoids any grpcMessageHeader+length overflow.
+	if length > maxRecvMessageSize {
+		return LPMessage{}, 0, ErrMessageTooLarge
+	}
 	if len(data) < grpcMessageHeader+length {
 		return LPMessage{}, 0, ErrInvalidHeader
 	}

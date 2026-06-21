@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "poseidon-server.fullname" . }}
+  labels:
+    {{- include "poseidon-server.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: {{ .Values.container.portName }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.container.portName }}
+      protocol: TCP
+      {{- with .Values.service.appProtocol }}
+      # appProtocol advertises h2c (cleartext HTTP/2) so HTTP/2-aware ingress and
+      # service meshes negotiate HTTP/2 to the backend.
+      appProtocol: {{ . }}
+      {{- end }}
+  selector:
+    {{- include "poseidon-server.selectorLabels" . | nindent 4 }}

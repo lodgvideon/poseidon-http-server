@@ -1,0 +1,237 @@
+# Default values for poseidon-server.
+# This is a YAML-formatted file. Values here are SECURE PRODUCTION DEFAULTS.
+
+# -- Number of pod replicas. Ignored when autoscaling.enabled=true (the HPA owns
+# the replica count in that case).
+replicaCount: 3
+
+image:
+  repository: ghcr.io/lodgvideon/poseidon-server
+  # -- Pull policy. IfNotPresent for immutable tags; use Always only for mutable
+  # tags like "latest" (which you should avoid in production).
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to .Chart.AppVersion when empty. Pin to a digest or
+  # immutable SemVer tag in production for reproducible, supply-chain-safe rollouts.
+  tag: ""
+
+# -- Secrets for pulling from a private registry, e.g. [{ name: regcred }].
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a dedicated ServiceAccount for the workload (recommended; avoids
+  # using the namespace "default" SA).
+  create: true
+  annotations: {}
+  name: ""
+  # -- Do NOT auto-mount the SA token; this server does not call the k8s API.
+  # Mounting it needlessly widens the blast radius of a container compromise.
+  automountServiceAccountToken: false
+
+# =============================================================================
+# Application configuration -> rendered into a ConfigMap as POSEIDON_-prefixed
+# env vars (12-factor). See cmd/poseidon-server/main.go for the full knob list.
+# Anything you set here overrides the binary's secure-by-default values.
+# =============================================================================
+config:
+  # -- Listen address. MUST bind 0.0.0.0 (not 127.0.0.1) so the container is
+  # reachable from the kubelet/Service. Port MUST match service.targetPort and
+  # the container port (8080).
+  POSEIDON_ADDR: ":8080"
+  # -- Enable HTTP/2 cleartext (h2c). The server speaks HTTP/2; with h2c=true it
+  # also accepts the h2c upgrade/prior-knowledge on the plaintext port. This is
+  # the project default. See the PROBE note below for why this affects probes.
+  POSEIDON_H2C: "true"
+  # -- Idle connection timeout. "<0" disables (keep-alive forever).
+  POSEIDON_IDLE_TIMEOUT: "120s"
+  # -- Graceful drain budget on SIGTERM. Keep <= terminationGracePeriodSeconds.
+  POSEIDON_SHUTDOWN_TIMEOUT: "30s"
+  # -- HTTP/2 handshake timeout. "<0" disables.
+  POSEIDON_HANDSHAKE_TIMEOUT: "10s"
+  # -- Max concurrent connections. "0" = unlimited.
+  POSEIDON_MAX_CONNS: "0"
+  # -- Max request body size in bytes (10 MiB default).
+  POSEIDON_MAX_BODY_BYTES: "10485760"
+  # -- Rapid-reset (CVE-2023-44487) budget. "<0" disables mitigation; "0" uses
+  # the package default. Leave at the default to keep the mitigation on.
+  POSEIDON_MAX_RAPID_RESETS: "0"
+  # -- pprof exposes runtime internals at /debug/pprof/. MUST stay false in
+  # production; if you must enable it, restrict access via NetworkPolicy.
+  POSEIDON_ENABLE_PPROF: "false"
+
+# -- Extra env vars injected directly (NOT via ConfigMap), e.g. valueFrom a
+# Secret for POSEIDON_TLS_* material. Each item is a raw k8s EnvVar.
+extraEnv: []
+#  - name: POSEIDON_TLS_CERT
+#    value: /etc/poseidon/tls/tls.crt
+
+# -- Extra volumes (e.g. a TLS secret). Combined with extraVolumeMounts.
+extraVolumes: []
+extraVolumeMounts: []
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+  # -- appProtocol advertises HTTP/2 to mesh/ingress-aware consumers. "kubernetes.io/h2c"
+  # is the standard value for cleartext HTTP/2 (h2c); meshes/ingresses that
+  # understand it will negotiate HTTP/2 to the backend. Switch to "https" /
+  # "kubernetes.io/h2c" pairings as your ingress requires.
+  appProtocol: kubernetes.io/h2c
+  annotations: {}
+
+container:
+  # -- Container port the server listens on. MUST equal config.POSEIDON_ADDR port.
+  port: 8080
+  # -- Port name (<=15 chars). "h2c" documents the protocol at the port level.
+  portName: h2c
+
+# =============================================================================
+# PROBES — read this carefully.
+#
+# The server speaks HTTP/2 cleartext (h2c) on the same port it serves /healthz
+# and /readyz. Kubernetes `httpGet` probes speak HTTP/1.1 and will NOT complete
+# an h2c handshake, so a naive httpGet on /healthz FAILS even when the server is
+# perfectly healthy. We therefore DO NOT use httpGet here.
+#
+# Two safe options, selected via probes.type:
+#
+#   "tcp"  (DEFAULT) -- tcpSocket probe. A successful TCP accept proves the
+#          listener is up. This works regardless of h2c/HTTP1/HTTP2 and has zero
+#          protocol assumptions. It is liveness-grade (process is up + bound) but
+#          is NOT application-readiness-aware (it cannot see /readyz returning
+#          NotServing during drain). Combined with the server's own graceful
+#          drain (OnDrainStart -> SetNotReady, GracefulShutdownTimeout) this is a
+#          solid, conservative production default.
+#
+#   "grpc" -- k8s native gRPC probe (GA in 1.27+, alpha gate in 1.24-1.26). The
+#          codebase implements grpc.health.v1 (grpcserver/health.go). Use this
+#          ONLY once the binary actually exposes grpc.health.v1 on probes.grpc.port
+#          (the current cmd/poseidon-server binary serves HTTP health endpoints,
+#          not a gRPC health listener — wire it up before switching). A gRPC probe
+#          IS readiness-aware: it reflects SetServingStatus(NotServing).
+#
+# httpGet is intentionally unsupported to prevent the h2c-handshake foot-gun.
+# =============================================================================
+probes:
+  # -- Probe mechanism: "tcp" (default, h2c-safe) or "grpc" (needs grpc.health.v1
+  # exposed by the binary). httpGet is deliberately not offered.
+  type: tcp
+  grpc:
+    # -- Port serving grpc.health.v1. Only used when type=grpc. Set to wherever
+    # the binary exposes the gRPC health listener (often a separate port).
+    port: 8080
+    # -- Optional service name for the health Check; "" probes overall serving.
+    service: ""
+  liveness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+    successThreshold: 1
+  readiness:
+    enabled: true
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+    successThreshold: 1
+  startup:
+    enabled: true
+    initialDelaySeconds: 0
+    periodSeconds: 5
+    timeoutSeconds: 3
+    # 30 * 5s = 150s max startup window before the kubelet kills the container.
+    failureThreshold: 30
+    successThreshold: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    # -- No CPU limit by default: CPU limits cause throttling and tail-latency
+    # spikes; rely on the request + HPA for scheduling/scaling. Set one only if a
+    # hard cap is mandated. Memory IS limited to give the OOM killer a bound.
+    memory: 256Mi
+
+# =============================================================================
+# Pod- and container-level hardening. These are restrictive defaults that
+# satisfy the k8s "restricted" Pod Security Standard.
+# =============================================================================
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532    # nonroot (distroless "nonroot" uid)
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- writableTmp mounts an emptyDir at /tmp so readOnlyRootFilesystem doesn't
+# break code that needs scratch space. Disable if the binary never writes to disk.
+writableTmp: true
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # -- Memory target is optional; leave null to scale on CPU alone.
+  targetMemoryUtilizationPercentage: null
+  # -- Scaling behavior smooths flapping. Conservative scale-down, snappy scale-up.
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+
+# -- PodDisruptionBudget keeps capacity during voluntary disruptions (node drains).
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: ""   # mutually exclusive with minAvailable
+
+# -- Grace period for SIGTERM drain. MUST be >= POSEIDON_SHUTDOWN_TIMEOUT so the
+# server finishes its graceful drain before the kubelet sends SIGKILL.
+terminationGracePeriodSeconds: 40
+
+# -- Spread pods across nodes/zones for availability.
+topologySpreadConstraints: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Extra pod labels/annotations (e.g. Prometheus scrape hints). The chart also
+# emits prometheus.io/scrape annotations below via podAnnotations if you set them.
+podLabels: {}
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"

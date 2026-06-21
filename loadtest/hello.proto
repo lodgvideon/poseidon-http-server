@@ -1,0 +1,32 @@
+// hello.proto — schema for the Poseidon gRPC example service.
+//
+// This mirrors the service registered by examples/grpc-server:
+//   reg.RegisterService(&grpcserver.ServiceDesc{Name: "hello.HelloService", ...})
+//
+// ghz uses this proto to encode the request payload. The example handlers
+// JSON-decode the body, but the wire-level length-prefixed framing is identical
+// to protobuf, so the unary SayHello path exercises the same hot code.
+syntax = "proto3";
+
+package hello;
+
+option go_package = "github.com/lodgvideon/poseidon-http-server/loadtest/hello";
+
+service HelloService {
+  // Unary — the primary load-test target.
+  rpc SayHello(HelloRequest) returns (HelloResponse);
+  // Server-streaming — sleeps 200ms between 5 replies (latency-bound, not for RPS).
+  rpc LotsOfReplies(HelloRequest) returns (stream HelloResponse);
+  // Client-streaming.
+  rpc LotsOfGreetings(stream HelloRequest) returns (HelloResponse);
+  // Bidirectional streaming echo.
+  rpc BidiHello(stream HelloRequest) returns (stream HelloResponse);
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloResponse {
+  string message = 1;
+}

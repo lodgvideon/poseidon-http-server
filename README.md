@@ -38,15 +38,15 @@ srv.ListenAndServeTLS(ctx, "cert.pem", "key.pem")
 
 ```go
 reg := grpcserver.NewServiceRegistrar()
-reg.Register(&grpcserver.ServiceDesc{
+reg.RegisterService(&grpcserver.ServiceDesc{
     Name: "my.Service",
     Methods: []grpcserver.MethodDesc{
-        {Name: "Echo", Handler: echoHandler},
+        {Name: "Echo", UnaryHandler: echoHandler},
     },
 })
 
 srv, _ := server.NewServer(server.Options{
-    Handler: reg,
+    Handler: reg.Handler(),
 })
 ```
 
@@ -102,12 +102,19 @@ BenchmarkLookup            0 ns/op    0 B/op    0 allocs/op
 | `conn` | HTTP/2 connection management (server-side streams, flow control, HPACK) |
 | `server` | `net.Handler`-compatible HTTP/2 server with middleware, TLS, h2c |
 | `grpcserver` | gRPC layer: ServiceRegistrar, 4 RPC patterns, framing |
-| `middleware` | Recovery, RequestID, AccessLog, CORS |
+| `middleware` | Recovery, RequestID, AccessLog, StructuredAccessLog (slog), Metrics, SecurityHeaders, RateLimit, RealIP, Gzip, CORS, Tracing |
 
 ## Requirements
 
 - Go 1.26+
 - [poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client) (codec: frame + hpack)
+
+## Documentation
+
+- **[Usage guide](docs/usage.md)** — configuration, middleware catalog, security hardening, observability, and deployment.
+- **[Architecture Decision Records](docs/adr/)** — zero-alloc contract, RFC 7540 choices, ResponseWriter interface, Rapid Reset mitigation, and more.
+- **[Examples](examples/)** — runnable servers: HTTP/2, TLS, gRPC, observability, and security.
+- **[CHANGELOG](CHANGELOG.md)** — release history and migration notes.
 
 ## License
 

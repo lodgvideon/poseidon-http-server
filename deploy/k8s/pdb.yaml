@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: poseidon-server
+  labels:
+    app.kubernetes.io/name: poseidon-server
+    app.kubernetes.io/instance: poseidon-server
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: poseidon-server
+      app.kubernetes.io/instance: poseidon-server

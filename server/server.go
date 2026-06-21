@@ -14,8 +14,12 @@ import (
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
 
+// ErrServerClosed is returned by Serve and ListenAndServe after the server
+// has been shut down via Close.
 var ErrServerClosed = errors.New("server: server closed")
 
+// Logger is the minimal logging interface the server writes diagnostics to.
+// A nil Options.Logger falls back to the standard library log package.
 type Logger interface {
 	Printf(format string, args ...interface{})
 }
@@ -24,6 +28,8 @@ type stdLogger struct{}
 
 func (stdLogger) Printf(format string, args ...interface{}) { log.Printf(format, args...) }
 
+// Options configures a Server. The zero value is usable; each field documents
+// its default when left empty.
 type Options struct {
 	Addr                     string
 	Handler                  Handler
@@ -44,9 +50,59 @@ type Options struct {
 	// When true, Request.BodyReader is set and Body is nil.
 	StreamingBody bool
 
-	// IdleTimeout is the maximum amount of time to wait for the
-	// next request/stream on an idle connection. Zero means no timeout.
+	// IdleTimeout is the maximum amount of time to wait for the next
+	// request/stream on an idle connection.
+	//
+	//   0  => secure default (defaultIdleTimeout)
+	//   <0 => disabled (no idle timeout; keep-alive forever)
+	//   >0 => explicit timeout
+	//
+	// A sensible default protects long-lived HTTP/2 connections from being
+	// held open indefinitely by idle clients, while sequential/active streams
+	// reset the clock on every new stream.
 	IdleTimeout time.Duration
+
+	// MaxRequestBodyBytes caps the size of an inbound request body to bound
+	// memory use and defend against memory-exhaustion DoS via large uploads.
+	// It is enforced in BOTH buffered mode (accumulation stops and the request
+	// is rejected with 413 once the cap is exceeded — never buffering beyond
+	// the cap) and streaming mode (BodyReader returns ErrBodyTooLarge once the
+	// total bytes read exceed the cap).
+	//
+	//   0  => secure default (defaultMaxRequestBodyBytes, 10 MiB)
+	//   <0 => unlimited / disabled
+	//   >0 => explicit limit in bytes
+	MaxRequestBodyBytes int64
+
+	// OnDrainStart, if set, is invoked exactly once at the very START of
+	// Shutdown — before the listener is closed and before GOAWAY is sent —
+	// so callers can flip readiness to NOT-ready (e.g.
+	// HealthState.SetNotReady and/or grpc health SetServingStatus(NotServing)).
+	// This lets Kubernetes stop routing new traffic to this instance while
+	// in-flight streams continue to drain. It runs synchronously while the
+	// server lock is held, so it must not block or call back into the server.
+	OnDrainStart func()
+}
+
+// defaultMaxRequestBodyBytes is the secure-by-default cap on buffered request
+// bodies (10 MiB), applied when MaxRequestBodyBytes is zero.
+const defaultMaxRequestBodyBytes = 10 << 20
+
+// defaultIdleTimeout is the secure-by-default idle connection timeout applied
+// when Options.IdleTimeout is zero.
+const defaultIdleTimeout = 120 * time.Second
+
+// resolveMaxBodyBytes resolves the body-size cap sentinel into a concrete
+// limit: a positive byte count, or -1 for "unlimited".
+func (o Options) resolveMaxBodyBytes() int64 {
+	switch {
+	case o.MaxRequestBodyBytes == 0:
+		return defaultMaxRequestBodyBytes
+	case o.MaxRequestBodyBytes < 0:
+		return -1 // unlimited
+	default:
+		return o.MaxRequestBodyBytes
+	}
 }
 
 func (o Options) validate() error {
@@ -67,11 +123,14 @@ func (o Options) resolvedHandler() Handler {
 	return h
 }
 
+// Server is an HTTP/2 (optionally h2c) server built on the poseidon conn layer.
+// Construct one with NewServer, then drive it with Serve or ListenAndServe.
 type Server struct {
-	handler   Handler
-	connOpts  conn.ServerConnOptions
-	opts      Options
-	logger    Logger
+	handler      Handler
+	connOpts     conn.ServerConnOptions
+	opts         Options
+	maxBodyBytes int64 // resolved: >0 limit, -1 unlimited
+	logger       Logger
 	mu        sync.Mutex
 	closed    bool
 	shutdown  bool
@@ -82,6 +141,8 @@ type Server struct {
 	closeCh   chan struct{}
 }
 
+// NewServer validates opts and returns a ready-to-serve Server. It returns a
+// non-nil error if opts is invalid.
 func NewServer(opts Options) (*Server, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
@@ -93,17 +154,33 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.GracefulShutdownTimeout <= 0 {
 		opts.GracefulShutdownTimeout = 30 * time.Second
 	}
+	// Secure-by-default idle timeout: zero => default, negative => disabled.
+	if opts.IdleTimeout == 0 {
+		opts.IdleTimeout = defaultIdleTimeout
+	}
 	return &Server{
-		handler:  opts.resolvedHandler(),
-		connOpts: opts.ConnOpts,
-		opts:     opts,
-		logger:   logger,
-		conns:    make(map[*conn.ServerConn]struct{}),
-		done:     make(chan struct{}),
-		closeCh:  make(chan struct{}),
+		handler:      opts.resolvedHandler(),
+		connOpts:     opts.ConnOpts,
+		opts:         opts,
+		maxBodyBytes: opts.resolveMaxBodyBytes(),
+		logger:       logger,
+		conns:        make(map[*conn.ServerConn]struct{}),
+		done:         make(chan struct{}),
+		closeCh:      make(chan struct{}),
 	}, nil
 }
 
+// idleTimeout returns the effective idle timeout: 0 when disabled (negative
+// sentinel) so the accept loop skips the per-stream deadline.
+func (s *Server) idleTimeout() time.Duration {
+	if s.opts.IdleTimeout < 0 {
+		return 0
+	}
+	return s.opts.IdleTimeout
+}
+
+// ListenAndServe listens on opts.Addr (TCP) and serves connections until ctx
+// is cancelled or Close is called, returning ErrServerClosed on clean shutdown.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.opts.Addr)
 	if err != nil {
@@ -113,13 +190,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return s.Serve(ctx, ln)
 }
 
+// Serve accepts connections from ln until ctx is cancelled or Close is called,
+// returning ErrServerClosed on clean shutdown. It takes ownership of ln.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.mu.Lock()
 	s.listener = ln
 	s.mu.Unlock()
 	go func() {
 		<-ctx.Done()
-		s.Close()
+		_ = s.Close()
 	}()
 	for {
 		nc, err := ln.Accept()
@@ -134,7 +213,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		if s.opts.MaxConcurrentConnections > 0 &&
 			s.ConnCount() >= s.opts.MaxConcurrentConnections {
 			s.logger.Printf("poseidon: rejecting %s: max connections", nc.RemoteAddr())
-			nc.Close()
+			_ = nc.Close()
 			continue
 		}
 		go func() {
@@ -155,7 +234,7 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 	sc, err := conn.NewServerConn(ctx, nc, opts)
 	if err != nil {
 		s.logger.Printf("poseidon: handshake failed for %s: %v", nc.RemoteAddr(), err)
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 	s.trackConn(sc, true)
@@ -165,9 +244,9 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 
 // acceptLoop reads streams from a ServerConn with optional idle timeout.
 func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
-	if s.opts.IdleTimeout > 0 {
+	if idle := s.idleTimeout(); idle > 0 {
 		for {
-			acceptCtx, cancel := context.WithTimeout(ctx, s.opts.IdleTimeout)
+			acceptCtx, cancel := context.WithTimeout(ctx, idle)
 			stream, err := sc.AcceptStream(acceptCtx)
 			cancel()
 			if err != nil {
@@ -209,7 +288,7 @@ func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 
 	// Streaming mode: attach io.ReadCloser and dispatch immediately.
 	if s.opts.StreamingBody {
-		req.BodyReader = newStreamBody(ctx, stream)
+		req.BodyReader = newStreamBody(ctx, stream, s.maxBodyBytes)
 		s.dispatchAndClose(ctx, stream, req)
 		return
 	}
@@ -221,6 +300,7 @@ func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 // serveStreamBuffered collects DATA/Trailers frames and dispatches.
 func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStream, req *Request) {
 	var bodyChunks [][]byte
+	var total int64
 	for {
 		ev, err := stream.Recv(ctx)
 		if err != nil {
@@ -229,6 +309,14 @@ func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStr
 		switch ev.Type {
 		case conn.EventData:
 			if ev.Data != nil {
+				// Enforce the body-size cap BEFORE accumulating, so an
+				// over-cap upload can never balloon memory: reject with 413
+				// and drop the (already-collected) chunks immediately.
+				total += int64(len(ev.Data))
+				if s.maxBodyBytes >= 0 && total > s.maxBodyBytes {
+					s.rejectTooLarge(stream)
+					return
+				}
 				bodyChunks = append(bodyChunks, ev.Data)
 			}
 			if ev.EndStream {
@@ -250,6 +338,17 @@ func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStr
 			// Extra HEADERS (illegal mid-stream), ignore.
 		}
 	}
+}
+
+// rejectTooLarge responds 413 (Request Entity Too Large) and tears the stream
+// down. Used when a buffered request body exceeds MaxRequestBodyBytes. We send
+// the status with END_STREAM via empty trailers, then Close (which RSTs if the
+// client has not finished). No further body bytes are buffered.
+func (s *Server) rejectTooLarge(stream *conn.ServerStream) {
+	w := newConnResponseWriter(stream, nil)
+	_ = w.WriteHeaders(http.StatusRequestEntityTooLarge, nil)
+	_ = w.WriteTrailers(nil)
+	_ = stream.Close()
 }
 
 func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream, req *Request) {
@@ -341,6 +440,7 @@ func (s *Server) trackConn(sc *conn.ServerConn, add bool) {
 	}
 }
 
+// ConnCount returns the number of connections the server is currently tracking.
 func (s *Server) ConnCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -357,6 +457,9 @@ func (s *Server) Addr() net.Addr {
 	return nil
 }
 
+// Close stops accepting new connections and tears down the listener, causing
+// Serve/ListenAndServe to return ErrServerClosed. It is safe to call multiple
+// times; only the first call has an effect.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -389,6 +492,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.shutdown = true
 	s.closed = true
+
+	// Drain start: flip readiness to NOT-ready BEFORE closing the listener or
+	// sending GOAWAY, so k8s removes this instance from Service endpoints and
+	// stops routing new traffic while in-flight streams continue to drain.
+	if s.opts.OnDrainStart != nil {
+		s.opts.OnDrainStart()
+	}
 
 	// Close listener — stop accepting new connections.
 	if s.listener != nil {

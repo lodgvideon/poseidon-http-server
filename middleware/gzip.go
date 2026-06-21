@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/server"
 )
@@ -272,30 +271,21 @@ func (g *gzipResponseWriter) flushHTTP(status int, out []byte, compress bool) er
 	return nil
 }
 
-// --- Push delegation (server.Pusher) ----------------------------------------
-//
-// Pushed responses are not compressed by this middleware; the calls are simply
-// forwarded so enabling Gzip does not silently disable Server Push.
+// Unwrap returns the wrapped writer so server.PusherOf / server.FlusherOf can
+// walk the chain to reach optional capabilities (Server Push, base flushing)
+// through this wrapper. This is the net/http ResponseController convention; it
+// replaces hand-written Push/PushWithScheme/PushWithPriority forwarders.
+func (g *gzipResponseWriter) Unwrap() server.ResponseWriter { return g.ResponseWriter }
 
-func (g *gzipResponseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderField) (server.ResponseWriter, error) {
-	if p, ok := g.ResponseWriter.(server.Pusher); ok {
-		return p.Push(promisePath, promiseHeaders)
+// Flush drains the buffered (and possibly compressed) response to the wrapped
+// writer, then flushes the underlying writer if it supports http.Flusher. It
+// implements http.Flusher so a handler can force the response out — the gzip
+// buffer is emitted first so flushing does not strand the compressed body.
+func (g *gzipResponseWriter) Flush() {
+	_ = g.flush()
+	if f, ok := server.FlusherOf(g.ResponseWriter); ok {
+		f.Flush()
 	}
-	return nil, server.ErrPushNotSupported
-}
-
-func (g *gzipResponseWriter) PushWithScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) (server.ResponseWriter, error) {
-	if p, ok := g.ResponseWriter.(server.Pusher); ok {
-		return p.PushWithScheme(promisePath, promiseScheme, promiseHeaders)
-	}
-	return nil, server.ErrPushNotSupported
-}
-
-func (g *gzipResponseWriter) PushWithPriority(promisePath string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (server.ResponseWriter, error) {
-	if p, ok := g.ResponseWriter.(server.Pusher); ok {
-		return p.PushWithPriority(promisePath, promiseHeaders, prio)
-	}
-	return nil, server.ErrPushNotSupported
 }
 
 // withGzipEncoding returns headers with Content-Length removed (the compressed

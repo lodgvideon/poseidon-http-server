@@ -114,11 +114,9 @@ func (ss *ServerStream) SendHeadersWithPriority(ctx context.Context, fields []hp
 	}
 	ss.mu.Lock()
 	ss.headersSent = true
-	if endStream {
-		ss.localEnded = true
-	}
 	ss.mu.Unlock()
-	if endStream {
+	if endStream && ss.markLocalEnd() {
+		// Fully closed (both halves ended): release the stream.
 		ss.sc.markStreamDone(ss.id)
 	}
 	return nil
@@ -138,10 +136,8 @@ func (ss *ServerStream) SendData(ctx context.Context, p []byte, endStream bool) 
 	if err := ss.sc.writeServerData(ctx, ss, p, endStream); err != nil {
 		return err
 	}
-	if endStream {
-		ss.mu.Lock()
-		ss.localEnded = true
-		ss.mu.Unlock()
+	if endStream && ss.markLocalEnd() {
+		// Fully closed (both halves ended): release the stream.
 		ss.sc.markStreamDone(ss.id)
 	}
 	return nil
@@ -177,10 +173,39 @@ func (ss *ServerStream) Close() error {
 }
 
 // markRemoteEnd marks the remote side as closed.
-func (ss *ServerStream) markRemoteEnd() {
+// markRemoteEnd records that the client has ended its half of the stream
+// (END_STREAM received). It returns true if the stream is now fully closed
+// (both the remote and local halves are done), so the caller can release it.
+// While the stream is only half-closed (remote), it MUST stay registered: the
+// server may still be writing its response and must keep receiving that stream's
+// WINDOW_UPDATE / RST_STREAM (RFC 7540 §5.1).
+func (ss *ServerStream) markRemoteEnd() bool {
 	ss.mu.Lock()
+	defer ss.mu.Unlock()
 	ss.remoteEnded = true
-	ss.mu.Unlock()
+	return ss.localEnded
+}
+
+// markLocalEnd records that the server has ended its half of the stream (sent
+// END_STREAM). It returns true if the stream is now fully closed.
+func (ss *ServerStream) markLocalEnd() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.localEnded = true
+	return ss.remoteEnded
+}
+
+// markRemoteEndReset records a client RST_STREAM as ending the remote half and
+// reports whether the request was still open (END_STREAM not yet observed) at
+// that moment — computed atomically under ss.mu so the rapid-reset
+// classification (CVE-2023-44487) cannot race the flag write. RST is a hard
+// close, so the caller releases the stream unconditionally afterwards.
+func (ss *ServerStream) markRemoteEndReset() (wasOpen bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	wasOpen = !ss.remoteEnded
+	ss.remoteEnded = true
+	return wasOpen
 }
 
 // push delivers an event from the reader goroutine. Non-blocking;

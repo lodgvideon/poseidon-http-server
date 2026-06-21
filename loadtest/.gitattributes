@@ -1,0 +1,6 @@
+# Load-test scripts run in POSIX shells (CI/Linux/macOS) — force LF so a Windows
+# checkout's CRLF normalization never breaks `bash`/`#!/usr/bin/env bash`.
+*.sh   text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.proto text eol=lf
