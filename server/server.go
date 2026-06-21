@@ -44,9 +44,50 @@ type Options struct {
 	// When true, Request.BodyReader is set and Body is nil.
 	StreamingBody bool
 
-	// IdleTimeout is the maximum amount of time to wait for the
-	// next request/stream on an idle connection. Zero means no timeout.
+	// IdleTimeout is the maximum amount of time to wait for the next
+	// request/stream on an idle connection.
+	//
+	//   0  => secure default (defaultIdleTimeout)
+	//   <0 => disabled (no idle timeout; keep-alive forever)
+	//   >0 => explicit timeout
+	//
+	// A sensible default protects long-lived HTTP/2 connections from being
+	// held open indefinitely by idle clients, while sequential/active streams
+	// reset the clock on every new stream.
 	IdleTimeout time.Duration
+
+	// MaxRequestBodyBytes caps the size of an inbound request body to bound
+	// memory use and defend against memory-exhaustion DoS via large uploads.
+	// It is enforced in BOTH buffered mode (accumulation stops and the request
+	// is rejected with 413 once the cap is exceeded — never buffering beyond
+	// the cap) and streaming mode (BodyReader returns ErrBodyTooLarge once the
+	// total bytes read exceed the cap).
+	//
+	//   0  => secure default (defaultMaxRequestBodyBytes, 10 MiB)
+	//   <0 => unlimited / disabled
+	//   >0 => explicit limit in bytes
+	MaxRequestBodyBytes int64
+}
+
+// defaultMaxRequestBodyBytes is the secure-by-default cap on buffered request
+// bodies (10 MiB), applied when MaxRequestBodyBytes is zero.
+const defaultMaxRequestBodyBytes = 10 << 20
+
+// defaultIdleTimeout is the secure-by-default idle connection timeout applied
+// when Options.IdleTimeout is zero.
+const defaultIdleTimeout = 120 * time.Second
+
+// resolveMaxBodyBytes resolves the body-size cap sentinel into a concrete
+// limit: a positive byte count, or -1 for "unlimited".
+func (o Options) resolveMaxBodyBytes() int64 {
+	switch {
+	case o.MaxRequestBodyBytes == 0:
+		return defaultMaxRequestBodyBytes
+	case o.MaxRequestBodyBytes < 0:
+		return -1 // unlimited
+	default:
+		return o.MaxRequestBodyBytes
+	}
 }
 
 func (o Options) validate() error {
@@ -68,10 +109,11 @@ func (o Options) resolvedHandler() Handler {
 }
 
 type Server struct {
-	handler   Handler
-	connOpts  conn.ServerConnOptions
-	opts      Options
-	logger    Logger
+	handler      Handler
+	connOpts     conn.ServerConnOptions
+	opts         Options
+	maxBodyBytes int64 // resolved: >0 limit, -1 unlimited
+	logger       Logger
 	mu        sync.Mutex
 	closed    bool
 	shutdown  bool
@@ -93,15 +135,29 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.GracefulShutdownTimeout <= 0 {
 		opts.GracefulShutdownTimeout = 30 * time.Second
 	}
+	// Secure-by-default idle timeout: zero => default, negative => disabled.
+	if opts.IdleTimeout == 0 {
+		opts.IdleTimeout = defaultIdleTimeout
+	}
 	return &Server{
-		handler:  opts.resolvedHandler(),
-		connOpts: opts.ConnOpts,
-		opts:     opts,
-		logger:   logger,
-		conns:    make(map[*conn.ServerConn]struct{}),
-		done:     make(chan struct{}),
-		closeCh:  make(chan struct{}),
+		handler:      opts.resolvedHandler(),
+		connOpts:     opts.ConnOpts,
+		opts:         opts,
+		maxBodyBytes: opts.resolveMaxBodyBytes(),
+		logger:       logger,
+		conns:        make(map[*conn.ServerConn]struct{}),
+		done:         make(chan struct{}),
+		closeCh:      make(chan struct{}),
 	}, nil
+}
+
+// idleTimeout returns the effective idle timeout: 0 when disabled (negative
+// sentinel) so the accept loop skips the per-stream deadline.
+func (s *Server) idleTimeout() time.Duration {
+	if s.opts.IdleTimeout < 0 {
+		return 0
+	}
+	return s.opts.IdleTimeout
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -165,9 +221,9 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 
 // acceptLoop reads streams from a ServerConn with optional idle timeout.
 func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
-	if s.opts.IdleTimeout > 0 {
+	if idle := s.idleTimeout(); idle > 0 {
 		for {
-			acceptCtx, cancel := context.WithTimeout(ctx, s.opts.IdleTimeout)
+			acceptCtx, cancel := context.WithTimeout(ctx, idle)
 			stream, err := sc.AcceptStream(acceptCtx)
 			cancel()
 			if err != nil {
@@ -209,7 +265,7 @@ func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 
 	// Streaming mode: attach io.ReadCloser and dispatch immediately.
 	if s.opts.StreamingBody {
-		req.BodyReader = newStreamBody(ctx, stream)
+		req.BodyReader = newStreamBody(ctx, stream, s.maxBodyBytes)
 		s.dispatchAndClose(ctx, stream, req)
 		return
 	}
@@ -221,6 +277,7 @@ func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 // serveStreamBuffered collects DATA/Trailers frames and dispatches.
 func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStream, req *Request) {
 	var bodyChunks [][]byte
+	var total int64
 	for {
 		ev, err := stream.Recv(ctx)
 		if err != nil {
@@ -229,6 +286,15 @@ func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStr
 		switch ev.Type {
 		case conn.EventData:
 			if ev.Data != nil {
+				// Enforce the body-size cap BEFORE accumulating, so an
+				// over-cap upload can never balloon memory: reject with 413
+				// and drop the (already-collected) chunks immediately.
+				total += int64(len(ev.Data))
+				if s.maxBodyBytes >= 0 && total > s.maxBodyBytes {
+					bodyChunks = nil
+					s.rejectTooLarge(stream)
+					return
+				}
 				bodyChunks = append(bodyChunks, ev.Data)
 			}
 			if ev.EndStream {
@@ -250,6 +316,17 @@ func (s *Server) serveStreamBuffered(ctx context.Context, stream *conn.ServerStr
 			// Extra HEADERS (illegal mid-stream), ignore.
 		}
 	}
+}
+
+// rejectTooLarge responds 413 (Request Entity Too Large) and tears the stream
+// down. Used when a buffered request body exceeds MaxRequestBodyBytes. We send
+// the status with END_STREAM via empty trailers, then Close (which RSTs if the
+// client has not finished). No further body bytes are buffered.
+func (s *Server) rejectTooLarge(stream *conn.ServerStream) {
+	w := newConnResponseWriter(stream, nil)
+	_ = w.WriteHeaders(http.StatusRequestEntityTooLarge, nil)
+	_ = w.WriteTrailers(nil)
+	_ = stream.Close()
 }
 
 func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream, req *Request) {

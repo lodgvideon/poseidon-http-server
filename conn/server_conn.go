@@ -108,7 +108,25 @@ type ServerConnOptions struct {
 	// a budget proportional to the advertised stream concurrency so that
 	// legitimate cancellations never trip it under normal operation.
 	MaxRapidResets int
+
+	// HandshakeTimeout bounds the time allowed to complete the HTTP/2
+	// connection preface + SETTINGS exchange (RFC 7540 §3.5). A client that
+	// connects but trickles the preface/SETTINGS slowly is dropped once the
+	// deadline elapses — a Slowloris defense at the connection-establishment
+	// stage. The deadline is cleared once the handshake completes, so it does
+	// NOT act as a blanket connection read deadline and never interferes with
+	// long-lived, multiplexed HTTP/2 keep-alive traffic.
+	//
+	//   0  => secure default (defaultHandshakeTimeout)
+	//   <0 => disabled
+	//   >0 => explicit timeout
+	HandshakeTimeout time.Duration
 }
+
+// defaultHandshakeTimeout is the secure-by-default bound on completing the
+// HTTP/2 handshake. Generous enough for high-latency clients yet short enough
+// to shed Slowloris-style connections that never finish the preface.
+const defaultHandshakeTimeout = 10 * time.Second
 
 // rapidResetFloor is the minimum Rapid Reset budget regardless of how
 // small MaxConcurrentStreams is, so low-concurrency configs still tolerate
@@ -128,6 +146,9 @@ func (o ServerConnOptions) defaulted() ServerConnOptions {
 			budget = rapidResetFloor
 		}
 		o.MaxRapidResets = budget
+	}
+	if o.HandshakeTimeout == 0 {
+		o.HandshakeTimeout = defaultHandshakeTimeout
 	}
 	return o
 }
@@ -168,6 +189,17 @@ var clientPreface = []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
 // Returns ErrBadPreface if the client preface is invalid.
 func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*ServerConn, error) {
 	opts = opts.defaulted()
+
+	// Slowloris defense: bound the handshake (preface + SETTINGS exchange)
+	// with a read deadline. A client that connects but never finishes the
+	// preface is dropped here instead of pinning a goroutine forever. The
+	// deadline is cleared on success so it does NOT linger as a blanket
+	// connection read deadline that would break HTTP/2 keep-alive.
+	if opts.HandshakeTimeout > 0 {
+		if dl, ok := nc.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = dl.SetReadDeadline(time.Now().Add(opts.HandshakeTimeout))
+		}
+	}
 
 	// Step 1: read and verify client preface.
 	if err := readClientPreface(nc); err != nil {
@@ -212,6 +244,19 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	sc.peerSettings = peer
 	sc.psMu.Unlock()
 	sc.applyInitialPeerSettings(peer)
+
+	// Handshake complete: clear the read deadline so the long-lived, multiplexed
+	// connection is never killed by a stale handshake deadline. Post-handshake
+	// liveness is intentionally NOT a blanket connection read deadline (that would
+	// break keep-alive); it is governed by the per-stream idle timeout at the accept
+	// layer (server.acceptLoop), which closes a connection left idle with no streams.
+	// The brief window before readerLoop starts performs no reads, so there is no
+	// slow-client vector there.
+	if opts.HandshakeTimeout > 0 {
+		if dl, ok := nc.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = dl.SetReadDeadline(time.Time{})
+		}
+	}
 
 	go sc.readerLoop()
 	if opts.KeepaliveInterval > 0 {
@@ -295,11 +340,13 @@ func (sc *ServerConn) Close() error {
 	}
 	sc.fcOutMu.Unlock()
 
-	// Best-effort GOAWAY.
+	// Best-effort GOAWAY. The write deadline is set under wmu together with the
+	// write so a concurrent teardown path (sendGoAway) cannot clobber the deadline
+	// on the shared transport.
+	sc.wmu.Lock()
 	if dl, ok := sc.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
-	sc.wmu.Lock()
 	_ = sc.fr.WriteGoAway(sc.lastPeerStreamID(), frame.ErrCodeNoError, nil)
 	sc.wmu.Unlock()
 	_ = sc.transport.Close()
@@ -500,10 +547,12 @@ func (sc *ServerConn) sendGoAway(code frame.ErrCode) {
 	if !sc.goAwayRequested.CompareAndSwap(false, true) {
 		return
 	}
+	sc.wmu.Lock()
+	// Deadline set under wmu with the write so it cannot race Close()'s deadline
+	// on the shared transport.
 	if dl, ok := sc.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
-	sc.wmu.Lock()
 	if !sc.closed.Load() {
 		if err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), code, nil); err == nil {
 			sc.bumpFramesSent()
