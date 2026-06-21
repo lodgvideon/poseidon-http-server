@@ -13,6 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
+      # must exist next to this checkout. Track the same ref local dev uses (main).
+      - name: Check out poseidon-http-client (replace target)
+        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
@@ -34,6 +39,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
+      # must exist next to this checkout. Track the same ref local dev uses (main).
+      - name: Check out poseidon-http-client (replace target)
+        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
@@ -50,18 +60,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
+      # must exist next to this checkout. Track the same ref local dev uses (main).
+      - name: Check out poseidon-http-client (replace target)
+        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
 
-      - name: Check coverage
+      - name: Check coverage (library packages, examples/cmd excluded)
         run: |
           go test -count=1 -timeout 60s -coverprofile=coverage.out ./...
-          TOTAL=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
-          echo "Total coverage: ${TOTAL}%"
-          THRESHOLD=80
-          if (( $(echo "$TOTAL < $THRESHOLD" | bc -l) )); then
-            echo "::error::Coverage ${TOTAL}% is below threshold ${THRESHOLD}%"
-            exit 1
-          fi
-          echo "::notice::Coverage ${TOTAL}% ≥ ${THRESHOLD}% ✅"
+          bash scripts/coverage-gate.sh 80 coverage.out
+
+  bench:
+    name: Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
+      # must exist next to this checkout. Track the same ref local dev uses (main).
+      - name: Check out poseidon-http-client (replace target)
+        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # Smoke-run every benchmark once to catch broken benches, panics, and build
+      # breaks. True regression-gating (same-runner before/after via benchstat) is a
+      # follow-up — cross-machine absolute baselines are unreliable. Locally:
+      # `make bench-gate` (self-baselines on first run).
+      - name: Run benchmarks
+        run: go test -bench=. -benchmem -benchtime=1x -run='^$' ./...
