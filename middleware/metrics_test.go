@@ -14,7 +14,7 @@ func TestMetricsCollector_RequestCounting(t *testing.T) {
 	mc := NewMetricsCollector()
 	mw := mc.Metrics()
 
-	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		return nil
 	}))
 
@@ -36,7 +36,7 @@ func TestMetricsCollector_DifferentPaths(t *testing.T) {
 	mc := NewMetricsCollector()
 	mw := mc.Metrics()
 
-	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		return nil
 	}))
 
@@ -109,7 +109,7 @@ func TestMetricsCollector_ConcurrentSafety(t *testing.T) {
 	mc := NewMetricsCollector()
 	mw := mc.Metrics()
 
-	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		return nil
 	}))
 
@@ -140,7 +140,7 @@ func TestMetricsCollector_BodyTracking(t *testing.T) {
 	mw := mc.Metrics()
 
 	body := []byte("request body data")
-	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		return nil
 	}))
 
@@ -169,7 +169,7 @@ func TestMetricsCollector_EmptyRequest(t *testing.T) {
 	mc := NewMetricsCollector()
 	mw := mc.Metrics()
 
-	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		return nil
 	}))
 

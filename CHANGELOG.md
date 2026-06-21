@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- **HTTP/2 Rapid Reset mitigation (CVE-2023-44487).** The conn layer now bounds
+  client-initiated RST_STREAM floods with a per-connection budget
+  (`max(MaxConcurrentStreams*4, 100)`); exceeding it tears the connection down
+  with `GOAWAY(ENHANCE_YOUR_CALM)`. Configurable via
+  `ServerConnOptions.MaxRapidResets` (0 = secure default, <0 = disabled,
+  >0 = explicit), surfaced through `server.Options.ConnOpts`. Lock-free/zero-alloc.
+
+### Changed (BREAKING)
+
+- **`server.ResponseWriter` is now an interface**, not a concrete struct. The
+  `Handler`/`HandlerFunc` signature changed from `*server.ResponseWriter` to
+  `server.ResponseWriter`. Migration: drop the `*` — all method names are
+  unchanged. This lets middleware intercept the response body by wrapping the
+  writer (the canonical Go middleware pattern).
+- **Server Push moved to the optional `server.Pusher` interface** (mirroring
+  `net/http.Pusher`/`Flusher`/`Hijacker`). Handlers that push now type-assert:
+  `if p, ok := w.(server.Pusher); ok { p.Push(...) }`. The concrete writer still
+  implements both interfaces.
+
+### Fixed
+
+- **Gzip middleware now actually compresses.** Previously `Gzip()` wrapped the
+  writer but passed the *original* writer to the handler, so the body bypassed
+  the gzip buffer entirely and nothing was ever compressed. It now buffers the
+  response, sets `Content-Encoding: gzip` (and drops `Content-Length`) when the
+  body exceeds `MinSize` and the client sent `Accept-Encoding: gzip`, and emits
+  the compressed body. Covered by a new end-to-end test (real server + raw H2
+  client) asserting `Content-Encoding: gzip` and a clean decompression round-trip.
+
 ## [v0.3.0] — 2026-06-15
 
 Zero-allocation HTTP/2 + gRPC server for Go.

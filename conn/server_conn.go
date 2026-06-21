@@ -60,6 +60,18 @@ type ServerConn struct {
 	// goAwayRequested flags that the server has initiated GOAWAY.
 	goAwayRequested atomic.Bool
 
+	// rapidResetCount accumulates client-initiated RST_STREAM frames that
+	// reset a stream before it produced useful work (CVE-2023-44487).
+	// Compared against opts.rapidResetBudget(). Atomic: incremented by the
+	// single reader goroutine, read on the same path; no allocation.
+	rapidResetCount atomic.Uint32
+
+	// maxClientStreamID tracks the highest client-initiated (odd) stream
+	// ID ever registered, so GOAWAY reports the correct last-processed
+	// stream ID (RFC 7540 §6.8) even after the stream has been torn down
+	// and removed from the streams map.
+	maxClientStreamID atomic.Uint32
+
 	// pushIDs generates even stream IDs for server push (RFC 7540 §8.2).
 	pushIDs *pushIDCounter
 
@@ -83,7 +95,25 @@ type ServerConnOptions struct {
 	// KeepaliveTimeout is the max time to wait for PING ACK before
 	// closing the connection. Defaults to max(interval*5, 5s).
 	KeepaliveTimeout time.Duration
+	// MaxRapidResets bounds the number of client-initiated RST_STREAM
+	// frames that reset a stream before it produced useful work, before
+	// the server treats the connection as a Rapid Reset flood
+	// (CVE-2023-44487) and tears it down with GOAWAY(ENHANCE_YOUR_CALM).
+	//
+	//   0  => secure default: max(MaxConcurrentStreams*4, rapidResetFloor)
+	//   <0 => mitigation disabled
+	//   >0 => explicit budget
+	//
+	// Mirrors the Go x/net/http2 fix philosophy: secure-by-default, with
+	// a budget proportional to the advertised stream concurrency so that
+	// legitimate cancellations never trip it under normal operation.
+	MaxRapidResets int
 }
+
+// rapidResetFloor is the minimum Rapid Reset budget regardless of how
+// small MaxConcurrentStreams is, so low-concurrency configs still tolerate
+// a reasonable burst of legitimate cancellations.
+const rapidResetFloor = 100
 
 func (o ServerConnOptions) defaulted() ServerConnOptions {
 	if o.AdvertisedSettings.MaxConcurrentStreams == 0 {
@@ -92,7 +122,23 @@ func (o ServerConnOptions) defaulted() ServerConnOptions {
 	if o.StreamEventBuffer <= 0 {
 		o.StreamEventBuffer = 8
 	}
+	if o.MaxRapidResets == 0 {
+		budget := int(o.AdvertisedSettings.MaxConcurrentStreams) * 4
+		if budget < rapidResetFloor {
+			budget = rapidResetFloor
+		}
+		o.MaxRapidResets = budget
+	}
 	return o
+}
+
+// rapidResetBudget returns the configured Rapid Reset budget, or 0 if the
+// mitigation is disabled (negative MaxRapidResets).
+func (o ServerConnOptions) rapidResetBudget() int {
+	if o.MaxRapidResets < 0 {
+		return 0
+	}
+	return o.MaxRapidResets
 }
 
 // ConnStats is a point-in-time counter snapshot.
@@ -274,15 +320,29 @@ func (sc *ServerConn) Stats() ConnStats {
 }
 
 func (sc *ServerConn) lastPeerStreamID() uint32 {
+	maxID := sc.maxClientStreamID.Load()
 	sc.smu.Lock()
-	defer sc.smu.Unlock()
-	maxID := uint32(0)
 	for id := range sc.streams {
 		if id > maxID {
 			maxID = id
 		}
 	}
+	sc.smu.Unlock()
 	return maxID
+}
+
+// noteClientStreamID records id as the highest client-initiated stream ID
+// seen, monotonically (CAS loop). Cheap and race-safe; no allocation.
+func (sc *ServerConn) noteClientStreamID(id uint32) {
+	for {
+		cur := sc.maxClientStreamID.Load()
+		if id <= cur {
+			return
+		}
+		if sc.maxClientStreamID.CompareAndSwap(cur, id) {
+			return
+		}
+	}
 }
 
 func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
@@ -418,11 +478,38 @@ func (sc *ServerConn) readerLoop() {
 	for {
 		_, err := sc.fr.ReadFrame(context.Background(), h)
 		if err != nil {
+			// A connError from a handler callback (e.g. PROTOCOL_ERROR or
+			// the Rapid Reset ENHANCE_YOUR_CALM trip) is a connection-fatal
+			// error: emit GOAWAY with its code before tearing down so the
+			// peer learns why the connection is closing (RFC 7540 §6.8).
+			var ce connError
+			if errors.As(err, &ce) {
+				sc.sendGoAway(ce.code)
+			}
 			sc.shutdownStreams(err)
 			return
 		}
 		sc.atomicFramesReceived.Add(1)
 	}
+}
+
+// sendGoAway emits a best-effort GOAWAY with the given error code and the
+// last client stream ID we processed. Bounded by a short write deadline so
+// a stuck transport cannot block connection teardown.
+func (sc *ServerConn) sendGoAway(code frame.ErrCode) {
+	if !sc.goAwayRequested.CompareAndSwap(false, true) {
+		return
+	}
+	if dl, ok := sc.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
+	}
+	sc.wmu.Lock()
+	if !sc.closed.Load() {
+		if err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), code, nil); err == nil {
+			sc.bumpFramesSent()
+		}
+	}
+	sc.wmu.Unlock()
 }
 
 func (sc *ServerConn) shutdownStreams(_ error) {

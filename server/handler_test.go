@@ -38,7 +38,7 @@ func (m *mockStreamWriter) sendData(_ context.Context, p []byte, endStream bool)
 
 func (m *mockStreamWriter) streamID() uint32 { return m.id }
 
-func newTestWriter() (*ResponseWriter, *mockStreamWriter) {
+func newTestWriter() (*responseWriter, *mockStreamWriter) {
 	sw := &mockStreamWriter{id: 1}
 	return newResponseWriterWithSW(sw), sw
 }
@@ -318,7 +318,7 @@ func TestFromHTTPHandler_UsesContext(t *testing.T) {
 }
 
 func TestToHTTPHandler_Roundtrip(t *testing.T) {
-	poseidonHandler := HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+	poseidonHandler := HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 		w.Header().Set("x-custom", "yes")
 		w.WriteHeader(200)
 		return nil
@@ -339,7 +339,7 @@ func TestToHTTPHandler_Roundtrip(t *testing.T) {
 }
 
 func TestToHTTPHandler_ErrorReturns500(t *testing.T) {
-	poseidonHandler := HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error {
+	poseidonHandler := HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error {
 		return context.DeadlineExceeded
 	})
 
@@ -360,7 +360,7 @@ func TestToHTTPHandler_ErrorReturns500(t *testing.T) {
 
 func TestHandlerFunc_ServeHTTP(t *testing.T) {
 	called := false
-	h := HandlerFunc(func(_ context.Context, _ *Request, _ *ResponseWriter) error {
+	h := HandlerFunc(func(_ context.Context, _ *Request, _ ResponseWriter) error {
 		called = true
 		return nil
 	})

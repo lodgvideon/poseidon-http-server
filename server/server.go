@@ -257,8 +257,7 @@ func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream
 		_ = stream.Close()
 		return
 	}
-	w := NewResponseWriter(stream)
-	w.req = req
+	w := newConnResponseWriter(stream, req)
 	if err := s.handler.ServeHTTP(ctx, req, w); err != nil {
 		s.logger.Printf("poseidon: handler error on stream %d: %v", stream.ID(), err)
 		if !w.Written() {

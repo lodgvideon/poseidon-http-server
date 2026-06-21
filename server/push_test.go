@@ -61,7 +61,7 @@ func TestResponseWriter_Push_BeforeHeaders(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
 	pushed, err := w.Push("/style.css", nil)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestResponseWriter_Push_AfterHeaders_Fails(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
 	// Mark as already written.
 	w.written = true
@@ -100,7 +100,7 @@ func TestResponseWriter_Push_NotSupported(t *testing.T) {
 
 	// Use a streamWriter that does NOT implement pusher.
 	plain := &mockStreamWriter{id: 1}
-	w := &ResponseWriter{sw: plain}
+	w := &responseWriter{sw: plain}
 
 	_, err := w.Push("/style.css", nil)
 	if !errors.Is(err, ErrPushNotSupported) {
@@ -112,7 +112,7 @@ func TestResponseWriter_Push_MultiplePromises(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
 	paths := []string{"/style.css", "/app.js", "/favicon.ico"}
 	for _, p := range paths {
@@ -133,7 +133,7 @@ func TestResponseWriter_Push_WithCustomHeaders(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
 	customHeaders := []hpack.HeaderField{
 		{Name: []byte("if-none-match"), Value: []byte(`"abc"`)},
@@ -196,7 +196,7 @@ func TestResponseWriter_PushWithScheme_H2C(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{
+	w := &responseWriter{
 		sw:  &mockPusher{stream: stream},
 		req: &Request{Scheme: "http", Path: "/foo"}, // h2c request
 	}
@@ -216,7 +216,7 @@ func TestResponseWriter_Push_DerivesSchemeFromRequest(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{
+	w := &responseWriter{
 		sw:  &mockPusher{stream: stream},
 		req: &Request{Scheme: "http", Path: "/foo"}, // h2c
 	}
@@ -236,7 +236,7 @@ func TestResponseWriter_Push_NoRequestContextDefaultsToHTTPS(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}} // req=nil
+	w := &responseWriter{sw: &mockPusher{stream: stream}} // req=nil
 
 	_, _ = w.Push("/style.css", nil)
 
@@ -250,7 +250,7 @@ func TestResponseWriter_PushWithScheme_EmptyDefaultsToHTTPS(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
 	_, _ = w.PushWithScheme("/style.css", "", nil)
 
@@ -264,7 +264,7 @@ func TestResponseWriter_PushWithScheme_AfterHeadersFails(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 	w.written = true
 
 	_, err := w.PushWithScheme("/style.css", "https", nil)
@@ -280,7 +280,7 @@ func TestResponseWriter_PushWithPriority_PropagatesPrio(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
 	prio := &frame.Priority{StreamDep: 0, Exclusive: true, Weight: 200}
 	_, err := w.PushWithPriority("/style.css", nil, prio)
@@ -300,7 +300,7 @@ func TestResponseWriter_PushWithPriority_AfterHeadersFails(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 	w.written = true
 
 	prio := &frame.Priority{StreamDep: 0, Exclusive: false, Weight: 100}
@@ -316,7 +316,7 @@ func TestResponseWriter_PushWithPriority_NilIsEquivalentToPush(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &ResponseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
 	_, err := w.PushWithPriority("/style.css", nil, nil)
 	if !errors.Is(err, errMockPushNotUsed) {

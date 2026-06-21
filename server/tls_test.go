@@ -57,7 +57,7 @@ func TestTLS_ListenAndServe(t *testing.T) {
 
 	handlerCalled := make(chan struct{})
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			close(handlerCalled)
 			return w.WriteHeaders(200, nil)
 		}),

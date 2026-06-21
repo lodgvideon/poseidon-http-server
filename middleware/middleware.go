@@ -30,7 +30,7 @@ type Logger interface {
 // to 500 Internal Server Error responses.
 func Recovery(log Logger) server.Middleware {
 	return func(next server.Handler) server.Handler {
-		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) (err error) {
+		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) (err error) {
 			defer func() {
 				if r := recover(); r != nil {
 					stack := debug.Stack()
@@ -60,7 +60,7 @@ const requestIDKey ctxKey = 0
 // the context and sets it as an X-Request-ID response header.
 func RequestID() server.Middleware {
 	return func(next server.Handler) server.Handler {
-		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
+		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 			id := ""
 			for _, h := range req.Headers {
 				if string(h.Name) == "x-request-id" {
@@ -99,7 +99,7 @@ func generateRequestID() string {
 // AccessLog returns a middleware that logs each request after completion.
 func AccessLog(log Logger) server.Middleware {
 	return func(next server.Handler) server.Handler {
-		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
+		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 			start := time.Now()
 			err := next.ServeHTTP(ctx, req, w)
 
@@ -145,7 +145,7 @@ func CORS(cfg CORSConfig) server.Middleware {
 	}
 
 	return func(next server.Handler) server.Handler {
-		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
+		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 			if req.Method == "OPTIONS" {
 				// Preflight: respond immediately with CORS headers.
 				headers := corsHeaders(cfg, origin)

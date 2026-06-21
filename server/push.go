@@ -14,16 +14,17 @@ import (
 // Server Push — high-level API (RFC 7540 §8.2)
 //
 // This wraps the low-level conn.ServerStream.Push with a ResponseWriter
-// for the pushed response. The handler calls Push on the request to
-// promise additional resources that the client will need.
+// for the pushed response. Push lives on the optional Pusher interface, so a
+// handler type-asserts the writer to promise additional resources.
 //
 // Example:
 //
-//   func handler(ctx context.Context, req *server.Request, w *server.ResponseWriter) error {
-//       // Push style.css the client will need.
-//       pushed, err := w.Push("/style.css", nil)
-//       if err == nil {
-//           pushed.WriteData([]byte("body { color: red }"))
+//   func handler(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
+//       // Push style.css the client will need, if the writer supports it.
+//       if p, ok := w.(server.Pusher); ok {
+//           if pushed, err := p.Push("/style.css", nil); err == nil {
+//               pushed.WriteData([]byte("body { color: red }"))
+//           }
 //       }
 //       // Send main response.
 //       return w.WriteData([]byte("<html>...</html>"))
@@ -60,7 +61,7 @@ type pushableStream interface {
 
 // pusher returns the underlying stream if this ResponseWriter can issue
 // push promises. Currently only connStreamWriter-backed writers support it.
-func (w *ResponseWriter) pusher() (pushableStream, bool) {
+func (w *responseWriter) pusher() (pushableStream, bool) {
 if cs, ok := w.sw.(pusher); ok {
 	return cs.canPush()
 }
@@ -81,14 +82,14 @@ return nil, false
 // the request"). If the writer has no request context (e.g. constructed
 // directly via NewResponseWriter for tests), "https" is used as a
 // safe default. Use PushWithScheme to override explicitly.
-func (w *ResponseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderField) (*ResponseWriter, error) {
+func (w *responseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderField) (ResponseWriter, error) {
 	return w.PushWithScheme(promisePath, w.deriveScheme(), promiseHeaders)
 }
 
 // PushWithScheme is like Push but lets the caller override the :scheme
 // pseudo-header on the PUSH_PROMISE. Useful when scheme negotiation
 // requires explicit signalling (e.g. h2c -> http).
-func (w *ResponseWriter) PushWithScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) (*ResponseWriter, error) {
+func (w *responseWriter) PushWithScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) (ResponseWriter, error) {
 	if w.written {
 		return nil, ErrPushAlreadySent
 	}
@@ -119,9 +120,9 @@ func (w *ResponseWriter) PushWithScheme(promisePath, promiseScheme string, promi
 	}
 
 	// Wrap it in a ResponseWriter.
-	return &ResponseWriter{
-		sw:      &connStreamWriter{stream: pushStream},
-		req:     w.req, // propagate request context for nested Push
+	return &responseWriter{
+		sw:  &connStreamWriter{stream: pushStream},
+		req: w.req, // propagate request context for nested Push
 	}, nil
 }
 
@@ -131,12 +132,12 @@ func (w *ResponseWriter) PushWithScheme(promisePath, promiseScheme string, promi
 // frame itself does not carry the priority block.
 //
 // Pass nil for prio to behave like Push.
-func (w *ResponseWriter) PushWithPriority(promisePath string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (*ResponseWriter, error) {
+func (w *responseWriter) PushWithPriority(promisePath string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (ResponseWriter, error) {
 	return w.pushWithPriorityAndScheme(promisePath, w.deriveScheme(), promiseHeaders, prio)
 }
 
 // pushWithPriorityAndScheme is the merged implementation: scheme + priority.
-func (w *ResponseWriter) pushWithPriorityAndScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (*ResponseWriter, error) {
+func (w *responseWriter) pushWithPriorityAndScheme(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField, prio *frame.Priority) (ResponseWriter, error) {
 	if w.written {
 		return nil, ErrPushAlreadySent
 	}
@@ -159,7 +160,7 @@ func (w *ResponseWriter) pushWithPriorityAndScheme(promisePath, promiseScheme st
 	if err != nil {
 		return nil, fmt.Errorf("poseidon: push failed: %w", err)
 	}
-	return &ResponseWriter{
+	return &responseWriter{
 		sw:  &connStreamWriter{stream: pushStream},
 		req: w.req,
 	}, nil
@@ -168,7 +169,7 @@ func (w *ResponseWriter) pushWithPriorityAndScheme(promisePath, promiseScheme st
 // deriveScheme returns the request's :scheme if available, otherwise
 // "https" as a safe default. Mirrors the original request to comply
 // with RFC 7540 §8.2 (the server SHOULD use the same scheme).
-func (w *ResponseWriter) deriveScheme() string {
+func (w *responseWriter) deriveScheme() string {
 	if w.req != nil && w.req.Scheme != "" {
 		return w.req.Scheme
 	}

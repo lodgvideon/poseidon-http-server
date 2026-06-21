@@ -12,7 +12,7 @@ import (
 // TestIdleTimeout verifies that idle connections are closed after IdleTimeout.
 func TestIdleTimeout(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			return w.WriteHeaders(200, nil)
 		}),
 		IdleTimeout: 200 * time.Millisecond,

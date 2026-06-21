@@ -57,24 +57,34 @@ func startTestServer(t *testing.T, handler server.Handler) net.Listener {
 		srv.Close()
 		ln.Close()
 	})
-	time.Sleep(50 * time.Millisecond)
+	waitReady(t, ln.Addr().String())
 	return ln
 }
 
 func sendRequest(t *testing.T, addr string, extra ...hpack.HeaderField) {
 	t.Helper()
-	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	fr := frame.NewFramer(c, c)
-	c.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
-	fr.WriteSettings(frame.SettingsParams{N: 0})
-	buf := make([]byte, 4096)
-	c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	c.Read(buf)
-	fr.WriteSettingsAck()
+	if _, err := c.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := fr.WriteSettings(frame.SettingsParams{N: 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Complete the handshake with a proper frame loop (server SETTINGS + ACK)
+	// rather than a single blind read — robust under parallel load.
+	noop := &noopFrameHandler{}
+	hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, _ = fr.ReadFrame(hctx, noop) // server SETTINGS
+	_, _ = fr.ReadFrame(hctx, noop) // server SETTINGS ACK
+	hcancel()
+	_ = fr.WriteSettingsAck()
 
 	enc := hpack.NewEncoder()
 	headers := []hpack.HeaderField{
@@ -85,13 +95,65 @@ func sendRequest(t *testing.T, addr string, extra ...hpack.HeaderField) {
 	}
 	headers = append(headers, extra...)
 	block := enc.EncodeBlock(nil, headers)
-	fr.WriteHeaders(frame.WriteHeadersParams{
+	if err := fr.WriteHeaders(frame.WriteHeadersParams{
 		StreamID: 1, BlockFragment: block, EndHeaders: true, EndStream: true,
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	// Drain response.
-	c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	c.Read(buf)
+	// Drain response frames so the handler runs to completion (best-effort).
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dcancel()
+	for range 4 {
+		if _, err := fr.ReadFrame(dctx, noop); err != nil {
+			break
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Determinism helpers (replace fixed sleeps that were flaky under parallel load)
+// ---------------------------------------------------------------------------
+
+// waitReady blocks until the server at addr completes an HTTP/2 handshake, so
+// tests don't race the Serve goroutine's startup.
+func waitReady(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		_ = c.SetDeadline(time.Now().Add(time.Second))
+		if _, err := c.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")); err == nil {
+			fr := frame.NewFramer(c, c)
+			_ = fr.WriteSettings(frame.SettingsParams{N: 0})
+			buf := make([]byte, 64)
+			if _, err := c.Read(buf); err == nil {
+				_ = c.Close()
+				return // server responded with its SETTINGS — it is serving
+			}
+		}
+		_ = c.Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("server at %s not ready within 5s", addr)
+}
+
+// waitForLog polls the logger until it contains substr or the timeout elapses,
+// replacing fixed sleeps after async log writes.
+func waitForLog(t *testing.T, tl *testLogger, substr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(tl.String(), substr) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("log did not contain %q within %v:\n%s", substr, timeout, tl.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +164,7 @@ func TestRecovery_Panic(t *testing.T) {
 	tl := &testLogger{}
 	panicked := make(chan struct{})
 
-	handler := server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	handler := server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		close(panicked)
 		panic("boom")
 	})
@@ -114,21 +176,17 @@ func TestRecovery_Panic(t *testing.T) {
 
 	select {
 	case <-panicked:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("handler never panicked")
 	}
 
-	// Give recovery defer time to log.
-	time.Sleep(50 * time.Millisecond)
-
-	if !strings.Contains(tl.String(), "panic recovered") {
-		t.Fatalf("log should contain 'panic recovered': %s", tl.String())
-	}
+	// Wait for the recovery defer to log (async on the server goroutine).
+	waitForLog(t, tl, "panic recovered", 5*time.Second)
 }
 
 func TestRecovery_NoPanic(t *testing.T) {
 	done := make(chan struct{})
-	handler := server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	handler := server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		defer close(done)
 		return w.WriteHeaders(200, nil)
 	})
@@ -140,7 +198,7 @@ func TestRecovery_NoPanic(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("handler was not called")
 	}
 }
@@ -151,7 +209,7 @@ func TestRecovery_NoPanic(t *testing.T) {
 
 func TestRequestID_GeneratesID(t *testing.T) {
 	result := make(chan string, 1)
-	handler := server.HandlerFunc(func(ctx context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	handler := server.HandlerFunc(func(ctx context.Context, _ *server.Request, w server.ResponseWriter) error {
 		result <- FromContext(ctx)
 		return w.WriteHeaders(200, nil)
 	})
@@ -169,14 +227,14 @@ func TestRequestID_GeneratesID(t *testing.T) {
 		if len(id) != 32 {
 			t.Fatalf("request ID length = %d, want 32", len(id))
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out")
 	}
 }
 
 func TestRequestID_UsesClientID(t *testing.T) {
 	result := make(chan string, 1)
-	handler := server.HandlerFunc(func(ctx context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	handler := server.HandlerFunc(func(ctx context.Context, _ *server.Request, w server.ResponseWriter) error {
 		result <- FromContext(ctx)
 		return w.WriteHeaders(200, nil)
 	})
@@ -193,7 +251,7 @@ func TestRequestID_UsesClientID(t *testing.T) {
 		if id != "client-123" {
 			t.Fatalf("expected client-123, got %s", id)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -206,7 +264,7 @@ func TestAccessLog_LogsRequest(t *testing.T) {
 	tl := &testLogger{}
 	done := make(chan struct{})
 
-	handler := server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	handler := server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		defer close(done)
 		return w.WriteHeaders(200, nil)
 	})
@@ -218,12 +276,12 @@ func TestAccessLog_LogsRequest(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("handler timed out")
 	}
 
-	// AccessLog runs after handler — give it time.
-	time.Sleep(100 * time.Millisecond)
+	// AccessLog runs after the handler returns (async); poll instead of sleeping.
+	waitForLog(t, tl, "/test", 5*time.Second)
 
 	output := tl.String()
 	if !strings.Contains(output, "GET") {
@@ -253,7 +311,7 @@ func TestDefaultCORSConfig(t *testing.T) {
 
 func TestCORS_Preflight_ReturnsCORSHeaders(t *testing.T) {
 	nextCalled := make(chan struct{}, 1)
-	next := server.HandlerFunc(func(_ context.Context, _ *server.Request, _ *server.ResponseWriter) error {
+	next := server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
 		select {
 		case nextCalled <- struct{}{}:
 		default:
@@ -380,7 +438,7 @@ func (c *headerCollector) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error
 
 func TestCORS_NonPreflight_PassesThrough(t *testing.T) {
 	done := make(chan struct{}, 1)
-	next := server.HandlerFunc(func(_ context.Context, _ *server.Request, w *server.ResponseWriter) error {
+	next := server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 		select {
 		case done <- struct{}{}:
 		default:
@@ -396,7 +454,7 @@ func TestCORS_NonPreflight_PassesThrough(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Error("next handler should be called for non-preflight request")
 	}
 }

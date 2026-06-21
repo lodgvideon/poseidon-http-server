@@ -16,7 +16,7 @@ import (
 // TestH2C_PriorKnowledge verifies direct HTTP/2 preface (prior knowledge).
 func TestH2C_PriorKnowledge(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
@@ -62,7 +62,7 @@ func TestH2C_PriorKnowledge(t *testing.T) {
 // TestH2C_Upgrade verifies HTTP/1.1 Upgrade: h2c → 101 Switching.
 func TestH2C_Upgrade(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
@@ -131,7 +131,7 @@ func TestH2C_Upgrade(t *testing.T) {
 // TestH2C_RejectHTTP1 verifies plain HTTP/1.1 without Upgrade gets 400.
 func TestH2C_RejectHTTP1(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
@@ -164,7 +164,7 @@ func TestH2C_RejectHTTP1(t *testing.T) {
 // TestH2C_Disabled verifies that H2C=false still works for direct H2.
 func TestH2C_Disabled(t *testing.T) {
 	srv, err := NewServer(Options{
-		Handler: HandlerFunc(func(_ context.Context, _ *Request, w *ResponseWriter) error {
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 			_ = w.WriteHeaders(200, nil)
 			return nil
 		}),
