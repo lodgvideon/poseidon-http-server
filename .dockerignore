@@ -1,0 +1,49 @@
+# --- VCS -------------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+
+# --- Build output ----------------------------------------------------------
+bin/
+out/
+dist/
+*.exe
+
+# --- Coverage / profiling artifacts ----------------------------------------
+*.out
+coverage.out
+grpc_cov.out
+server-coverage.out
+*.prof
+*.test
+
+# --- Go test files (not needed to build the binary) ------------------------
+**/*_test.go
+**/testdata/
+
+# --- Tooling / agent / editor state ----------------------------------------
+.claude/
+.kanban/
+memory/
+.mcp.json
+.golangci.yml
+.github/
+scripts/
+docs/
+examples/
+
+# --- Docker / CI -----------------------------------------------------------
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# --- Docs (not required for the build) -------------------------------------
+*.md
+LICENSE
+
+# --- OS / editor cruft -----------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
