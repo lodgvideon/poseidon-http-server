@@ -56,6 +56,11 @@ Kubernetes deployment assets. It includes one **breaking** API change — see
   pipeline via release-please; native fuzz targets for binary-protocol surfaces;
   load/soak harness (`make loadtest`: h2load/ghz/k6); transport + conn frame-edge
   integration tests.
+- **`ResponseWriter` capability finders.** `server.PusherOf(w)` / `server.FlusherOf(w)`
+  return the optional `Pusher` / `http.Flusher` capability, walking an
+  `Unwrap() server.ResponseWriter` chain (cycle-guarded) so middleware can wrap the
+  writer without re-implementing forwarders — the `net/http.ResponseController` model.
+  The concrete writer and the Gzip wrapper now implement `http.Flusher`.
 
 ### Changed
 
@@ -64,9 +69,10 @@ Kubernetes deployment assets. It includes one **breaking** API change — see
   `*server.ResponseWriter` to `server.ResponseWriter`. Construct test writers via
   `server.NewResponseWriter(stream)`. See [Migration](#migration).
 - **BREAKING — Server Push moved to the optional `server.Pusher` interface**
-  (mirroring `net/http.Pusher`/`Flusher`/`Hijacker`). Handlers type-assert:
-  `if p, ok := w.(server.Pusher); ok { p.Push(...) }`. The concrete writer still
-  implements both interfaces.
+  (mirroring `net/http.Pusher`/`Flusher`/`Hijacker`). Reach it through any
+  middleware wrappers via `server.PusherOf(w)`; a direct (unwrapped) writer still
+  satisfies `w.(server.Pusher)`. Middleware wrappers now expose `Unwrap()` instead
+  of re-implementing the three Push methods.
 
 ### Fixed
 
@@ -80,6 +86,9 @@ Kubernetes deployment assets. It includes one **breaking** API change — see
 - **gRPC `maxRecvMessageSize` is now enforced in `DecodeLPFromBytes`** (found by
   fuzzing) — oversized length-prefixed messages are rejected instead of being
   decoded.
+- **`ToHTTPHandler` no longer discards the response body.** It previously ran the
+  handler against a discard writer and copied only status+headers; it now buffers
+  status, headers, and body and replays them onto the `http.ResponseWriter`.
 
 ### Security
 
@@ -104,8 +113,9 @@ The struct→interface change to `server.ResponseWriter` requires source updates
 1. **Handler signature** — drop the pointer:
    `func(ctx, req, w *server.ResponseWriter)` → `func(ctx, req, w server.ResponseWriter)`.
    All method names are unchanged.
-2. **Server Push** — type-assert to the new optional interface:
-   `if p, ok := w.(server.Pusher); ok { _, _ = p.Push("/style.css", nil) }`.
+2. **Server Push** — use the capability finder so it works through middleware:
+   `if p, ok := server.PusherOf(w); ok { _, _ = p.Push("/style.css", nil) }`.
+   A direct (unwrapped) writer still supports `w.(server.Pusher)`.
 3. **Why** — an interface lets middleware intercept the response by wrapping the
    writer (embedding + overriding write methods). This is how Gzip now actually
    compresses and how `SecurityHeaders` injects headers.
