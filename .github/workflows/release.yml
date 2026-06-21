@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Least-privilege defaults; per-job overrides narrow further.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # release-please: on every push to main, open or update a release PR that
+  # rolls up Conventional Commits into CHANGELOG.md and bumps the version. When
+  # that PR is merged, this same job creates the git tag + GitHub release.
+  # ---------------------------------------------------------------------------
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create tags, releases, commit changelog
+      pull-requests: write    # open/update the release PR
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # ---------------------------------------------------------------------------
+  # build-binaries: runs only when release-please cut a release (tag created).
+  # Cross-compiles the server binary for linux/darwin/windows on amd64/arm64
+  # and attaches the archives + checksums to the GitHub release.
+  # ---------------------------------------------------------------------------
+  build-binaries:
+    name: Build & attach binaries
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # upload release assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
+      # must exist next to this checkout for the build to resolve.
+      - name: Check out poseidon-http-client (replace target)
+        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Build static binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG}"
+          commit="$(git rev-parse --short HEAD)"
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          bin="poseidon-server"
+          [ "${GOOS}" = "windows" ] && bin="poseidon-server.exe"
+
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${date}" \
+            -o "dist/${bin}" \
+            ./cmd/poseidon-server
+
+          stem="poseidon-server_${version}_${GOOS}_${GOARCH}"
+          if [ "${GOOS}" = "windows" ]; then
+            (cd dist && zip "${stem}.zip" "${bin}")
+            asset="dist/${stem}.zip"
+          else
+            (cd dist && tar -czf "${stem}.tar.gz" "${bin}")
+            asset="dist/${stem}.tar.gz"
+          fi
+          sha256sum "${asset}" | awk '{print $1}' > "${asset}.sha256"
+
+          echo "ASSET=${asset}" >> "$GITHUB_ENV"
+
+      - name: Attach binaries to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" --clobber
