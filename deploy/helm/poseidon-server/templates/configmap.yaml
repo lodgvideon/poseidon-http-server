@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "poseidon-server.fullname" . }}-config
+  labels:
+    {{- include "poseidon-server.labels" . | nindent 4 }}
+data:
+  {{- /* All POSEIDON_-prefixed knobs. Values are stringified for envFrom. */}}
+  {{- range $key, $val := .Values.config }}
+  {{ $key }}: {{ $val | quote }}
+  {{- end }}

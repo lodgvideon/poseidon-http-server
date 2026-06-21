@@ -1,0 +1,37 @@
+poseidon-server has been deployed.
+
+  Release:   {{ .Release.Name }}
+  Namespace: {{ .Release.Namespace }}
+  Image:     {{ include "poseidon-server.image" . }}
+  Replicas:  {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} (HPA, CPU {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%){{ else }}{{ .Values.replicaCount }} (static){{ end }}
+
+The server speaks HTTP/2 cleartext (h2c) on port {{ .Values.container.port }}.
+
+PROBES: type={{ .Values.probes.type }}
+{{- if eq .Values.probes.type "tcp" }}
+  Using tcpSocket probes. This is h2c-safe (no HTTP/1.1 handshake). Note it is
+  NOT readiness-aware — switch to grpc probes once the binary exposes
+  grpc.health.v1 if you need /readyz-driven drain to gate traffic.
+{{- else if eq .Values.probes.type "grpc" }}
+  Using k8s native gRPC probes against port {{ .Values.probes.grpc.port }}
+  (grpc.health.v1). Ensure your binary actually serves a gRPC health listener
+  there; the default cmd/poseidon-server serves HTTP health endpoints only.
+{{- end }}
+
+DO NOT use httpGet probes against the h2c port — HTTP/1.1 probes cannot complete
+the h2c handshake and would fail-loop a healthy pod.
+
+Service (ClusterIP) DNS:
+  {{ include "poseidon-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Port-forward to test locally (h2c-aware client required, e.g. curl --http2-prior-knowledge):
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "poseidon-server.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl --http2-prior-knowledge http://127.0.0.1:{{ .Values.service.port }}/healthz
+
+{{- if .Values.config.POSEIDON_ENABLE_PPROF }}
+{{- if eq (.Values.config.POSEIDON_ENABLE_PPROF | toString) "true" }}
+
+WARNING: POSEIDON_ENABLE_PPROF is "true" — /debug/pprof/ is exposed. Disable it
+or restrict access with a NetworkPolicy before running in production.
+{{- end }}
+{{- end }}

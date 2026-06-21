@@ -1,0 +1,31 @@
+apiVersion: v2
+name: poseidon-server
+description: |
+  A production-grade HTTP/2 (h2c by default) server built on the Poseidon
+  server, conn, and middleware packages. Hardened, 12-factor, secure-by-default.
+type: application
+
+# Chart version — bump on every chart change (SemVer).
+version: 0.1.0
+
+# Version of the poseidon-server application this chart deploys by default.
+# Keep in sync with the container image tag in values.yaml (image.tag).
+appVersion: "0.3.0"
+
+home: https://github.com/lodgvideon/poseidon-http-server
+sources:
+  - https://github.com/lodgvideon/poseidon-http-server
+
+keywords:
+  - http2
+  - h2c
+  - grpc
+  - golang
+  - server
+
+maintainers:
+  - name: lodgvideon
+    email: lodgvideon@gmail.com
+
+annotations:
+  category: WebServer

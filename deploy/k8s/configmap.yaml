@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: poseidon-server-config
+  labels:
+    app.kubernetes.io/name: poseidon-server
+    app.kubernetes.io/instance: poseidon-server
+data:
+  # POSEIDON_-prefixed 12-factor config. Overrides the binary's secure defaults.
+  POSEIDON_ADDR: ":8080"
+  POSEIDON_H2C: "true"
+  POSEIDON_IDLE_TIMEOUT: "120s"
+  POSEIDON_SHUTDOWN_TIMEOUT: "30s"
+  POSEIDON_HANDSHAKE_TIMEOUT: "10s"
+  POSEIDON_MAX_CONNS: "0"
+  POSEIDON_MAX_BODY_BYTES: "10485760"
+  POSEIDON_MAX_RAPID_RESETS: "0"
+  POSEIDON_ENABLE_PPROF: "false"

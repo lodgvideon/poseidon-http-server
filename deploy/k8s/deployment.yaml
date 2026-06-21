@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poseidon-server
+  labels:
+    app.kubernetes.io/name: poseidon-server
+    app.kubernetes.io/instance: poseidon-server
+spec:
+  # replicas is managed by the HPA (hpa.yaml). Kept here as the initial value.
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: poseidon-server
+      app.kubernetes.io/instance: poseidon-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: poseidon-server
+        app.kubernetes.io/instance: poseidon-server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: poseidon-server
+      automountServiceAccountToken: false
+      # Must be >= POSEIDON_SHUTDOWN_TIMEOUT so the graceful drain completes.
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: poseidon-server
+          # Pin to an immutable tag or digest in production.
+          image: ghcr.io/lodgvideon/poseidon-server:0.3.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: h2c
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: poseidon-server-config
+          # PROBES: tcpSocket because the h2c listener cannot complete an
+          # HTTP/1.1 httpGet handshake. Do NOT replace with httpGet on /healthz.
+          #
+          # gRPC alternative (k8s 1.27+ GA) — uncomment once the binary exposes
+          # grpc.health.v1 and remove the matching tcpSocket block:
+          #   grpc:
+          #     port: 8080
+          startupProbe:
+            tcpSocket:
+              port: h2c
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: h2c
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: h2c
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              # Intentionally no CPU limit (avoids throttling tail latency).
+              memory: 256Mi
+          volumeMounts:
+            # readOnlyRootFilesystem=true: give the process a writable /tmp.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
