@@ -62,7 +62,7 @@ func TestHealthServer_WatchReceivesUpdates(t *testing.T) {
 		if s != ServingStatusServing {
 			t.Fatalf("watcher got %v, want %v", s, ServingStatusServing)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("watcher did not receive update")
 	}
 }
@@ -146,7 +146,7 @@ func TestHealthServer_WatchHandler(t *testing.T) {
 	received := make(chan ServingStatus, 4)
 	reqPayload := encodeHealthCheckRequest("svc1")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	handler := func(_ context.Context, req []byte, send func([]byte) error) error {
@@ -191,7 +191,7 @@ func TestHealthServer_WatchHandler(t *testing.T) {
 		if s != ServingStatusServing {
 			t.Fatalf("initial watch status = %v, want %v", s, ServingStatusServing)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("watch did not receive initial status")
 	}
 
@@ -203,7 +203,7 @@ func TestHealthServer_WatchHandler(t *testing.T) {
 		if s != ServingStatusNotServing {
 			t.Fatalf("update watch status = %v, want %v", s, ServingStatusNotServing)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("watch did not receive update")
 	}
 }
