@@ -48,14 +48,23 @@ jobs:
         with:
           go-version: '1.26'
 
+      - name: Download dependencies
+        run: go mod download
+
+      # Build golangci-lint v2.3.0 FROM SOURCE with the runner's go1.26 toolchain.
+      # The prebuilt v2.3.0 release binary is built with go1.24; its embedded
+      # go/types typechecker cannot read go1.26-format export data and panics
+      # ("file requires newer Go version go1.26 (application built with go1.24)").
+      # `go install` compiles with the go on PATH (go1.26), so the typechecker
+      # matches the toolchain — mirroring the local "v2.3.0 built with go1.26.4"
+      # setup that lints clean. Pinning v2.3.0 keeps the exact ruleset verified
+      # locally (no version bump => no new analyzers). `golangci-lint run` also
+      # validates .golangci.yml, so a separate `config verify` step is redundant.
+      - name: Install golangci-lint (built with runner Go 1.26)
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.0
+
       - name: golangci-lint
-        # v7+ of the action runs golangci-lint v2, which the .golangci.yml
-        # (version: "2" schema) requires. v6 installs the last v1 binary and
-        # rejects the v2 config at `config verify`. Pin the linter to match local.
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.3.0
-          args: --timeout 5m
+        run: $(go env GOPATH)/bin/golangci-lint run --timeout 5m ./...
 
   coverage-gate:
     name: Coverage Gate ≥80%
