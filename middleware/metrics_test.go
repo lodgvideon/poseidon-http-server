@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-server/server"
 )
@@ -160,6 +161,99 @@ func TestMetricsCollector_BodyTracking(t *testing.T) {
 	}
 	if got := reqBytesCtr.Load(); got != int64(len(body)) {
 		t.Fatalf("reqBytes = %d, want %d", got, len(body))
+	}
+}
+
+func TestMetricsCollector_HistogramObservations(t *testing.T) {
+	t.Parallel()
+
+	mc := NewMetricsCollector()
+
+	// Observe durations that land in distinct default buckets:
+	//   1ms  -> first bucket whose le >= 0.001 (i.e. 0.005)
+	//   30ms -> 0.05
+	//   300ms-> 0.5
+	//   3s   -> 5
+	mc.ObserveDuration("GET", "/h", 1*time.Millisecond)
+	mc.ObserveDuration("GET", "/h", 30*time.Millisecond)
+	mc.ObserveDuration("GET", "/h", 300*time.Millisecond)
+	mc.ObserveDuration("GET", "/h", 3*time.Second)
+
+	output := mc.WritePrometheus()
+
+	// TYPE line and metric family must be present.
+	wantSubstrings := []string{
+		"# TYPE poseidon_request_duration_seconds histogram",
+		`poseidon_request_duration_seconds_bucket{method="GET",path="/h",le="+Inf"} 4`,
+		`poseidon_request_duration_seconds_count{method="GET",path="/h"} 4`,
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(output, s) {
+			t.Errorf("missing %q in output:\n%s", s, output)
+		}
+	}
+
+	// Cumulative bucket monotonicity: le="0.005" should have 1 (the 1ms obs),
+	// le="0.05" should have 2 (1ms + 30ms), le="0.5" should have 3, le="5" 4.
+	bucketChecks := map[string]string{
+		`le="0.005"`: `poseidon_request_duration_seconds_bucket{method="GET",path="/h",le="0.005"} 1`,
+		`le="0.05"`:  `poseidon_request_duration_seconds_bucket{method="GET",path="/h",le="0.05"} 2`,
+		`le="0.5"`:   `poseidon_request_duration_seconds_bucket{method="GET",path="/h",le="0.5"} 3`,
+		`le="5"`:     `poseidon_request_duration_seconds_bucket{method="GET",path="/h",le="5"} 4`,
+	}
+	for name, line := range bucketChecks {
+		if !strings.Contains(output, line) {
+			t.Errorf("bucket %s: missing line %q in output:\n%s", name, line, output)
+		}
+	}
+
+	// _sum should equal total seconds observed: 0.001+0.03+0.3+3 = 3.331.
+	if !strings.Contains(output, `poseidon_request_duration_seconds_sum{method="GET",path="/h"}`) {
+		t.Errorf("missing _sum line in output:\n%s", output)
+	}
+}
+
+func TestMetricsCollector_HistogramOverflowBucket(t *testing.T) {
+	t.Parallel()
+
+	mc := NewMetricsCollector()
+	// 15s exceeds the largest finite bucket (10s): it must count ONLY in the
+	// +Inf bucket, not in any finite bucket.
+	mc.ObserveDuration("GET", "/big", 15*time.Second)
+
+	output := mc.WritePrometheus()
+	checks := []string{
+		`poseidon_request_duration_seconds_bucket{method="GET",path="/big",le="10"} 0`,
+		`poseidon_request_duration_seconds_bucket{method="GET",path="/big",le="+Inf"} 1`,
+		`poseidon_request_duration_seconds_count{method="GET",path="/big"} 1`,
+	}
+	for _, s := range checks {
+		if !strings.Contains(output, s) {
+			t.Errorf("over-max histogram: missing %q in output:\n%s", s, output)
+		}
+	}
+}
+
+func TestMetricsCollector_HistogramRecordedViaMiddleware(t *testing.T) {
+	t.Parallel()
+
+	mc := NewMetricsCollector()
+	mw := mc.Metrics()
+
+	handler := mw(server.HandlerFunc(func(_ context.Context, _ *server.Request, _ server.ResponseWriter) error {
+		return nil
+	}))
+
+	for range 5 {
+		_ = handler.ServeHTTP(context.Background(), &server.Request{
+			Method: "GET",
+			Path:   "/mw",
+		}, server.NewResponseWriter(nil))
+	}
+
+	output := mc.WritePrometheus()
+	if !strings.Contains(output, `poseidon_request_duration_seconds_count{method="GET",path="/mw"} 5`) {
+		t.Errorf("histogram count not recorded via middleware:\n%s", output)
 	}
 }
 
