@@ -253,7 +253,7 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
 			if err != nil {
 				return
 			}
-			go s.serveStream(ctx, stream)
+			go s.serveStream(stream)
 		}
 	}
 	for {
@@ -261,11 +261,11 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
 		if err != nil {
 			return
 		}
-		go s.serveStream(ctx, stream)
+		go s.serveStream(stream)
 	}
 }
 
-func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
+func (s *Server) serveStream(stream *conn.ServerStream) {
 	s.inFlight.Add(1)
 	defer s.inFlight.Done()
 
@@ -279,6 +279,12 @@ func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 			_ = stream.Close()
 		}
 	}()
+
+	// Drive the whole request lifecycle off the stream's context so a client
+	// RST_STREAM or a connection close cancels the handler — and its writes and
+	// body reads — promptly. It descends from the server context, so server
+	// shutdown still propagates.
+	ctx := stream.Context()
 
 	var req *Request
 

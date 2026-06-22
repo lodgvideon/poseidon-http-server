@@ -54,6 +54,12 @@ type ServerConn struct {
 	// its pending CONTINUATION state instead of being lost.
 	handler *serverConnHandler
 
+	// connCtx is cancelled when the connection closes (or its parent ctx is
+	// cancelled). Per-stream contexts derive from it, so closing the connection
+	// cancels every in-flight handler.
+	connCtx    context.Context
+	connCancel context.CancelFunc
+
 	// acceptCh delivers new client-initiated streams to AcceptStream.
 	acceptCh chan *ServerStream
 
@@ -227,6 +233,9 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		pushIDs:            newPushIDCounter(),
 	}
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
+	// Connection-lifetime context: cancelled on Close or when the caller's ctx
+	// is cancelled. Per-stream contexts derive from this.
+	sc.connCtx, sc.connCancel = context.WithCancel(ctx)
 
 	// Step 2: send server SETTINGS.
 	myParams := encodeAdvertised(opts.AdvertisedSettings)
@@ -338,6 +347,9 @@ func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 func (sc *ServerConn) Close() error {
 	if !sc.closed.CompareAndSwap(false, true) {
 		return nil
+	}
+	if sc.connCancel != nil {
+		sc.connCancel() // cancel every in-flight handler's context
 	}
 	sc.fcOutMu.Lock()
 	if sc.fcOutCond != nil {

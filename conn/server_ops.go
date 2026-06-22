@@ -61,6 +61,9 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
 		return false
 	}
+	// Per-stream context derived from the connection context; cancelled when the
+	// stream completes/resets (markStreamDone) or the connection closes.
+	s.ctx, s.cancel = context.WithCancel(sc.connCtx)
 	sc.streams[id] = s
 	sc.smu.Unlock()
 	sc.noteClientStreamID(id)
@@ -104,8 +107,12 @@ func (sc *ServerConn) onClientRSTStream(_ uint32, rapid bool) error {
 // markStreamDone cleans up a finished stream.
 func (sc *ServerConn) markStreamDone(id uint32) {
 	sc.smu.Lock()
-	defer sc.smu.Unlock()
+	s := sc.streams[id]
 	delete(sc.streams, id)
+	sc.smu.Unlock()
+	if s != nil && s.cancel != nil {
+		s.cancel() // cancel the handler's context on stream completion/reset
+	}
 }
 
 // writeSettingsAck sends a SETTINGS ACK.

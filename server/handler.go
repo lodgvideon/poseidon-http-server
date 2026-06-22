@@ -178,7 +178,11 @@ type Pusher interface {
 
 // responseWriter is the concrete ResponseWriter backed by a stream sink.
 type responseWriter struct {
-	sw      streamWriter
+	sw streamWriter
+	// ctx is cancelled when the stream is reset by the client or the connection
+	// closes; every write uses it (via reqCtx) so a handler blocked writing to a
+	// vanished client unblocks instead of hanging on context.Background().
+	ctx     context.Context
 	headers http.Header
 	status  int
 	written bool
@@ -191,7 +195,8 @@ type responseWriter struct {
 // NewResponseWriter creates a ResponseWriter backed by the given ServerStream.
 func NewResponseWriter(stream *conn.ServerStream) ResponseWriter {
 	return &responseWriter{
-		sw: &connStreamWriter{stream: stream},
+		sw:  &connStreamWriter{stream: stream},
+		ctx: stream.Context(),
 	}
 }
 
@@ -200,6 +205,7 @@ func NewResponseWriter(stream *conn.ServerStream) ResponseWriter {
 func newConnResponseWriter(stream *conn.ServerStream, req *Request) *responseWriter {
 	return &responseWriter{
 		sw:  &connStreamWriter{stream: stream},
+		ctx: stream.Context(),
 		req: req,
 	}
 }
@@ -207,7 +213,16 @@ func newConnResponseWriter(stream *conn.ServerStream, req *Request) *responseWri
 // newResponseWriterWithSW creates a responseWriter with a custom streamWriter
 // (for testing).
 func newResponseWriterWithSW(sw streamWriter) *responseWriter {
-	return &responseWriter{sw: sw}
+	return &responseWriter{sw: sw, ctx: context.Background()}
+}
+
+// reqCtx returns the context used for all writes: the stream's context
+// (cancelled on reset / connection close), or context.Background() if unset.
+func (w *responseWriter) reqCtx() context.Context {
+	if w.ctx != nil {
+		return w.ctx
+	}
+	return context.Background()
 }
 
 // StatusCode returns the HTTP status code that was set via WriteHeaders or
@@ -243,7 +258,7 @@ func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	})
 	fields = append(fields, headers...)
 
-	return w.sw.sendHeaders(context.Background(), fields, false)
+	return w.sw.sendHeaders(w.reqCtx(),fields, false)
 }
 
 // WriteData sends response body data. If headers have not been sent yet it
@@ -254,13 +269,13 @@ func (w *responseWriter) WriteData(p []byte) error {
 			return err
 		}
 	}
-	return w.sw.sendData(context.Background(), p, false)
+	return w.sw.sendData(w.reqCtx(),p, false)
 }
 
 // WriteTrailers sends trailing headers using SendHeaders with endStream=true
 // (the conn package does not expose a dedicated trailer method).
 func (w *responseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
-	return w.sw.sendHeaders(context.Background(), trailers, true)
+	return w.sw.sendHeaders(w.reqCtx(),trailers, true)
 }
 
 // --- http.ResponseWriter interface ------------------------------------------
@@ -280,7 +295,7 @@ func (w *responseWriter) Write(p []byte) (int, error) {
 	if !w.written {
 		w.WriteHeader(http.StatusOK)
 	}
-	if err := w.sw.sendData(context.Background(), p, false); err != nil {
+	if err := w.sw.sendData(w.reqCtx(),p, false); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -317,7 +332,7 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 		}
 	}
 
-	_ = w.sw.sendHeaders(context.Background(), fields, false)
+	_ = w.sw.sendHeaders(w.reqCtx(),fields, false)
 }
 
 // Status returns the HTTP status code set via WriteHeaders or WriteHeader.

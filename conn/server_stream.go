@@ -16,6 +16,12 @@ type ServerStream struct {
 	sc     *ServerConn
 	events chan StreamEvent
 
+	// ctx is cancelled when the stream is reset by the client, completes, or its
+	// connection closes. Set by registerStream; nil for unregistered or pushed
+	// streams (Context() then falls back to context.Background()).
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	mu            sync.Mutex
 	localEnded    bool
 	remoteEnded   bool
@@ -90,6 +96,17 @@ type StreamEvent struct {
 
 // ID returns the HTTP/2 stream identifier.
 func (ss *ServerStream) ID() uint32 { return ss.id }
+
+// Context returns a context that is cancelled when the stream is reset by the
+// client (RST_STREAM), completes, or the underlying connection closes. Handlers
+// should select on its Done channel (or pass it to blocking calls) to abort
+// work promptly when the client goes away. It is never nil.
+func (ss *ServerStream) Context() context.Context {
+	if ss.ctx != nil {
+		return ss.ctx
+	}
+	return context.Background()
+}
 
 // SendHeaders sends a response HEADERS frame with the given fields.
 // The first call on a stream seeds the per-stream send window from
