@@ -137,7 +137,7 @@ func TestRateLimit_UnderLimitPassesThrough(t *testing.T) {
 func TestRateLimit_PerKeyBucketsAreIndependent(t *testing.T) {
 	h := &countingHandler{}
 	now := time.Unix(0, 0)
-	keyOf := func(req *server.Request) string { return req.Authority }
+	keyOf := func(_ context.Context, req *server.Request) string { return req.Authority }
 	mw := RateLimit(RateLimitConfig{
 		Rate:  1,
 		Burst: 1,
@@ -164,6 +164,42 @@ func TestRateLimit_PerKeyBucketsAreIndependent(t *testing.T) {
 	// Second request to a is limited; key b stays unaffected.
 	if got := send("a"); got != 429 {
 		t.Fatalf("key a second request: want 429, got %d", got)
+	}
+}
+
+func TestRateLimit_KeyByClientIP(t *testing.T) {
+	h := &countingHandler{}
+	now := time.Unix(0, 0)
+	mw := RateLimit(RateLimitConfig{
+		Rate:  1,
+		Burst: 1,
+		Key:   KeyByClientIP(),
+		now:   func() time.Time { return now },
+	})
+	handler := mw(h)
+
+	// send drives a request whose context carries the client IP the RealIP
+	// middleware would have resolved (realIPCtxKey is what RealIP injects and
+	// what ClientIP — used by KeyByClientIP — reads back).
+	send := func(clientIP string) int {
+		ctx := context.WithValue(context.Background(), realIPCtxKey{}, clientIP)
+		w := newFakeRW()
+		if err := handler.ServeHTTP(ctx, &server.Request{}, w); err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+		return w.nativeStatus
+	}
+
+	// Each client IP gets its own burst-1 bucket.
+	if got := send("1.1.1.1"); got != 200 {
+		t.Fatalf("client 1.1.1.1 first request: want 200, got %d", got)
+	}
+	if got := send("2.2.2.2"); got != 200 {
+		t.Fatalf("client 2.2.2.2 first request: want 200, got %d", got)
+	}
+	// Second request from 1.1.1.1 is limited; 2.2.2.2 stays unaffected.
+	if got := send("1.1.1.1"); got != 429 {
+		t.Fatalf("client 1.1.1.1 second request: want 429, got %d", got)
 	}
 }
 

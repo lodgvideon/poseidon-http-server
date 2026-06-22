@@ -30,9 +30,13 @@ type RateLimitConfig struct {
 
 	// Key maps a request to a bucket key. Requests sharing a key share a
 	// bucket. When nil, a single global bucket is used for all requests
-	// (i.e. every request maps to the same key). A common per-client policy
-	// is to key on the client IP or :authority.
-	Key func(req *server.Request) string
+	// (i.e. every request maps to the same key).
+	//
+	// Key receives the request context so it can read values injected by
+	// upstream middleware. A common per-client policy is [KeyByClientIP]
+	// (keys on the RealIP-resolved client IP from the context); keying on
+	// req.Authority is also typical.
+	Key func(ctx context.Context, req *server.Request) string
 
 	// now is an injectable clock for deterministic testing. Nil uses
 	// time.Now. Unexported so it is not part of the public API.
@@ -74,13 +78,34 @@ func RateLimit(cfg RateLimitConfig) server.Middleware {
 		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 			key := ""
 			if keyFn != nil {
-				key = keyFn(req)
+				key = keyFn(ctx, req)
 			}
 			if !lim.allow(key) {
 				return w.WriteHeaders(http.StatusTooManyRequests, nil)
 			}
 			return next.ServeHTTP(ctx, req, w)
 		})
+	}
+}
+
+// KeyByClientIP returns a [RateLimitConfig.Key] function that buckets requests
+// by the client IP resolved by the [RealIP] middleware (read from the context
+// via [ClientIP]). RealIP MUST run before RateLimit in the chain for this to
+// see a resolved address.
+//
+// When the client IP is unresolved (RealIP did not run, or could not determine
+// an address) the key is the empty string, so all such requests share one
+// bucket. This is a deliberate fail-closed default: unidentifiable traffic is
+// throttled together rather than slipping past the limiter unbucketed.
+//
+// Note: the limiter holds one bucket per distinct key and does not currently
+// evict idle buckets, so the key space should stay bounded. Run RealIP with a
+// TrustedProxies allowlist so the key is a real upstream IP rather than an
+// attacker-spoofable forwarding header, and note that IPv6 keys are per-/128
+// (a single client can span a large range).
+func KeyByClientIP() func(ctx context.Context, req *server.Request) string {
+	return func(ctx context.Context, _ *server.Request) string {
+		return ClientIP(ctx)
 	}
 }
 

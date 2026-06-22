@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 This release hardens Poseidon for production: DoS mitigations, a security/
 observability middleware suite, a 12-factor server binary, and container/
-Kubernetes deployment assets. It includes one **breaking** API change — see
+Kubernetes deployment assets. It includes a few **breaking** API changes — see
 [Migration](#migration) below.
 
 ### Added
@@ -26,7 +26,8 @@ Kubernetes deployment assets. It includes one **breaking** API change — see
   nosniff, `DENY`, `no-referrer`).
 - **`RateLimit` middleware.** Self-contained token-bucket limiter; short-circuits
   with `429 Too Many Requests`. Configurable `Rate`/`Burst` and a `Key` function
-  (single global bucket by default).
+  (single global bucket by default). `KeyByClientIP()` buckets per RealIP-resolved
+  client IP (the `Key` func receives the request `context.Context` — see Changed).
 - **`RealIP` middleware.** Resolves the client IP from `X-Forwarded-For`/`X-Real-IP`
   **only** when the immediate peer is in a configured `TrustedProxies` CIDR set
   (secure default: trusts nothing). Exposed via `ClientIP(ctx)`;
@@ -84,6 +85,16 @@ Kubernetes deployment assets. It includes one **breaking** API change — see
   middleware wrappers via `server.PusherOf(w)`; a direct (unwrapped) writer still
   satisfies `w.(server.Pusher)`. Middleware wrappers now expose `Unwrap()` instead
   of re-implementing the three Push methods.
+- **BREAKING — `RateLimitConfig.Key` now takes the request context**:
+  `func(*server.Request) string` → `func(context.Context, *server.Request) string`.
+  This lets a key function read values injected by upstream middleware — most
+  importantly the RealIP-resolved client IP — enabling the new
+  `KeyByClientIP()` keyer. See [Migration](#migration).
+- **`middleware.DecompressBody` now bounds output** at `DefaultMaxDecompressedSize`
+  (10 MiB) to mitigate decompression bombs; reading past the cap returns the new
+  `ErrBodyTooLarge`. `DecompressBodyLimit(body, maxBytes)` chooses a different cap
+  (`maxBytes <= 0` opts out). Behavior change for callers that previously relied on
+  unbounded decompression — switch to `DecompressBodyLimit(body, 0)`.
 
 ### Fixed
 
@@ -116,6 +127,15 @@ Kubernetes deployment assets. It includes one **breaking** API change — see
 - **Slowloris / DoS timeouts.** `HandshakeTimeout` (conn, default 10s) bounds the
   HTTP/2 handshake; `IdleTimeout` (server, default 120s) closes idle connections.
   Both treat `<0` as "disabled".
+- **Decompression-bomb bound on `middleware.DecompressBody`.** A gzipped request
+  body that inflates beyond `DefaultMaxDecompressedSize` (10 MiB) now fails with
+  `ErrBodyTooLarge` instead of streaming unbounded data into memory. The reader
+  caps emitted bytes at the limit and probes one byte past it (rather than using
+  `io.LimitReader`, which would silently truncate and mask the attack). Tune via
+  `DecompressBodyLimit`. Also closes the underlying source body on `Close()`.
+- **Per-client rate limiting via `KeyByClientIP()`.** Buckets the token-bucket
+  limiter by the RealIP-resolved client IP; fail-closed (unresolved IP → shared
+  bucket) so unidentifiable traffic is throttled rather than exempt.
 
 ### Migration
 
@@ -127,9 +147,15 @@ The struct→interface change to `server.ResponseWriter` requires source updates
 2. **Server Push** — use the capability finder so it works through middleware:
    `if p, ok := server.PusherOf(w); ok { _, _ = p.Push("/style.css", nil) }`.
    A direct (unwrapped) writer still supports `w.(server.Pusher)`.
-3. **Why** — an interface lets middleware intercept the response by wrapping the
+3. **RateLimit `Key`** — add the leading `context.Context` parameter:
+   `func(req *server.Request) string` → `func(ctx context.Context, req *server.Request) string`.
+   To key per client IP, replace your custom keyer with `middleware.KeyByClientIP()`
+   and ensure `RealIP` runs earlier in the chain.
+4. **Why** — an interface lets middleware intercept the response by wrapping the
    writer (embedding + overriding write methods). This is how Gzip now actually
-   compresses and how `SecurityHeaders` injects headers.
+   compresses and how `SecurityHeaders` injects headers. Threading `ctx` into the
+   rate-limit key lets it read state (the resolved client IP) that upstream
+   middleware put in the context.
 
 See `docs/usage.md` for the full production usage guide.
 

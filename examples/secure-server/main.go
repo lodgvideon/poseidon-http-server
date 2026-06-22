@@ -103,12 +103,12 @@ func main() {
 			middleware.SecurityHeaders(middleware.DefaultSecurityHeadersConfig()),
 
 			// Token-bucket rate limit: 10 req/s sustained, burst 20, keyed per
-			// :authority (host). Note: the Key func receives only *Request, so it
-			// cannot key on the RealIP-resolved client IP (that lives in the context).
+			// client IP. KeyByClientIP reads the RealIP-resolved address from the
+			// context, so RealIP (above) must precede RateLimit in the chain.
 			middleware.RateLimit(middleware.RateLimitConfig{
 				Rate:  10,
 				Burst: 20,
-				Key:   func(req *server.Request) string { return req.Authority },
+				Key:   middleware.KeyByClientIP(),
 			}),
 		},
 	})
