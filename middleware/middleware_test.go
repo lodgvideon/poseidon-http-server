@@ -101,11 +101,19 @@ func sendRequest(t *testing.T, addr string, extra ...hpack.HeaderField) {
 		t.Fatal(err)
 	}
 
-	// Drain response frames so the handler runs to completion (best-effort).
-	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer dcancel()
-	for range 4 {
-		if _, err := fr.ReadFrame(dctx, noop); err != nil {
+	// Drain response frames until the server signals END_STREAM, so the handler
+	// has run to completion. Stopping at END_STREAM (rather than reading a fixed
+	// frame count) is what keeps this fast: a handler that emits a single
+	// HEADERS-with-END_STREAM previously left the 3rd/4th read blocking to the
+	// 5s deadline (~5s wasted per call). The connection's own 5s deadline (set
+	// above) bounds a misbehaving server; the frame cap is a second backstop.
+	for range 16 {
+		fh, err := fr.ReadFrame(context.Background(), noop)
+		if err != nil {
+			break
+		}
+		if (fh.Type == frame.FrameHeaders && fh.Flags&frame.FlagHeadersEndStream != 0) ||
+			(fh.Type == frame.FrameData && fh.Flags&frame.FlagDataEndStream != 0) {
 			break
 		}
 	}
