@@ -11,7 +11,7 @@ jobs:
     name: Test + Race
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
       # must exist next to this checkout. Track the same ref local dev uses (main).
@@ -37,7 +37,7 @@ jobs:
     name: golangci-lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
       # must exist next to this checkout. Track the same ref local dev uses (main).
@@ -70,7 +70,7 @@ jobs:
     name: Coverage Gate ≥80%
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
       # must exist next to this checkout. Track the same ref local dev uses (main).
@@ -90,7 +90,7 @@ jobs:
     name: Benchmarks (smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
       # must exist next to this checkout. Track the same ref local dev uses (main).
