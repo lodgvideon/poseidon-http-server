@@ -29,6 +29,7 @@ func TestParseGRPCTimeout(t *testing.T) {
 		{"250u", 250 * time.Microsecond, true},
 		{"99n", 99 * time.Nanosecond, true},
 		{"99999999H", time.Duration(math.MaxInt64), true}, // overflow -> capped, not negative
+		{"0S", 0, false},                                  // zero -> no deadline (not a pre-expired ctx)
 		{"abc", 0, false},                                 // non-numeric value
 		{"10x", 0, false},                                 // unknown unit
 		{"S", 0, false},                                   // missing value

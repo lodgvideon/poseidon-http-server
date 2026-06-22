@@ -404,7 +404,10 @@ func parseGRPCTimeout(headers []hpack.HeaderField) (time.Duration, bool) {
 			return 0, false
 		}
 		n, err := strconv.ParseInt(string(v[:len(v)-1]), 10, 64)
-		if err != nil || n < 0 {
+		// Reject zero and negative: a 0 timeout yields an already-expired context
+		// (context.WithTimeout(ctx, 0)) that would fail every handler before it
+		// runs, so treat "0<unit>" as "no deadline" per gRPC §6.2.1.
+		if err != nil || n <= 0 {
 			return 0, false
 		}
 		var unit time.Duration
