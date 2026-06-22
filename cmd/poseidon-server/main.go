@@ -262,8 +262,10 @@ func main() {
 }
 
 // buildOptions assembles the default handler (mux + middleware chain) and maps
-// the validated Config into server.Options.
-func buildOptions(cfg Config, logger *slog.Logger, health *server.HealthState) server.Options {
+// the validated Config into server.Options. It also returns the MetricsCollector
+// so the caller can wire transport-level metrics once the Server exists (see
+// MetricsCollector.SetTransportSource).
+func buildOptions(cfg Config, logger *slog.Logger, health *server.HealthState) (server.Options, *middleware.MetricsCollector) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -315,7 +317,7 @@ func buildOptions(cfg Config, logger *slog.Logger, health *server.HealthState) s
 			HandshakeTimeout: cfg.HandshakeTimeout,
 			MaxRapidResets:   cfg.MaxRapidResets,
 		},
-	}
+	}, metrics
 }
 
 // run wires the configuration into a server.Server and blocks until a signal
@@ -323,12 +325,16 @@ func buildOptions(cfg Config, logger *slog.Logger, health *server.HealthState) s
 // serve failure.
 func run(cfg Config, logger *slog.Logger) error {
 	health := server.NewHealthState()
-	opts := buildOptions(cfg, logger, health)
+	opts, metrics := buildOptions(cfg, logger, health)
 
 	srv, err := server.NewServer(opts)
 	if err != nil {
 		return fmt.Errorf("create server: %w", err)
 	}
+
+	// Surface HTTP/2 transport counters (connections, bytes, frames, streams,
+	// rapid-resets, GOAWAYs) at /metrics alongside the per-request metrics.
+	metrics.SetTransportSource(srv.TransportStats)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

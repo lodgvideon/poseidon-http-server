@@ -76,10 +76,10 @@ type ServerConn struct {
 	pushIDs *pushIDCounter
 
 	// Stats counters.
-	atomicBytesSent      atomic.Int64
-	atomicBytesReceived  atomic.Int64
-	atomicFramesSent     atomic.Int64
-	atomicFramesReceived atomic.Int64
+	atomicBytesSent       atomic.Int64
+	atomicBytesReceived   atomic.Int64
+	atomicFramesSent      atomic.Int64
+	atomicFramesReceived  atomic.Int64
 	atomicStreamsAccepted atomic.Uint32
 }
 
@@ -163,6 +163,7 @@ func (o ServerConnOptions) rapidResetBudget() int {
 }
 
 // ConnStats is a point-in-time counter snapshot.
+//
 //nolint:revive // exported stutters with package; kept for API consistency with client.
 type ConnStats struct {
 	BytesSent       int64
@@ -170,6 +171,12 @@ type ConnStats struct {
 	FramesSent      int64
 	FramesReceived  int64
 	StreamsAccepted uint32
+	// RapidResets counts client RST_STREAM frames charged against the
+	// Rapid Reset budget (CVE-2023-44487) on this connection.
+	RapidResets uint32
+	// GoAwaySent reports whether this connection has emitted a GOAWAY
+	// (graceful or error). A connection sends at most one GOAWAY.
+	GoAwaySent bool
 }
 
 // clientPreface is the HTTP/2 connection preface sent by clients
@@ -209,7 +216,6 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 
 	sc := &ServerConn{
 		transport:          nc,
-		fr:                 frame.NewFramer(nc, nc),
 		enc:                hpack.NewEncoder(),
 		dec:                hpack.NewDecoder(),
 		opts:               opts,
@@ -221,6 +227,13 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		peerConnSendWindow: int32(connInitialRecvWindow),
 		pushIDs:            newPushIDCounter(),
 	}
+	// Wrap the transport so every frame byte read/written is tallied for Stats
+	// (BytesReceived/BytesSent). The 24-byte preface read above is not counted;
+	// everything from the SETTINGS exchange onward is.
+	sc.fr = frame.NewFramer(
+		&countingWriter{w: nc, n: &sc.atomicBytesSent},
+		&countingReader{r: nc, n: &sc.atomicBytesReceived},
+	)
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
 
 	// Step 2: send server SETTINGS.
@@ -347,7 +360,13 @@ func (sc *ServerConn) Close() error {
 	if dl, ok := sc.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
-	_ = sc.fr.WriteGoAway(sc.lastPeerStreamID(), frame.ErrCodeNoError, nil)
+	// Account for the GOAWAY frame and flag the connection as having emitted one,
+	// matching GoAway/sendGoAway, so Stats (FramesSent, GoAwaySent) stays accurate
+	// for Close-initiated teardowns (e.g. keepalive timeout).
+	if err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), frame.ErrCodeNoError, nil); err == nil {
+		sc.bumpFramesSent()
+		sc.goAwayRequested.Store(true)
+	}
 	sc.wmu.Unlock()
 	_ = sc.transport.Close()
 	<-sc.readerDone
@@ -363,7 +382,39 @@ func (sc *ServerConn) Stats() ConnStats {
 		FramesSent:      sc.atomicFramesSent.Load(),
 		FramesReceived:  sc.atomicFramesReceived.Load(),
 		StreamsAccepted: sc.atomicStreamsAccepted.Load(),
+		RapidResets:     sc.rapidResetCount.Load(),
+		GoAwaySent:      sc.goAwayRequested.Load(),
 	}
+}
+
+// countingReader / countingWriter tally bytes flowing through the transport into
+// an atomic counter, so Stats can report BytesReceived / BytesSent. They sit
+// between the Framer and the raw connection; the byte count is updated even on a
+// partial read/write that ends in error (n bytes still crossed the wire).
+type countingReader struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.n.Add(int64(n))
+	}
+	return n, err
+}
+
+type countingWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if n > 0 {
+		c.n.Add(int64(n))
+	}
+	return n, err
 }
 
 func (sc *ServerConn) lastPeerStreamID() uint32 {

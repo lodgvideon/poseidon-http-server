@@ -305,10 +305,35 @@ set via `ContentSecurityPolicy`.
 | `poseidon_requests_total` | counter | `method`, `path`, `status` |
 | `poseidon_request_duration_seconds` | histogram | `method`, `path` (buckets 5ms…10s + `+Inf`) |
 | `poseidon_request_duration_seconds_total` | counter | `method`, `path` |
+| `poseidon_request_bytes_total` | counter | `method`, `path` |
 | `poseidon_active_requests` | gauge | — |
 
 The histogram `observe` path is allocation-free (binary-searched bucket index,
 atomic updates).
+
+#### Transport metrics
+
+Register a transport source to also export connection-level HTTP/2 counters at
+`/metrics` (the `poseidon-server` binary does this automatically):
+
+```go
+srv, _ := server.NewServer(opts)
+metrics.SetTransportSource(srv.TransportStats) // (*server.Server).TransportStats
+```
+
+`TransportStats` aggregates `conn.ConnStats` across every connection the server
+has handled; the counters stay monotonic across connection close (a closing
+connection's totals are folded into a persistent accumulator), while
+`poseidon_connections_active` reflects only currently-open connections.
+
+| Metric | Type | Notes |
+|--------|------|-------|
+| `poseidon_connections_active` | gauge | Currently-open HTTP/2 connections |
+| `poseidon_bytes_sent_total` / `poseidon_bytes_received_total` | counter | Bytes at the framer/transport boundary (the 24-byte preface is not counted) |
+| `poseidon_frames_sent_total` / `poseidon_frames_received_total` | counter | HTTP/2 frames |
+| `poseidon_streams_accepted_total` | counter | Streams accepted |
+| `poseidon_rapid_resets_total` | counter | Client RST_STREAM charged against the Rapid Reset budget (CVE-2023-44487) |
+| `poseidon_goaways_sent_total` | counter | Connections on which the server emitted a GOAWAY |
 
 ### Health probes
 

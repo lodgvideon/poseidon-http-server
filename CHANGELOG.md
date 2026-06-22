@@ -41,6 +41,17 @@ Kubernetes deployment assets. It includes one **breaking** API change — see
 - **Request-duration latency histograms** on `MetricsCollector`
   (`poseidon_request_duration_seconds`, Prometheus default buckets 5ms…10s),
   plus `poseidon_active_requests` gauge. Allocation-free `observe` hot path.
+- **HTTP/2 transport metrics.** `(*server.Server).TransportStats()` aggregates
+  per-connection counters (`conn.ConnStats`, now including `RapidResets` and
+  `GoAwaySent`) across live and closed connections, keeping the byte/frame/stream
+  counters monotonic while `ActiveConns` stays a gauge. Wire it into exposition
+  with `(*middleware.MetricsCollector).SetTransportSource(srv.TransportStats)` to
+  emit `poseidon_connections_active`, `poseidon_bytes_{sent,received}_total`,
+  `poseidon_frames_{sent,received}_total`, `poseidon_streams_accepted_total`,
+  `poseidon_rapid_resets_total`, and `poseidon_goaways_sent_total` at `/metrics`
+  (the `poseidon-server` binary wires this automatically). Byte counts are tallied
+  at the framer/transport boundary; `poseidon_request_bytes_total` is now exposed
+  too.
 - **HTTP health endpoints.** `HealthHandler`/`HealthState` serve `/healthz`
   (liveness, 200 while serving) and `/readyz` (readiness, 503 while draining).
   `OnDrainStart` hook flips readiness to NOT-ready at the start of `Shutdown`.
