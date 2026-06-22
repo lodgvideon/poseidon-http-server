@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -268,6 +269,17 @@ func (s *Server) serveStream(ctx context.Context, stream *conn.ServerStream) {
 	s.inFlight.Add(1)
 	defer s.inFlight.Done()
 
+	// Backstop panic isolation: a panic anywhere in the request lifecycle
+	// (buildRequest, body read, or a handler not already guarded by
+	// dispatchAndClose) must not crash the whole process. Recover, log, and
+	// tear down just this stream — every other connection survives.
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Printf("poseidon: recovered panic serving stream %d: %v\n%s", stream.ID(), rec, debug.Stack())
+			_ = stream.Close()
+		}
+	}()
+
 	var req *Request
 
 	// Read HEADERS first.
@@ -357,6 +369,19 @@ func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream
 		return
 	}
 	w := newConnResponseWriter(stream, req)
+	// Per-request panic recovery: a panicking handler returns a 500 (if it has
+	// not already written a response) and resets the stream, instead of
+	// crashing the server. Mirrors net/http's per-request isolation.
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Printf("poseidon: recovered handler panic on stream %d: %v\n%s", stream.ID(), rec, debug.Stack())
+			if !w.Written() {
+				_ = w.WriteHeaders(500, nil)
+				_ = w.WriteTrailers(nil)
+			}
+			_ = stream.Close()
+		}
+	}()
 	if err := s.handler.ServeHTTP(ctx, req, w); err != nil {
 		s.logger.Printf("poseidon: handler error on stream %d: %v", stream.ID(), err)
 		if !w.Written() {

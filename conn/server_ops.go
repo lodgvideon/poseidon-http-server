@@ -159,7 +159,7 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 			newWin := int64(st.sendWindow) + delta
 			if newWin > maxWindow {
 				st.mu.Unlock()
-				return fmt.Errorf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)
+				return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)}
 			}
 						st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
 			st.mu.Unlock()
@@ -180,7 +180,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		newVal := int64(sc.peerConnSendWindow) + int64(increment)
 		if newVal > int64(maxWindow) {
 			sc.fcOutMu.Unlock()
-			return fmt.Errorf("WINDOW_UPDATE overflowed connection send window")
+			return connError{code: frame.ErrCodeFlowControlError, msg: "WINDOW_UPDATE overflowed connection send window"}
 		}
 				sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
 		sc.fcOutCond.Broadcast()
@@ -195,7 +195,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 	newVal := int64(s.sendWindow) + int64(increment)
 	if newVal > int64(maxWindow) {
 		s.mu.Unlock()
-		return fmt.Errorf("stream %d: WINDOW_UPDATE overflow", streamID)
+		return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: WINDOW_UPDATE overflow", streamID)}
 	}
 		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
 	s.mu.Unlock()
@@ -213,7 +213,7 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	s.recvWindow -= debit
 	if s.recvWindow < 0 {
 		s.mu.Unlock()
-		return fmt.Errorf("stream %d: flow control error", s.id)
+		return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: flow control error", s.id)}
 	}
 	s.recvRefundPending += length
 	streamRefund := uint32(0)
@@ -228,7 +228,7 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	sc.connRecvWindow -= debit
 	if sc.connRecvWindow < 0 {
 		sc.fcMu.Unlock()
-		return fmt.Errorf("connection flow control error")
+		return connError{code: frame.ErrCodeFlowControlError, msg: "connection flow control error"}
 	}
 	sc.connRefundPending += length
 	connRefund := uint32(0)
