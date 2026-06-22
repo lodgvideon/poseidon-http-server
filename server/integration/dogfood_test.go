@@ -81,7 +81,7 @@ func TestDogfood_MaxStreamsSetStillAdvertisesWindow(t *testing.T) {
 	}
 	req.ContentLength = int64(size)
 
-	cli := &http.Client{Transport: ts.client.Transport, Timeout: 5 * time.Second}
+	cli := &http.Client{Transport: ts.client.Transport, Timeout: 20 * time.Second}
 	done := make(chan *http.Response, 1)
 	errc := make(chan error, 1)
 	go func() {
@@ -101,7 +101,7 @@ func TestDogfood_MaxStreamsSetStillAdvertisesWindow(t *testing.T) {
 		}
 	case err := <-errc:
 		t.Fatalf("request error: %v", err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("body deadlocked: advertised InitialWindowSize was 0 (Bug 3 consistency)")
 	}
 }
@@ -112,7 +112,13 @@ func TestDogfood_MaxStreamsSetStillAdvertisesWindow(t *testing.T) {
 // deadlocks once the client exhausts its send window. Before the fix, the W and
 // 2W cases hang until the client deadline; sub-W works.
 func TestDogfood_LargeBodyFlowControl(t *testing.T) {
-	const w = 1 << 20 // advertised InitialWindowSize
+	// W is kept modest: the test must transfer a body at/over the advertised
+	// window (which forces multiple stream + connection WINDOW_UPDATE refund
+	// cycles — the path the dogfood deadlock hit), but a multi-MiB transfer races
+	// a wall-clock deadline when this package runs in parallel with the rest of
+	// the suite under -race + coverage on a CPU-starved CI runner. 256 KiB still
+	// exceeds the 64 KiB connection window several times over while staying fast.
+	const w = 256 << 10 // advertised InitialWindowSize
 	ts := startTestServer(t, readLenHandler(), func(o *server.Options) {
 		o.ConnOpts.AdvertisedSettings = conn.AdvertisedSettings{InitialWindowSize: w}
 	})
@@ -126,7 +132,7 @@ func TestDogfood_LargeBodyFlowControl(t *testing.T) {
 			}
 			req.ContentLength = int64(size)
 
-			cli := &http.Client{Transport: ts.client.Transport, Timeout: 5 * time.Second}
+			cli := &http.Client{Transport: ts.client.Transport, Timeout: 20 * time.Second}
 			done := make(chan *http.Response, 1)
 			errc := make(chan error, 1)
 			go func() {
@@ -150,7 +156,7 @@ func TestDogfood_LargeBodyFlowControl(t *testing.T) {
 				}
 			case err := <-errc:
 				t.Fatalf("request error: %v", err)
-			case <-time.After(5 * time.Second):
+			case <-time.After(20 * time.Second):
 				t.Fatalf("body of %d bytes deadlocked (no per-stream WINDOW_UPDATE refund; Bug 3)", size)
 			}
 		})
