@@ -208,7 +208,11 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 	newVal := int64(s.sendWindow) + int64(increment)
 	if newVal > int64(maxWindow) {
 		s.mu.Unlock()
-		return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: WINDOW_UPDATE overflow", streamID)}
+		// RFC 9113 §6.9.1: a WINDOW_UPDATE overflowing a STREAM flow-control
+		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a
+		// connection error — the connection and its other streams survive.
+		_ = sc.writeServerRSTStream(s, frame.ErrCodeFlowControlError)
+		return nil
 	}
 		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
 	s.mu.Unlock()

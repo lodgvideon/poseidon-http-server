@@ -49,6 +49,11 @@ type ServerConn struct {
 	closed     atomic.Bool
 	readerDone chan struct{}
 
+	// handler is the single frame.Handler used for BOTH the SETTINGS handshake
+	// and the reader loop, so a header block split across that boundary keeps
+	// its pending CONTINUATION state instead of being lost.
+	handler *serverConnHandler
+
 	// acceptCh delivers new client-initiated streams to AcceptStream.
 	acceptCh chan *ServerStream
 
@@ -234,8 +239,8 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	// Steps 3-5: handshake — read client SETTINGS, send ACK, read ACK.
 	// Create the real frame handler early so that non-SETTINGS frames
 	// arriving during the handshake (e.g. HEADERS) are not lost.
-	h := newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize))
-	peer, err := handshakeServerSettings(ctx, sc.fr, h)
+	sc.handler = newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize))
+	peer, err := handshakeServerSettings(ctx, sc.fr, sc.handler)
 	if err != nil {
 		_ = nc.Close()
 		return nil, err
@@ -521,7 +526,9 @@ func (sc *ServerConn) bumpFramesSent() { sc.atomicFramesSent.Add(1) }
 // readerLoop reads frames from the connection and dispatches them.
 func (sc *ServerConn) readerLoop() {
 	defer close(sc.readerDone)
-	h := newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize))
+	// Reuse the handshake handler so a header block split across the handshake
+	// boundary keeps its pending CONTINUATION state instead of being lost.
+	h := sc.handler
 	for {
 		_, err := sc.fr.ReadFrame(context.Background(), h)
 		if err != nil {

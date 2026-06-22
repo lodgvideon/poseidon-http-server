@@ -116,6 +116,7 @@ func TestServerConn_OnGoAway_FromClient(t *testing.T) {
 
 type mockConnOps struct {
 	streams           map[uint32]*ServerStream
+	refuseAfter       int // registerStream returns false once len(streams) >= refuseAfter (0 = never)
 	settingsAckCalled bool
 	pingAckCalled     bool
 	rapidResetCount   int
@@ -123,7 +124,13 @@ type mockConnOps struct {
 }
 
 func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
-func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool      { m.streams[id] = s; return true }
+func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool {
+	if m.refuseAfter > 0 && len(m.streams) >= m.refuseAfter {
+		return false
+	}
+	m.streams[id] = s
+	return true
+}
 func (m *mockConnOps) markStreamDone(id uint32)                            { delete(m.streams, id) }
 func (m *mockConnOps) writeSettingsAck() error                             { m.settingsAckCalled = true; return nil }
 func (m *mockConnOps) writePingAck(_ [8]byte) error                      { m.pingAckCalled = true; return nil }

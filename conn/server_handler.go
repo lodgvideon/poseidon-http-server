@@ -47,6 +47,10 @@ type serverConnHandler struct {
 	pendingBuf       []byte
 	pendingEndStream bool
 	pendingTrailer   bool
+	// pendingDiscard marks an open header block whose stream was refused
+	// (over MaxConcurrentStreams): the block is still decoded to keep the
+	// shared HPACK decoder in sync, but the result and stream are discarded.
+	pendingDiscard bool
 }
 
 func newServerConnHandler(streams serverConnOps, dec *hpack.Decoder, maxHeaderBytes int) *serverConnHandler {
@@ -105,18 +109,23 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	s := h.streams.lookupStream(fh.StreamID)
 	isNew := s == nil
 
+	// refused: a new stream rejected for exceeding MaxConcurrentStreams
+	// (RST_STREAM already sent by registerStream). The header block is still
+	// decoded to keep the shared HPACK decoder's dynamic table in sync with the
+	// client's persistent encoder — only stream registration and event delivery
+	// are suppressed. Skipping the decode would desync HPACK and corrupt every
+	// subsequent stream on the connection.
+	refused := false
 	if isNew {
 		s = newServerStream(fh.StreamID, 8, nil, int32(connInitialRecvWindow))
 		if !h.streams.registerStream(fh.StreamID, s) {
-			// Refused for exceeding MaxConcurrentStreams; RST_STREAM already
-			// sent. Do not process or buffer this stream's header block.
-			return nil
+			refused = true
 		}
 	}
 
 	// RFC 7540 §5.3: priority block is sent only on the first HEADERS
 	// frame. Capture it once, before any CONTINUATION frames.
-	if isNew && prio != nil {
+	if isNew && !refused && prio != nil {
 		s.setPriority(prio)
 	}
 
@@ -127,9 +136,15 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
+		h.pendingDiscard = refused
 		h.pendingTrailer = !isNew && s.headersReceived
 		// Only the first HEADERS carries priority; ignore any on trailers.
 		return nil
+	}
+
+	if refused {
+		// Single-frame refused block: decode-and-discard for HPACK sync.
+		return h.discardHeaderBlock(hb)
 	}
 
 	isTrailer := false
@@ -143,6 +158,18 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	return h.emitHeaderBlock(s, hb, end, isTrailer)
 }
 
+// discardHeaderBlock decodes a header block solely to advance the shared HPACK
+// decoder's dynamic table (keeping it in sync with the client's encoder) and
+// throws the decoded fields away. Used for streams refused over
+// MaxConcurrentStreams and for the defensive stream-vanished path: skipping the
+// decode would desync the decoder and corrupt every later stream. Clears the
+// open-block state so the interleaving guard re-admits other frames.
+func (h *serverConnHandler) discardHeaderBlock(hb []byte) error {
+	h.pendingStreamID = 0
+	h.pendingDiscard = false
+	return h.dec.DecodeBlock(hb, func(hpack.HeaderField) error { return nil })
+}
+
 func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
 	// A CONTINUATION with no open header block, or one on a different stream
 	// than the one awaiting it, is a connection PROTOCOL_ERROR (RFC 9113 §6.10).
@@ -152,13 +179,6 @@ func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.Header
 	if fh.StreamID != h.pendingStreamID {
 		return connError{code: frame.ErrCodeProtocolError, msg: "CONTINUATION on wrong stream"}
 	}
-	s := h.streams.lookupStream(fh.StreamID)
-	if s == nil {
-		// Stream gone (defensive): drop the pending block and reset state.
-		h.pendingStreamID = 0
-		h.pendingBuf = h.pendingBuf[:0]
-		return nil
-	}
 	// Bound the accumulated compressed header block (CVE-2024-27316 defense).
 	if len(h.pendingBuf)+len(hb) > h.maxHeaderBytes {
 		return connError{code: frame.ErrCodeProtocolError, msg: "header block exceeds max size"}
@@ -166,6 +186,16 @@ func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.Header
 	h.pendingBuf = append(h.pendingBuf, hb...)
 	if fh.Flags&frame.FlagContinuationEndHeaders == 0 {
 		return nil
+	}
+	if h.pendingDiscard {
+		// Refused stream: decode-and-discard the full block for HPACK sync.
+		return h.discardHeaderBlock(h.pendingBuf)
+	}
+	s := h.streams.lookupStream(fh.StreamID)
+	if s == nil {
+		// Defensive (unreachable with a single reader goroutine): decode-and-
+		// discard rather than drop, so the HPACK decoder cannot desync.
+		return h.discardHeaderBlock(h.pendingBuf)
 	}
 	end := h.pendingEndStream
 	isTrailer := h.pendingTrailer
