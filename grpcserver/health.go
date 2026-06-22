@@ -64,14 +64,19 @@ func NewHealthServer() *HealthServer {
 
 // SetServingStatus updates the health status for a service and notifies
 // all active watchers.
+//
+// The watcher sends happen while holding h.mu — deliberately. unsubscribe
+// closes watcher channels under the same lock, so sending under the lock makes
+// the snapshot+send+close sequence mutually exclusive and prevents a
+// "send on closed channel" panic (a process crash) when a Watch stream
+// unsubscribes concurrently with a status change. The sends are non-blocking
+// (select/default), so the critical section stays bounded. Callers must NOT
+// hold h.mu (Shutdown releases it before calling this).
 func (h *HealthServer) SetServingStatus(service string, status ServingStatus) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.status[service] = status
-	channels := make([]chan ServingStatus, len(h.watchers[service]))
-	copy(channels, h.watchers[service])
-	h.mu.Unlock()
-
-	for _, ch := range channels {
+	for _, ch := range h.watchers[service] {
 		select {
 		case ch <- status:
 		default:
@@ -124,15 +129,20 @@ func (h *HealthServer) RegisterHealthService(r *ServiceRegistrar) {
 				ServerStreamH: func(ctx context.Context, reqPayload []byte, send StreamSender) error {
 					serviceName := decodeHealthCheckRequest(reqPayload)
 
-					// Send initial status.
-					status := h.Status(serviceName)
-					if err := send(encodeHealthCheckResponse(status)); err != nil {
-						return err
-					}
-
-					// Subscribe to updates.
+					// Subscribe BEFORE reading and sending the initial status.
+					// Otherwise a SetServingStatus that races the initial send is
+					// published to watchers that don't yet include this stream and
+					// is lost — a real missed-transition bug, and the cause of a
+					// flaky test. Subscribing first means any racing update lands
+					// in the (buffered) channel; the worst case is the client
+					// receiving the same status twice, which is harmless.
 					ch := h.subscribe(serviceName)
 					defer h.unsubscribe(serviceName, ch)
+
+					// Send initial status.
+					if err := send(encodeHealthCheckResponse(h.Status(serviceName))); err != nil {
+						return err
+					}
 
 					for {
 						select {

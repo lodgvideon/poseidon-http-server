@@ -2,6 +2,7 @@ package grpcserver
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -142,50 +143,28 @@ func TestHealthServer_WatchHandler(t *testing.T) {
 	h := NewHealthServer()
 	h.SetServingStatus("svc1", ServingStatusServing)
 
-	// Test the Watch server-streaming handler directly.
-	received := make(chan ServingStatus, 4)
-	reqPayload := encodeHealthCheckRequest("svc1")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	handler := func(_ context.Context, req []byte, send func([]byte) error) error {
-		serviceName := decodeHealthCheckRequest(req)
-
-		// Send initial status.
-		status := h.Status(serviceName)
-		if err := send(encodeHealthCheckResponse(status)); err != nil {
-			return err
-		}
-
-		// Subscribe to updates.
-		ch := h.subscribe(serviceName)
-		defer h.unsubscribe(serviceName, ch)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case s, ok := <-ch:
-				if !ok {
-					return nil
-				}
-				if err := send(encodeHealthCheckResponse(s)); err != nil {
-					return err
-				}
-			}
-		}
+	// Drive the REAL registered Watch server-stream handler (not an inline copy
+	// that could drift from production), so this test actually exercises the
+	// subscribe-before-send ordering.
+	r := NewServiceRegistrar()
+	h.RegisterHealthService(r)
+	watch := r.methods[healthPathWatch].serverS
+	if watch == nil {
+		t.Fatal("Watch server-stream handler not registered")
 	}
 
+	received := make(chan ServingStatus, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go func() {
-		handler(ctx, reqPayload, func(data []byte) error {
-			status := ServingStatus(data[1])
-			received <- status
+		_ = watch(ctx, encodeHealthCheckRequest("svc1"), func(data []byte) error {
+			received <- ServingStatus(data[1])
 			return nil
 		})
 	}()
 
-	// Wait for initial status.
+	// Wait for the initial status.
 	select {
 	case s := <-received:
 		if s != ServingStatusServing {
@@ -195,7 +174,11 @@ func TestHealthServer_WatchHandler(t *testing.T) {
 		t.Fatal("watch did not receive initial status")
 	}
 
-	// Push an update.
+	// An update pushed AFTER the stream reported its initial status must be
+	// delivered. Because the handler subscribes BEFORE sending the initial
+	// status, this update cannot be lost — which makes the test deterministic
+	// (the old send-then-subscribe order dropped it under load, hanging here for
+	// the full timeout).
 	h.SetServingStatus("svc1", ServingStatusNotServing)
 
 	select {
@@ -334,4 +317,44 @@ func TestHealthServer_UnsubscribeUnknownChannel(t *testing.T) {
 	h := NewHealthServer()
 	other := make(chan ServingStatus, 1)
 	h.unsubscribe("svc.nothing", other) // should be a safe no-op
+}
+
+// TestHealthServer_ConcurrentSetAndUnsubscribe stresses the watcher fan-out
+// against concurrent subscribe/unsubscribe to guard the "send on closed
+// channel" panic: SetServingStatus must notify watchers under the same lock
+// unsubscribe uses to close their channels, so a Watch client that churns
+// subscriptions while statuses change cannot crash the server. Without that
+// discipline this test panics within milliseconds (run it under -race in CI).
+func TestHealthServer_ConcurrentSetAndUnsubscribe(t *testing.T) {
+	t.Parallel()
+
+	h := NewHealthServer()
+	const svc = "race.svc"
+	const iters = 10_000
+
+	var wg sync.WaitGroup
+	// Status setters fanning out to whatever watchers are currently registered.
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iters {
+				h.SetServingStatus(svc, ServingStatusNotServing)
+				h.SetServingStatus(svc, ServingStatusServing)
+			}
+		}()
+	}
+	// Watchers churning subscribe -> unsubscribe (which closes the channel).
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iters {
+				ch := h.subscribe(svc)
+				h.unsubscribe(svc, ch)
+			}
+		}()
+	}
+	wg.Wait()
+	// Reaching here without a panic is the assertion.
 }
