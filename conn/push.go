@@ -104,8 +104,11 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 	pushStream.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
 	pushStream.mu.Unlock()
 
-	// Register the push stream.
+	// Register the push stream. Bind a per-stream context (like registerStream)
+	// so markStreamDone cancels a pushed response's handler on push-stream reset
+	// or connection close.
 	sc.smu.Lock()
+	pushStream.ctx, pushStream.cancel = context.WithCancel(sc.connCtx)
 	sc.streams[promisedID] = pushStream
 	sc.smu.Unlock()
 

@@ -49,6 +49,17 @@ type ServerConn struct {
 	closed     atomic.Bool
 	readerDone chan struct{}
 
+	// handler is the single frame.Handler used for BOTH the SETTINGS handshake
+	// and the reader loop, so a header block split across that boundary keeps
+	// its pending CONTINUATION state instead of being lost.
+	handler *serverConnHandler
+
+	// connCtx is cancelled when the connection closes (or its parent ctx is
+	// cancelled). Per-stream contexts derive from it, so closing the connection
+	// cancels every in-flight handler.
+	connCtx    context.Context
+	connCancel context.CancelFunc
+
 	// acceptCh delivers new client-initiated streams to AcceptStream.
 	acceptCh chan *ServerStream
 
@@ -222,6 +233,9 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		pushIDs:            newPushIDCounter(),
 	}
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
+	// Connection-lifetime context: cancelled on Close or when the caller's ctx
+	// is cancelled. Per-stream contexts derive from this.
+	sc.connCtx, sc.connCancel = context.WithCancel(ctx)
 
 	// Step 2: send server SETTINGS.
 	myParams := encodeAdvertised(opts.AdvertisedSettings)
@@ -234,11 +248,23 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	// Steps 3-5: handshake — read client SETTINGS, send ACK, read ACK.
 	// Create the real frame handler early so that non-SETTINGS frames
 	// arriving during the handshake (e.g. HEADERS) are not lost.
-	h := newServerConnHandler(sc, sc.dec)
-	peer, err := handshakeServerSettings(ctx, sc.fr, h)
+	sc.handler = newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize))
+	peer, err := handshakeServerSettings(ctx, sc.fr, sc.handler)
 	if err != nil {
 		_ = nc.Close()
 		return nil, err
+	}
+	// Validate the client's INITIAL SETTINGS (RFC 9113 §6.5.2). The handshake
+	// path does not flow through applyPeerSettings, so a bad initial value — e.g.
+	// an INITIAL_WINDOW_SIZE that would make every stream's send window negative —
+	// must be rejected here, with a GOAWAY carrying the right error code.
+	if verr := validatePeerSettings(peer); verr != nil {
+		var ce connError
+		if errors.As(verr, &ce) {
+			sc.sendGoAway(ce.code)
+		}
+		_ = nc.Close()
+		return nil, verr
 	}
 	sc.psMu.Lock()
 	sc.peerSettings = peer
@@ -334,6 +360,9 @@ func (sc *ServerConn) Close() error {
 	if !sc.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	if sc.connCancel != nil {
+		sc.connCancel() // cancel every in-flight handler's context
+	}
 	sc.fcOutMu.Lock()
 	if sc.fcOutCond != nil {
 		sc.fcOutCond.Broadcast()
@@ -390,6 +419,21 @@ func (sc *ServerConn) noteClientStreamID(id uint32) {
 			return
 		}
 	}
+}
+
+// validateClientStreamID enforces RFC 9113 §5.1.1 for a newly opened client
+// stream: the ID must be odd and strictly greater than every client stream ID
+// already seen. An even ID, or a reused/decreasing ID (idle-stream reuse), is a
+// connection error of type PROTOCOL_ERROR. Called only for new streams, on the
+// single reader goroutine, before registerStream advances maxClientStreamID.
+func (sc *ServerConn) validateClientStreamID(id uint32) error {
+	if id%2 == 0 {
+		return connError{code: frame.ErrCodeProtocolError, msg: "client-initiated stream ID must be odd"}
+	}
+	if id <= sc.maxClientStreamID.Load() {
+		return connError{code: frame.ErrCodeProtocolError, msg: "client stream ID must exceed all previous client streams"}
+	}
+	return nil
 }
 
 func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
@@ -521,7 +565,9 @@ func (sc *ServerConn) bumpFramesSent() { sc.atomicFramesSent.Add(1) }
 // readerLoop reads frames from the connection and dispatches them.
 func (sc *ServerConn) readerLoop() {
 	defer close(sc.readerDone)
-	h := newServerConnHandler(sc, sc.dec)
+	// Reuse the handshake handler so a header block split across the handshake
+	// boundary keeps its pending CONTINUATION state instead of being lost.
+	h := sc.handler
 	for {
 		_, err := sc.fr.ReadFrame(context.Background(), h)
 		if err != nil {

@@ -16,6 +16,12 @@ type ServerStream struct {
 	sc     *ServerConn
 	events chan StreamEvent
 
+	// ctx is cancelled when the stream is reset by the client, completes, or its
+	// connection closes. Set by registerStream; nil for unregistered or pushed
+	// streams (Context() then falls back to context.Background()).
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	mu            sync.Mutex
 	localEnded    bool
 	remoteEnded   bool
@@ -85,11 +91,23 @@ type StreamEvent struct {
 	Data      []byte
 	EndStream bool
 	RSTCode   frame.ErrCode
-	Slab      *[]byte
 }
 
 // ID returns the HTTP/2 stream identifier.
 func (ss *ServerStream) ID() uint32 { return ss.id }
+
+// Context returns a context that is cancelled when the stream is reset by the
+// client (RST_STREAM), completes, or the underlying connection closes. Handlers
+// should select on its Done channel (or pass it to blocking calls) to abort
+// work promptly when the client goes away. It is never nil and is safe to call
+// on a nil stream (returns a background context) so constructors that tolerate
+// a nil stream — e.g. server.NewResponseWriter(nil) in tests — do not panic.
+func (ss *ServerStream) Context() context.Context {
+	if ss == nil || ss.ctx == nil {
+		return context.Background()
+	}
+	return ss.ctx
+}
 
 // SendHeaders sends a response HEADERS frame with the given fields.
 // The first call on a stream seeds the per-stream send window from
@@ -143,8 +161,19 @@ func (ss *ServerStream) SendData(ctx context.Context, p []byte, endStream bool) 
 	return nil
 }
 
-// Recv blocks until the next event is ready.
+// Recv blocks until the next event is ready. A buffered event is always returned
+// in preference to context cancellation, so a final event delivered in the same
+// step as the stream's completion or reset (markStreamDone cancels the context)
+// is never dropped.
 func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
+	select {
+	case e, ok := <-ss.events:
+		if !ok {
+			return StreamEvent{}, ErrStreamClosed
+		}
+		return e, nil
+	default:
+	}
 	select {
 	case e, ok := <-ss.events:
 		if !ok {

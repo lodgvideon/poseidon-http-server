@@ -9,14 +9,6 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-// HeaderSlabPool recycles the byte backing for HPACK-decoded header fields.
-var HeaderSlabPool = &sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 512)
-		return &b
-	},
-}
-
 // encBufPool recycles the HPACK block-fragment buffer used by writeServerHeaders.
 var encBufPool = sync.Pool{
 	New: func() any {
@@ -34,10 +26,15 @@ func (sc *ServerConn) lookupStream(id uint32) *ServerStream {
 	return sc.streams[id]
 }
 
-// registerStream adds a new stream to the registry and delivers it
-// to AcceptStream via acceptCh. Seeds the stream's send window from
-// the peer's SETTINGS_INITIAL_WINDOW_SIZE.
-func (sc *ServerConn) registerStream(id uint32, s *ServerStream) {
+// registerStream adds a new stream to the registry and delivers it to
+// AcceptStream via acceptCh, seeding its send window from the peer's
+// SETTINGS_INITIAL_WINDOW_SIZE. It enforces the advertised
+// SETTINGS_MAX_CONCURRENT_STREAMS limit: if the connection already has that
+// many open/half-closed streams, the new stream is refused with
+// RST_STREAM(REFUSED_STREAM) (RFC 9113 §5.1.2) and the function returns false
+// without registering it. REFUSED_STREAM signals the request was not processed,
+// so the client may safely retry it on a fresh connection.
+func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	// Seed per-stream send window from peer's INITIAL_WINDOW_SIZE.
 	sc.psMu.RLock()
 	initial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
@@ -45,20 +42,33 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) {
 	s.mu.Lock()
 		s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
 	s.mu.Unlock()
+	s.sc = sc
 
+	limit := int(sc.opts.AdvertisedSettings.MaxConcurrentStreams)
 	sc.smu.Lock()
+	if limit > 0 && len(sc.streams) >= limit {
+		sc.smu.Unlock()
+		// At the concurrency limit: refuse rather than register. Record the ID as
+		// used (RFC 9113 §5.1.1) so it cannot be reused, then RST (best-effort,
+		// ignored if the connection is already tearing down).
+		sc.noteClientStreamID(id)
+		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
+		return false
+	}
+	// Per-stream context derived from the connection context; cancelled when the
+	// stream completes/resets (markStreamDone) or the connection closes.
+	s.ctx, s.cancel = context.WithCancel(sc.connCtx)
 	sc.streams[id] = s
 	sc.smu.Unlock()
 	sc.noteClientStreamID(id)
 	sc.atomicStreamsAccepted.Add(1)
-
-	s.sc = sc
 
 	select {
 	case sc.acceptCh <- s:
 	default:
 		_ = s.Close()
 	}
+	return true
 }
 
 // onClientRSTStream accounts a client-initiated RST_STREAM for Rapid Reset
@@ -91,8 +101,12 @@ func (sc *ServerConn) onClientRSTStream(_ uint32, rapid bool) error {
 // markStreamDone cleans up a finished stream.
 func (sc *ServerConn) markStreamDone(id uint32) {
 	sc.smu.Lock()
-	defer sc.smu.Unlock()
+	s := sc.streams[id]
 	delete(sc.streams, id)
+	sc.smu.Unlock()
+	if s != nil && s.cancel != nil {
+		s.cancel() // cancel the handler's context on stream completion/reset
+	}
 }
 
 // writeSettingsAck sends a SETTINGS ACK.
@@ -123,9 +137,39 @@ func (sc *ServerConn) writePingAck(payload [8]byte) error {
 	return nil
 }
 
+// validatePeerSettings enforces the RFC 9113 §6.5.2 value bounds. A violation is
+// a connection error (PROTOCOL_ERROR or FLOW_CONTROL_ERROR); unknown settings
+// are ignored. Used for BOTH the handshake SETTINGS and mid-connection updates.
+func validatePeerSettings(s frame.SettingsParams) error {
+	const maxWindow = int64(1<<31 - 1)
+	for i := range s.N {
+		p := s.Pairs[i]
+		//nolint:exhaustive // only bounded settings are validated; others ignored per RFC 9113 §6.5.2
+		switch p.ID {
+		case frame.SettingEnablePush:
+			if p.Value > 1 {
+				return connError{code: frame.ErrCodeProtocolError, msg: "SETTINGS_ENABLE_PUSH must be 0 or 1"}
+			}
+		case frame.SettingInitialWindowSize:
+			if int64(p.Value) > maxWindow {
+				return connError{code: frame.ErrCodeFlowControlError, msg: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
+			}
+		case frame.SettingMaxFrameSize:
+			if p.Value < 16384 || p.Value > 16777215 {
+				return connError{code: frame.ErrCodeProtocolError, msg: "SETTINGS_MAX_FRAME_SIZE out of range [16384, 16777215]"}
+			}
+		default:
+		}
+	}
+	return nil
+}
+
 // applyPeerSettings applies client SETTINGS. Handles retroactive
 // INITIAL_WINDOW_SIZE delta on all open streams (RFC 7540 §6.9.2).
 func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
+	if err := validatePeerSettings(s); err != nil {
+		return err
+	}
 	const maxWindow = int64(1<<31 - 1)
 
 	sc.psMu.Lock()
@@ -159,7 +203,7 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 			newWin := int64(st.sendWindow) + delta
 			if newWin > maxWindow {
 				st.mu.Unlock()
-				return fmt.Errorf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)
+				return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)}
 			}
 						st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
 			st.mu.Unlock()
@@ -180,7 +224,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		newVal := int64(sc.peerConnSendWindow) + int64(increment)
 		if newVal > int64(maxWindow) {
 			sc.fcOutMu.Unlock()
-			return fmt.Errorf("WINDOW_UPDATE overflowed connection send window")
+			return connError{code: frame.ErrCodeFlowControlError, msg: "WINDOW_UPDATE overflowed connection send window"}
 		}
 				sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
 		sc.fcOutCond.Broadcast()
@@ -195,7 +239,15 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 	newVal := int64(s.sendWindow) + int64(increment)
 	if newVal > int64(maxWindow) {
 		s.mu.Unlock()
-		return fmt.Errorf("stream %d: WINDOW_UPDATE overflow", streamID)
+		// RFC 9113 §6.9.1: a WINDOW_UPDATE overflowing a STREAM flow-control
+		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a
+		// connection error — the connection and its other streams survive.
+		// Notify a handler reading this stream that it was reset (mirrors
+		// OnRSTStream) before writeServerRSTStream releases and cancels it, so the
+		// reset event is delivered ahead of the context cancellation.
+		s.push(StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeFlowControlError, EndStream: true})
+		_ = sc.writeServerRSTStream(s, frame.ErrCodeFlowControlError)
+		return nil
 	}
 		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
 	s.mu.Unlock()
@@ -213,7 +265,7 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	s.recvWindow -= debit
 	if s.recvWindow < 0 {
 		s.mu.Unlock()
-		return fmt.Errorf("stream %d: flow control error", s.id)
+		return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: flow control error", s.id)}
 	}
 	s.recvRefundPending += length
 	streamRefund := uint32(0)
@@ -228,7 +280,7 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	sc.connRecvWindow -= debit
 	if sc.connRecvWindow < 0 {
 		sc.fcMu.Unlock()
-		return fmt.Errorf("connection flow control error")
+		return connError{code: frame.ErrCodeFlowControlError, msg: "connection flow control error"}
 	}
 	sc.connRefundPending += length
 	connRefund := uint32(0)
