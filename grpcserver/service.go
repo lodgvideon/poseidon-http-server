@@ -5,7 +5,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/server"
@@ -68,10 +71,10 @@ type MethodDesc struct {
 	Name string
 
 	// One of the following must be set.
-	UnaryHandler    UnaryHandler
-	ServerStreamH   ServerStreamHandler
-	ClientStreamH   ClientStreamHandler
-	BidiStreamH     BidiStreamHandler
+	UnaryHandler  UnaryHandler
+	ServerStreamH ServerStreamHandler
+	ClientStreamH ClientStreamHandler
+	BidiStreamH   BidiStreamHandler
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +145,15 @@ func (r *ServiceRegistrar) Handler() server.Handler {
 			return writeGRPCError(w, Statusf(Unimplemented, "invalid content-type"))
 		}
 
+		// Honor the gRPC deadline (grpc-timeout): derive a timeout context so a
+		// handler that respects ctx aborts, and errToStatus maps the expiry to
+		// DEADLINE_EXCEEDED.
+		if d, ok := parseGRPCTimeout(req.Headers); ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, d)
+			defer cancel()
+		}
+
 		// Route by :path.
 		md := r.lookup(req.Path)
 		if md == nil {
@@ -160,16 +172,22 @@ func (r *ServiceRegistrar) Handler() server.Handler {
 		// For unary/server-streaming, read and decode the body first.
 		var reqPayload []byte
 		if req.BodyReader != nil {
-			data, err := io.ReadAll(req.BodyReader)
-			if err != nil {
-				return writeGRPCError(w, Statusf(Internal, "read body: %s", err.Error()))
-			}
+			// One LP message for unary / server-streaming. readStreamingLP decodes
+			// it and enforces the recv limit + compression rejection (the previous
+			// io.ReadAll left the LP header in the payload and was unbounded).
+			payload, err := readStreamingLP(req.BodyReader)
 			_ = req.BodyReader.Close()
-			reqPayload = data
+			if err != nil && !errors.Is(err, io.EOF) {
+				return writeGRPCError(w, errToStatus(err))
+			}
+			reqPayload = payload
 		} else if len(req.Body) > 0 {
 			msg, _, err := DecodeLPFromBytes(req.Body)
 			if err != nil {
-				return writeGRPCError(w, Statusf(Internal, "decode lp: %s", err.Error()))
+				return writeGRPCError(w, errToStatus(err))
+			}
+			if msg.Flag == FlagCompressed {
+				return writeGRPCError(w, Statusf(Unimplemented, "message compression not supported (no grpc-encoding negotiated)"))
 			}
 			reqPayload = msg.Payload
 		}
@@ -353,14 +371,68 @@ var (
 	sContentGRPC = []byte(ContentTypeGRPC)
 )
 
-// errToStatus converts an error to RPCStatus. If the error already is
-// an RPCStatus, it is returned directly; otherwise Internal is used.
+// errToStatus converts an error to RPCStatus. An RPCStatus is returned directly;
+// a deadline/cancellation maps to DEADLINE_EXCEEDED/CANCELLED; an over-limit
+// message maps to RESOURCE_EXHAUSTED; anything else is Internal.
 func errToStatus(err error) RPCStatus {
 	var st RPCStatus
 	if errors.As(err, &st) {
 		return st
 	}
-	return RPCStatus{Code: Internal, Message: err.Error()}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return RPCStatus{Code: DeadlineExceeded, Message: "deadline exceeded"}
+	case errors.Is(err, context.Canceled):
+		return RPCStatus{Code: Canceled, Message: "context canceled"}
+	case errors.Is(err, ErrMessageTooLarge):
+		return RPCStatus{Code: ResourceExhausted, Message: "received message larger than max"}
+	default:
+		return RPCStatus{Code: Internal, Message: err.Error()}
+	}
+}
+
+// parseGRPCTimeout parses the gRPC "grpc-timeout" header — a positive integer
+// followed by a unit (H, M, S, m, u, n) per the gRPC-over-HTTP/2 spec — into a
+// Duration. Returns false when the header is absent or unparseable (no deadline).
+func parseGRPCTimeout(headers []hpack.HeaderField) (time.Duration, bool) {
+	for _, h := range headers {
+		if string(h.Name) != HeaderGRPCTimeout {
+			continue
+		}
+		v := h.Value
+		if len(v) < 2 {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(string(v[:len(v)-1]), 10, 64)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		var unit time.Duration
+		switch v[len(v)-1] {
+		case 'H':
+			unit = time.Hour
+		case 'M':
+			unit = time.Minute
+		case 'S':
+			unit = time.Second
+		case 'm':
+			unit = time.Millisecond
+		case 'u':
+			unit = time.Microsecond
+		case 'n':
+			unit = time.Nanosecond
+		default:
+			return 0, false
+		}
+		// Guard against int64 overflow: an 8-digit value with a large unit can
+		// exceed time.Duration's nanosecond range and wrap to a negative (i.e.
+		// already-expired) deadline. Cap at the maximum representable duration.
+		if n > int64(math.MaxInt64)/int64(unit) {
+			return time.Duration(math.MaxInt64), true
+		}
+		return time.Duration(n) * unit, true
+	}
+	return 0, false
 }
 
 // streamReceiver creates a recv function for client/bidi streaming.
@@ -380,32 +452,46 @@ func streamReceiver(req *server.Request) func() ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
+			if msg.Flag == FlagCompressed {
+				return nil, Statusf(Unimplemented, "message compression not supported")
+			}
 			remaining = remaining[n:]
 			return msg.Payload, nil
 		}
 	}
 	// Streaming body mode — read LP messages from BodyReader on demand.
 	if req.BodyReader != nil {
-		return func() ([]byte, error) {
-			hdr := make([]byte, grpcMessageHeader)
-			if _, err := io.ReadFull(req.BodyReader, hdr); err != nil {
-				return nil, err // io.EOF when stream closed
-			}
-			length := int(binary.BigEndian.Uint32(hdr[1:5]))
-			if length == 0 {
-				return nil, nil
-			}
-			payload := make([]byte, length)
-			if _, err := io.ReadFull(req.BodyReader, payload); err != nil {
-				return nil, err
-			}
-			return payload, nil
-		}
+		return func() ([]byte, error) { return readStreamingLP(req.BodyReader) }
 	}
 	// No body → immediate EOF.
 	return func() ([]byte, error) {
 		return nil, io.EOF
 	}
+}
+
+// readStreamingLP reads one length-prefixed gRPC message from r, enforcing the
+// receive-size limit and rejecting compressed messages (no grpc-encoding is
+// negotiated). Returns io.EOF when the stream closes cleanly between messages.
+func readStreamingLP(r io.Reader) ([]byte, error) {
+	hdr := make([]byte, grpcMessageHeader)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		return nil, err // io.EOF when stream closed
+	}
+	if hdr[0] == FlagCompressed {
+		return nil, Statusf(Unimplemented, "message compression not supported")
+	}
+	length := int(binary.BigEndian.Uint32(hdr[1:5]))
+	if length > maxRecvMessageSize {
+		return nil, ErrMessageTooLarge // -> RESOURCE_EXHAUSTED via errToStatus
+	}
+	if length == 0 {
+		return nil, nil
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 // codeToString converts a Code to its decimal string representation.

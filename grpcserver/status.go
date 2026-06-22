@@ -109,6 +109,7 @@ const (
 	HeaderGRPCStatus        = "grpc-status"
 	HeaderGRPCMessage       = "grpc-message"
 	HeaderGRPCStatusDetails = "grpc-status-details-bin"
+	HeaderGRPCTimeout       = "grpc-timeout"
 	HeaderContentType       = "content-type"
 	ContentTypeGRPC         = "application/grpc"
 	HeaderTE                = "te"
