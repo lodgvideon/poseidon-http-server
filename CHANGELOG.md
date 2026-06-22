@@ -136,6 +136,19 @@ Kubernetes deployment assets. It includes a few **breaking** API changes — see
 - **Per-client rate limiting via `KeyByClientIP()`.** Buckets the token-bucket
   limiter by the RealIP-resolved client IP; fail-closed (unresolved IP → shared
   bucket) so unidentifiable traffic is throttled rather than exempt.
+- **Bounded rate-limiter memory (eviction).** The token-bucket limiter no longer
+  grows its per-key bucket map without limit — closing a memory-exhaustion DoS
+  reachable via `KeyByClientIP()` (an attacker streaming distinct source IPs,
+  trivial over IPv6). It now caps the map at `RateLimitConfig.MaxBuckets`
+  (default `DefaultMaxBuckets` = 65536, evicting the oldest bucket via an O(1)
+  intrusive list — no scan a flood could amplify into CPU load) and
+  opportunistically evicts buckets idle past `BucketIdleTTL` (default
+  `max(10m, refill-to-full)`, so an evicted idle bucket has always refilled to
+  full and its eviction is loss-free). Both follow the `0 = secure default,
+  <0 = disabled, >0 = explicit` convention. The cap is **on by default**: a
+  caller wanting the old unbounded behaviour sets `MaxBuckets: -1`. An evicted
+  key gets a fresh full bucket on its next request — identical to a first-seen
+  key, so eviction grants an attacker no extra capacity.
 
 ### Migration
 
