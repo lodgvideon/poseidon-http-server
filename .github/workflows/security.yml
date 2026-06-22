@@ -27,7 +27,7 @@ jobs:
       - name: Check out poseidon-http-client (replace target)
         run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
 
