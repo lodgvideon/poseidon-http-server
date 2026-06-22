@@ -161,8 +161,19 @@ func (ss *ServerStream) SendData(ctx context.Context, p []byte, endStream bool) 
 	return nil
 }
 
-// Recv blocks until the next event is ready.
+// Recv blocks until the next event is ready. A buffered event is always returned
+// in preference to context cancellation, so a final event delivered in the same
+// step as the stream's completion or reset (markStreamDone cancels the context)
+// is never dropped.
 func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
+	select {
+	case e, ok := <-ss.events:
+		if !ok {
+			return StreamEvent{}, ErrStreamClosed
+		}
+		return e, nil
+	default:
+	}
 	select {
 	case e, ok := <-ss.events:
 		if !ok {

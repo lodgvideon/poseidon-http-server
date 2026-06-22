@@ -123,7 +123,8 @@ func (w *responseWriter) PushWithScheme(promisePath, promiseScheme string, promi
 	// Wrap it in a ResponseWriter.
 	return &responseWriter{
 		sw:  &connStreamWriter{stream: pushStream},
-		req: w.req, // propagate request context for nested Push
+		ctx: pushStream.Context(), // cancel a pushed response on push-stream reset
+		req: w.req,                // propagate request context for nested Push
 	}, nil
 }
 
@@ -163,6 +164,7 @@ func (w *responseWriter) pushWithPriorityAndScheme(promisePath, promiseScheme st
 	}
 	return &responseWriter{
 		sw:  &connStreamWriter{stream: pushStream},
+		ctx: pushStream.Context(),
 		req: w.req,
 	}, nil
 }

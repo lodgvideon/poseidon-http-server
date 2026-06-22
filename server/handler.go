@@ -258,7 +258,7 @@ func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	})
 	fields = append(fields, headers...)
 
-	return w.sw.sendHeaders(w.reqCtx(),fields, false)
+	return w.sw.sendHeaders(w.reqCtx(), fields, false)
 }
 
 // WriteData sends response body data. If headers have not been sent yet it
@@ -269,13 +269,13 @@ func (w *responseWriter) WriteData(p []byte) error {
 			return err
 		}
 	}
-	return w.sw.sendData(w.reqCtx(),p, false)
+	return w.sw.sendData(w.reqCtx(), p, false)
 }
 
 // WriteTrailers sends trailing headers using SendHeaders with endStream=true
 // (the conn package does not expose a dedicated trailer method).
 func (w *responseWriter) WriteTrailers(trailers []hpack.HeaderField) error {
-	return w.sw.sendHeaders(w.reqCtx(),trailers, true)
+	return w.sw.sendHeaders(w.reqCtx(), trailers, true)
 }
 
 // --- http.ResponseWriter interface ------------------------------------------
@@ -295,7 +295,7 @@ func (w *responseWriter) Write(p []byte) (int, error) {
 	if !w.written {
 		w.WriteHeader(http.StatusOK)
 	}
-	if err := w.sw.sendData(w.reqCtx(),p, false); err != nil {
+	if err := w.sw.sendData(w.reqCtx(), p, false); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -332,7 +332,7 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 		}
 	}
 
-	_ = w.sw.sendHeaders(w.reqCtx(),fields, false)
+	_ = w.sw.sendHeaders(w.reqCtx(), fields, false)
 }
 
 // Status returns the HTTP status code set via WriteHeaders or WriteHeader.

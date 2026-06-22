@@ -48,8 +48,10 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	sc.smu.Lock()
 	if limit > 0 && len(sc.streams) >= limit {
 		sc.smu.Unlock()
-		// At the concurrency limit: refuse rather than register. The RST is a
-		// best-effort write (ignored if the connection is already tearing down).
+		// At the concurrency limit: refuse rather than register. Record the ID as
+		// used (RFC 9113 §5.1.1) so it cannot be reused, then RST (best-effort,
+		// ignored if the connection is already tearing down).
+		sc.noteClientStreamID(id)
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
 		return false
 	}
@@ -135,17 +137,14 @@ func (sc *ServerConn) writePingAck(payload [8]byte) error {
 	return nil
 }
 
-// applyPeerSettings applies client SETTINGS. Handles retroactive
-// INITIAL_WINDOW_SIZE delta on all open streams (RFC 7540 §6.9.2).
-func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
+// validatePeerSettings enforces the RFC 9113 §6.5.2 value bounds. A violation is
+// a connection error (PROTOCOL_ERROR or FLOW_CONTROL_ERROR); unknown settings
+// are ignored. Used for BOTH the handshake SETTINGS and mid-connection updates.
+func validatePeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
-
-	// Validate before applying (RFC 9113 §6.5.2): an out-of-range value is a
-	// connection error, so reject up front rather than half-applying the frame.
 	for i := range s.N {
 		p := s.Pairs[i]
-		//nolint:exhaustive // only the bounded settings need validation; unknown
-		// or unbounded settings are ignored per RFC 9113 §6.5.2 (see default).
+		//nolint:exhaustive // only bounded settings are validated; others ignored per RFC 9113 §6.5.2
 		switch p.ID {
 		case frame.SettingEnablePush:
 			if p.Value > 1 {
@@ -160,10 +159,18 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 				return connError{code: frame.ErrCodeProtocolError, msg: "SETTINGS_MAX_FRAME_SIZE out of range [16384, 16777215]"}
 			}
 		default:
-			// Other settings (HEADER_TABLE_SIZE, MAX_CONCURRENT_STREAMS,
-			// MAX_HEADER_LIST_SIZE) carry no out-of-range value to reject here.
 		}
 	}
+	return nil
+}
+
+// applyPeerSettings applies client SETTINGS. Handles retroactive
+// INITIAL_WINDOW_SIZE delta on all open streams (RFC 7540 §6.9.2).
+func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
+	if err := validatePeerSettings(s); err != nil {
+		return err
+	}
+	const maxWindow = int64(1<<31 - 1)
 
 	sc.psMu.Lock()
 	oldInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
@@ -235,11 +242,11 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		// RFC 9113 §6.9.1: a WINDOW_UPDATE overflowing a STREAM flow-control
 		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a
 		// connection error — the connection and its other streams survive.
-		_ = sc.writeServerRSTStream(s, frame.ErrCodeFlowControlError)
 		// Notify a handler reading this stream that it was reset (mirrors
-		// OnRSTStream) so a request-streaming handler stops instead of running
-		// against a stream the server has already torn down.
+		// OnRSTStream) before writeServerRSTStream releases and cancels it, so the
+		// reset event is delivered ahead of the context cancellation.
 		s.push(StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeFlowControlError, EndStream: true})
+		_ = sc.writeServerRSTStream(s, frame.ErrCodeFlowControlError)
 		return nil
 	}
 		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above

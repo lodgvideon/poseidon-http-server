@@ -92,19 +92,28 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
 	dataCopy := append([]byte(nil), p...)
+	// Deliver the DATA (and its EOF) to the handler BEFORE releasing the stream:
+	// markStreamDone cancels the stream context, and Recv must not drop the final
+	// event in favour of cancellation.
+	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
 	if end && s.markRemoteEnd() {
 		// Release only once the server has also ended; until then the stream
 		// stays registered (half-closed remote) so its WINDOW_UPDATE and
 		// RST_STREAM still reach it (RFC 7540 §5.1).
 		h.streams.markStreamDone(fh.StreamID)
 	}
-	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
 	return nil
 }
 
 func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, prio *frame.Priority, _ uint8) error {
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
+	}
+	// A client must never send HEADERS on an even (server-initiated) stream ID
+	// (RFC 9113 §5.1.1) — including one colliding with a live push stream, which
+	// would otherwise be treated as an existing stream and bypass validation.
+	if fh.StreamID%2 == 0 {
+		return connError{code: frame.ErrCodeProtocolError, msg: "client HEADERS on even (server-initiated) stream ID"}
 	}
 	end := fh.Flags&frame.FlagHeadersEndStream != 0
 	endHeaders := fh.Flags&frame.FlagHeadersEndHeaders != 0
@@ -233,12 +242,6 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	if isTrailer {
 		evType = EventTrailers
 	}
-	if endStream && s.markRemoteEnd() {
-		// Half-closed (remote): keep the stream registered until the server
-		// also ends, so WINDOW_UPDATE/RST_STREAM still reach it (RFC 7540 §5.1).
-		h.streams.markStreamDone(s.id)
-	}
-
 	// Copy the decoded headers into a single right-sized backing slab the event
 	// owns. The reader goroutine reuses h.scratch immediately after this returns,
 	// and the handler goroutine may retain the fields (req.Headers alias the
@@ -269,6 +272,12 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		Headers:   copied,
 		EndStream: endStream,
 	})
+	if endStream && s.markRemoteEnd() {
+		// Release once both halves have ended (a half-closed-remote stream stays
+		// registered for WINDOW_UPDATE/RST_STREAM, RFC 7540 §5.1). AFTER the push
+		// so the handler observes the headers/EOF before the context is cancelled.
+		h.streams.markStreamDone(s.id)
+	}
 	return nil
 }
 
@@ -295,8 +304,9 @@ func (h *serverConnHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode
 	// open (the rapid-reset signal), then hard-close the stream — RST is an
 	// unconditional close regardless of the local half.
 	rapid := s.markRemoteEndReset()
-	h.streams.markStreamDone(fh.StreamID)
+	// Deliver the reset event before releasing (and cancelling) the stream.
 	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
+	h.streams.markStreamDone(fh.StreamID)
 	return h.streams.onClientRSTStream(fh.StreamID, rapid)
 }
 

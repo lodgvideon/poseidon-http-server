@@ -254,6 +254,18 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		_ = nc.Close()
 		return nil, err
 	}
+	// Validate the client's INITIAL SETTINGS (RFC 9113 §6.5.2). The handshake
+	// path does not flow through applyPeerSettings, so a bad initial value — e.g.
+	// an INITIAL_WINDOW_SIZE that would make every stream's send window negative —
+	// must be rejected here, with a GOAWAY carrying the right error code.
+	if verr := validatePeerSettings(peer); verr != nil {
+		var ce connError
+		if errors.As(verr, &ce) {
+			sc.sendGoAway(ce.code)
+		}
+		_ = nc.Close()
+		return nil, verr
+	}
 	sc.psMu.Lock()
 	sc.peerSettings = peer
 	sc.psMu.Unlock()
