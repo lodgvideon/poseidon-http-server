@@ -212,6 +212,10 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a
 		// connection error — the connection and its other streams survive.
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeFlowControlError)
+		// Notify a handler reading this stream that it was reset (mirrors
+		// OnRSTStream) so a request-streaming handler stops instead of running
+		// against a stream the server has already torn down.
+		s.push(StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeFlowControlError, EndStream: true})
 		return nil
 	}
 		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
