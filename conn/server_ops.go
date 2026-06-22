@@ -34,10 +34,15 @@ func (sc *ServerConn) lookupStream(id uint32) *ServerStream {
 	return sc.streams[id]
 }
 
-// registerStream adds a new stream to the registry and delivers it
-// to AcceptStream via acceptCh. Seeds the stream's send window from
-// the peer's SETTINGS_INITIAL_WINDOW_SIZE.
-func (sc *ServerConn) registerStream(id uint32, s *ServerStream) {
+// registerStream adds a new stream to the registry and delivers it to
+// AcceptStream via acceptCh, seeding its send window from the peer's
+// SETTINGS_INITIAL_WINDOW_SIZE. It enforces the advertised
+// SETTINGS_MAX_CONCURRENT_STREAMS limit: if the connection already has that
+// many open/half-closed streams, the new stream is refused with
+// RST_STREAM(REFUSED_STREAM) (RFC 9113 §5.1.2) and the function returns false
+// without registering it. REFUSED_STREAM signals the request was not processed,
+// so the client may safely retry it on a fresh connection.
+func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	// Seed per-stream send window from peer's INITIAL_WINDOW_SIZE.
 	sc.psMu.RLock()
 	initial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
@@ -45,20 +50,28 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) {
 	s.mu.Lock()
 		s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
 	s.mu.Unlock()
+	s.sc = sc
 
+	limit := int(sc.opts.AdvertisedSettings.MaxConcurrentStreams)
 	sc.smu.Lock()
+	if limit > 0 && len(sc.streams) >= limit {
+		sc.smu.Unlock()
+		// At the concurrency limit: refuse rather than register. The RST is a
+		// best-effort write (ignored if the connection is already tearing down).
+		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
+		return false
+	}
 	sc.streams[id] = s
 	sc.smu.Unlock()
 	sc.noteClientStreamID(id)
 	sc.atomicStreamsAccepted.Add(1)
-
-	s.sc = sc
 
 	select {
 	case sc.acceptCh <- s:
 	default:
 		_ = s.Close()
 	}
+	return true
 }
 
 // onClientRSTStream accounts a client-initiated RST_STREAM for Rapid Reset

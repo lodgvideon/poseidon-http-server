@@ -8,7 +8,10 @@ import (
 // serverConnOps is the contract server_handler.go needs from ServerConn.
 type serverConnOps interface {
 	lookupStream(id uint32) *ServerStream
-	registerStream(id uint32, s *ServerStream)
+	// registerStream registers a new client stream, returning false if it was
+	// refused for exceeding SETTINGS_MAX_CONCURRENT_STREAMS (RST_STREAM already
+	// sent). The caller must not process a refused stream.
+	registerStream(id uint32, s *ServerStream) bool
 	markStreamDone(id uint32)
 	writeSettingsAck() error
 	writePingAck(payload [8]byte) error
@@ -104,7 +107,11 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 
 	if isNew {
 		s = newServerStream(fh.StreamID, 8, nil, int32(connInitialRecvWindow))
-		h.streams.registerStream(fh.StreamID, s)
+		if !h.streams.registerStream(fh.StreamID, s) {
+			// Refused for exceeding MaxConcurrentStreams; RST_STREAM already
+			// sent. Do not process or buffer this stream's header block.
+			return nil
+		}
 	}
 
 	// RFC 7540 §5.3: priority block is sent only on the first HEADERS

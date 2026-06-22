@@ -123,7 +123,7 @@ type mockConnOps struct {
 }
 
 func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
-func (m *mockConnOps) registerStream(id uint32, s *ServerStream)           { m.streams[id] = s }
+func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool      { m.streams[id] = s; return true }
 func (m *mockConnOps) markStreamDone(id uint32)                            { delete(m.streams, id) }
 func (m *mockConnOps) writeSettingsAck() error                             { m.settingsAckCalled = true; return nil }
 func (m *mockConnOps) writePingAck(_ [8]byte) error                      { m.pingAckCalled = true; return nil }
