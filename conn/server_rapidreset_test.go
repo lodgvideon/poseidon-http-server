@@ -112,6 +112,15 @@ func TestServerConn_RapidReset_TripsGoAway(t *testing.T) {
 		t.Fatal("server did not emit GOAWAY(ENHANCE_YOUR_CALM) under rapid-reset flood")
 	}
 	<-done
+
+	// Stats must surface the rapid-reset and GOAWAY activity for metrics.
+	st := sc.Stats()
+	if st.RapidResets == 0 {
+		t.Errorf("Stats.RapidResets = 0, want > 0 after a rapid-reset flood")
+	}
+	if !st.GoAwaySent {
+		t.Error("Stats.GoAwaySent = false, want true after the server emitted GOAWAY")
+	}
 }
 
 // TestServerConn_RapidReset_NoFalsePositive verifies that a small number

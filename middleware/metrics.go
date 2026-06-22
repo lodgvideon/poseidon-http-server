@@ -77,15 +77,17 @@ type MetricsCollector struct {
 	// requestBytes tracks total request body bytes by method+path.
 	reqBytes map[string]*atomic.Int64
 
-	// responseBytes tracks total response body bytes by method+path.
-	respBytes map[string]*atomic.Int64
-
 	// histograms tracks request-duration distributions by method+path,
 	// completing the RED method (Rate/Errors/Duration).
 	histograms map[string]*histogram
 
 	// activeRequests tracks in-flight requests.
 	active atomic.Int64
+
+	// transportSrc, when set via SetTransportSource, supplies HTTP/2 transport
+	// counters (bytes/frames/streams, rapid-resets, GOAWAYs, active conns) for
+	// exposition. Guarded by mu like the maps above.
+	transportSrc func() server.TransportStats
 }
 
 // NewMetricsCollector creates an empty MetricsCollector.
@@ -94,9 +96,18 @@ func NewMetricsCollector() *MetricsCollector {
 		counters:   make(map[string]*atomic.Int64),
 		durations:  make(map[string]*atomic.Int64),
 		reqBytes:   make(map[string]*atomic.Int64),
-		respBytes:  make(map[string]*atomic.Int64),
 		histograms: make(map[string]*histogram),
 	}
+}
+
+// SetTransportSource registers a provider of HTTP/2 transport counters (e.g.
+// (*server.Server).TransportStats) so WritePrometheus can export connection,
+// byte, frame, stream, rapid-reset, and GOAWAY metrics alongside the per-request
+// ones. Pass nil to disable transport exposition. Safe for concurrent use.
+func (c *MetricsCollector) SetTransportSource(src func() server.TransportStats) {
+	c.mu.Lock()
+	c.transportSrc = src
+	c.mu.Unlock()
 }
 
 // counterKey returns the metrics key for a request.
@@ -289,6 +300,17 @@ func (c *MetricsCollector) WritePrometheus() string {
 			parts[0], parts[1], seconds)
 	}
 
+	sb.WriteString("\n# HELP poseidon_request_bytes_total Total request body bytes by method and path.\n")
+	sb.WriteString("# TYPE poseidon_request_bytes_total counter\n")
+	for key, ctr := range c.reqBytes {
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		fmt.Fprintf(&sb, "poseidon_request_bytes_total{method=%q,path=%q} %d\n",
+			parts[0], parts[1], ctr.Load())
+	}
+
 	sb.WriteString("\n# HELP poseidon_request_duration_seconds Request latency distribution in seconds.\n")
 	sb.WriteString("# TYPE poseidon_request_duration_seconds histogram\n")
 	for key, h := range c.histograms {
@@ -323,7 +345,39 @@ func (c *MetricsCollector) WritePrometheus() string {
 	sb.WriteString("# TYPE poseidon_active_requests gauge\n")
 	fmt.Fprintf(&sb, "poseidon_active_requests %d\n", c.active.Load())
 
+	c.writeTransport(&sb)
+
 	return sb.String()
+}
+
+// writeTransport appends HTTP/2 transport metrics when a source is registered.
+// Caller holds c.mu (read lock).
+func (c *MetricsCollector) writeTransport(sb *strings.Builder) {
+	if c.transportSrc == nil {
+		return
+	}
+	t := c.transportSrc()
+
+	sb.WriteString("\n# HELP poseidon_connections_active Current open HTTP/2 connections.\n")
+	sb.WriteString("# TYPE poseidon_connections_active gauge\n")
+	fmt.Fprintf(sb, "poseidon_connections_active %d\n", t.ActiveConns)
+
+	// Monotonic transport counters.
+	type counter struct {
+		name, help string
+		val        uint64
+	}
+	for _, m := range []counter{
+		{"poseidon_bytes_sent_total", "Total bytes written to clients across all connections.", uint64(t.BytesSent)},
+		{"poseidon_bytes_received_total", "Total bytes read from clients across all connections.", uint64(t.BytesReceived)},
+		{"poseidon_frames_sent_total", "Total HTTP/2 frames written across all connections.", uint64(t.FramesSent)},
+		{"poseidon_frames_received_total", "Total HTTP/2 frames read across all connections.", uint64(t.FramesReceived)},
+		{"poseidon_streams_accepted_total", "Total HTTP/2 streams accepted across all connections.", t.StreamsAccepted},
+		{"poseidon_rapid_resets_total", "Total client RST_STREAM frames charged against the Rapid Reset budget (CVE-2023-44487).", t.RapidResets},
+		{"poseidon_goaways_sent_total", "Total connections on which the server emitted a GOAWAY.", t.GoAways},
+	} {
+		fmt.Fprintf(sb, "\n# HELP %s %s\n# TYPE %s counter\n%s %d\n", m.name, m.help, m.name, m.name, m.val)
+	}
 }
 
 // formatBucketBound renders a histogram upper bound for the le label using the

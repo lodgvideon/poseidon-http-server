@@ -28,23 +28,22 @@ func TestMetricsCollector_TotalDuration(t *testing.T) {
 }
 
 // getOrCreateBytes must return the same counter for repeated keys (create then
-// hit path) — exercised here against the response-bytes store, which the
-// Metrics middleware itself never populates.
-func TestMetricsCollector_GetOrCreateBytes_ResponseStore(t *testing.T) {
+// hit path).
+func TestMetricsCollector_GetOrCreateBytes_HitPath(t *testing.T) {
 	t.Parallel()
 
 	mc := NewMetricsCollector()
 	key := durationKey("POST", "/r")
 
-	first := mc.getOrCreateBytes(mc.respBytes, key)
+	first := mc.getOrCreateBytes(mc.reqBytes, key)
 	first.Add(123)
-	second := mc.getOrCreateBytes(mc.respBytes, key) // hit (already-exists) path
+	second := mc.getOrCreateBytes(mc.reqBytes, key) // hit (already-exists) path
 
 	if first != second {
 		t.Fatal("getOrCreateBytes returned different counters for the same key")
 	}
 	if got := second.Load(); got != 123 {
-		t.Fatalf("respBytes = %d, want 123", got)
+		t.Fatalf("reqBytes = %d, want 123", got)
 	}
 }
 

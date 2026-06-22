@@ -132,14 +132,28 @@ type Server struct {
 	opts         Options
 	maxBodyBytes int64 // resolved: >0 limit, -1 unlimited
 	logger       Logger
-	mu        sync.Mutex
-	closed    bool
-	shutdown  bool
-	listener  net.Listener
-	conns     map[*conn.ServerConn]struct{}
-	inFlight  sync.WaitGroup // active streams being served
-	done      chan struct{}
-	closeCh   chan struct{}
+	mu           sync.Mutex
+	closed       bool
+	shutdown     bool
+	listener     net.Listener
+	conns        map[*conn.ServerConn]struct{}
+	closedStats  transportTotals // counters folded in from closed conns (guarded by mu)
+	inFlight     sync.WaitGroup  // active streams being served
+	done         chan struct{}
+	closeCh      chan struct{}
+}
+
+// transportTotals accumulates ConnStats from connections that have closed, so
+// TransportStats can report monotonic counters (closed totals + live conns).
+// Guarded by Server.mu.
+type transportTotals struct {
+	bytesSent       int64
+	bytesReceived   int64
+	framesSent      int64
+	framesReceived  int64
+	streamsAccepted uint64
+	rapidResets     uint64
+	goAways         uint64
 }
 
 // NewServer validates opts and returns a ready-to-serve Server. It returns a
@@ -489,8 +503,30 @@ func (s *Server) trackConn(sc *conn.ServerConn, add bool) {
 	if add {
 		s.conns[sc] = struct{}{}
 	} else {
-		delete(s.conns, sc)
+		s.forgetConn(sc)
 	}
+}
+
+// forgetConn removes sc from the live set, folding its final counters into
+// closedStats so transport totals stay monotonic across connection close. It is
+// idempotent (a no-op if sc is already gone), so the per-connection teardown
+// defer and Close/Shutdown can all funnel through it without double-counting.
+// Caller must hold s.mu.
+func (s *Server) forgetConn(sc *conn.ServerConn) {
+	if _, ok := s.conns[sc]; !ok {
+		return
+	}
+	st := sc.Stats()
+	s.closedStats.bytesSent += st.BytesSent
+	s.closedStats.bytesReceived += st.BytesReceived
+	s.closedStats.framesSent += st.FramesSent
+	s.closedStats.framesReceived += st.FramesReceived
+	s.closedStats.streamsAccepted += uint64(st.StreamsAccepted)
+	s.closedStats.rapidResets += uint64(st.RapidResets)
+	if st.GoAwaySent {
+		s.closedStats.goAways++
+	}
+	delete(s.conns, sc)
 }
 
 // ConnCount returns the number of connections the server is currently tracking.
@@ -498,6 +534,52 @@ func (s *Server) ConnCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
+}
+
+// TransportStats is an aggregate, point-in-time snapshot of HTTP/2 transport
+// counters across every connection the server has handled. The byte/frame/stream
+// and rapid-reset/GOAWAY fields are monotonic counters (they include connections
+// that have since closed); ActiveConns is a gauge of currently-open connections.
+type TransportStats struct {
+	ActiveConns     int
+	BytesSent       int64
+	BytesReceived   int64
+	FramesSent      int64
+	FramesReceived  int64
+	StreamsAccepted uint64
+	RapidResets     uint64
+	GoAways         uint64
+}
+
+// TransportStats returns the aggregate transport counters across all live and
+// closed connections. Safe for concurrent use. Suitable as the source for a
+// metrics exporter (see middleware.MetricsCollector.SetTransportSource).
+func (s *Server) TransportStats() TransportStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ts := TransportStats{
+		ActiveConns:     len(s.conns),
+		BytesSent:       s.closedStats.bytesSent,
+		BytesReceived:   s.closedStats.bytesReceived,
+		FramesSent:      s.closedStats.framesSent,
+		FramesReceived:  s.closedStats.framesReceived,
+		StreamsAccepted: s.closedStats.streamsAccepted,
+		RapidResets:     s.closedStats.rapidResets,
+		GoAways:         s.closedStats.goAways,
+	}
+	for sc := range s.conns {
+		st := sc.Stats()
+		ts.BytesSent += st.BytesSent
+		ts.BytesReceived += st.BytesReceived
+		ts.FramesSent += st.FramesSent
+		ts.FramesReceived += st.FramesReceived
+		ts.StreamsAccepted += uint64(st.StreamsAccepted)
+		ts.RapidResets += uint64(st.RapidResets)
+		if st.GoAwaySent {
+			ts.GoAways++
+		}
+	}
+	return ts
 }
 
 // Addr returns the listener address, or nil if not listening.
@@ -526,7 +608,7 @@ func (s *Server) Close() error {
 	}
 	for sc := range s.conns {
 		_ = sc.Close()
-		delete(s.conns, sc)
+		s.forgetConn(sc)
 	}
 	return nil
 }
@@ -586,7 +668,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.mu.Lock()
 		for _, sc := range conns {
 			_ = sc.Close()
-			delete(s.conns, sc)
+			s.forgetConn(sc)
 		}
 		s.mu.Unlock()
 		return ctx.Err()
@@ -596,7 +678,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	for _, sc := range conns {
 		_ = sc.Close()
-		delete(s.conns, sc)
+		s.forgetConn(sc)
 	}
 	s.mu.Unlock()
 	return nil
