@@ -253,7 +253,9 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
 			if err != nil {
 				return
 			}
-			go s.serveStream(stream)
+			if !s.spawnStream(stream) {
+				return
+			}
 		}
 	}
 	for {
@@ -261,12 +263,32 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
 		if err != nil {
 			return
 		}
-		go s.serveStream(stream)
+		if !s.spawnStream(stream) {
+			return
+		}
 	}
 }
 
-func (s *Server) serveStream(stream *conn.ServerStream) {
+// spawnStream begins serving stream unless the server is shutting down. It
+// increments inFlight under s.mu, synchronized with Shutdown/Close (which set
+// s.shutdown/s.closed under the same lock before waiting on inFlight) — so an
+// Add can never race a returning inFlight.Wait(), the documented WaitGroup
+// misuse. Returns false when the server is draining, signalling the accept loop
+// to stop; the just-accepted stream is reset so the client can retry elsewhere.
+func (s *Server) spawnStream(stream *conn.ServerStream) bool {
+	s.mu.Lock()
+	if s.shutdown || s.closed {
+		s.mu.Unlock()
+		_ = stream.Close() // refuse a stream that arrived after drain began
+		return false
+	}
 	s.inFlight.Add(1)
+	s.mu.Unlock()
+	go s.serveStream(stream)
+	return true
+}
+
+func (s *Server) serveStream(stream *conn.ServerStream) {
 	defer s.inFlight.Done()
 
 	// Backstop panic isolation: a panic anywhere in the request lifecycle
