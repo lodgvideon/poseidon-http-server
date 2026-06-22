@@ -234,7 +234,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	// Steps 3-5: handshake — read client SETTINGS, send ACK, read ACK.
 	// Create the real frame handler early so that non-SETTINGS frames
 	// arriving during the handshake (e.g. HEADERS) are not lost.
-	h := newServerConnHandler(sc, sc.dec)
+	h := newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize))
 	peer, err := handshakeServerSettings(ctx, sc.fr, h)
 	if err != nil {
 		_ = nc.Close()
@@ -521,7 +521,7 @@ func (sc *ServerConn) bumpFramesSent() { sc.atomicFramesSent.Add(1) }
 // readerLoop reads frames from the connection and dispatches them.
 func (sc *ServerConn) readerLoop() {
 	defer close(sc.readerDone)
-	h := newServerConnHandler(sc, sc.dec)
+	h := newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize))
 	for {
 		_, err := sc.fr.ReadFrame(context.Background(), h)
 		if err != nil {
