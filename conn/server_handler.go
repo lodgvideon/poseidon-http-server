@@ -8,6 +8,9 @@ import (
 // serverConnOps is the contract server_handler.go needs from ServerConn.
 type serverConnOps interface {
 	lookupStream(id uint32) *ServerStream
+	// validateClientStreamID enforces RFC 9113 §5.1.1 (odd, strictly increasing)
+	// for a newly opened client stream, returning a connError on violation.
+	validateClientStreamID(id uint32) error
 	// registerStream registers a new client stream, returning false if it was
 	// refused for exceeding SETTINGS_MAX_CONCURRENT_STREAMS (RST_STREAM already
 	// sent). The caller must not process a refused stream.
@@ -117,6 +120,11 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	// subsequent stream on the connection.
 	refused := false
 	if isNew {
+		// RFC 9113 §5.1.1: reject an even or non-increasing client stream ID
+		// (a connection PROTOCOL_ERROR) before allocating anything for it.
+		if err := h.streams.validateClientStreamID(fh.StreamID); err != nil {
+			return err
+		}
 		s = newServerStream(fh.StreamID, 8, nil, int32(connInitialRecvWindow))
 		if !h.streams.registerStream(fh.StreamID, s) {
 			refused = true

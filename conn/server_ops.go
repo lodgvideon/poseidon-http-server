@@ -140,6 +140,31 @@ func (sc *ServerConn) writePingAck(payload [8]byte) error {
 func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
 
+	// Validate before applying (RFC 9113 §6.5.2): an out-of-range value is a
+	// connection error, so reject up front rather than half-applying the frame.
+	for i := range s.N {
+		p := s.Pairs[i]
+		//nolint:exhaustive // only the bounded settings need validation; unknown
+		// or unbounded settings are ignored per RFC 9113 §6.5.2 (see default).
+		switch p.ID {
+		case frame.SettingEnablePush:
+			if p.Value > 1 {
+				return connError{code: frame.ErrCodeProtocolError, msg: "SETTINGS_ENABLE_PUSH must be 0 or 1"}
+			}
+		case frame.SettingInitialWindowSize:
+			if int64(p.Value) > maxWindow {
+				return connError{code: frame.ErrCodeFlowControlError, msg: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
+			}
+		case frame.SettingMaxFrameSize:
+			if p.Value < 16384 || p.Value > 16777215 {
+				return connError{code: frame.ErrCodeProtocolError, msg: "SETTINGS_MAX_FRAME_SIZE out of range [16384, 16777215]"}
+			}
+		default:
+			// Other settings (HEADER_TABLE_SIZE, MAX_CONCURRENT_STREAMS,
+			// MAX_HEADER_LIST_SIZE) carry no out-of-range value to reject here.
+		}
+	}
+
 	sc.psMu.Lock()
 	oldInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := range s.N {

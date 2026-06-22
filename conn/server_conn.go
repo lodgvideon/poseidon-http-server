@@ -409,6 +409,21 @@ func (sc *ServerConn) noteClientStreamID(id uint32) {
 	}
 }
 
+// validateClientStreamID enforces RFC 9113 §5.1.1 for a newly opened client
+// stream: the ID must be odd and strictly greater than every client stream ID
+// already seen. An even ID, or a reused/decreasing ID (idle-stream reuse), is a
+// connection error of type PROTOCOL_ERROR. Called only for new streams, on the
+// single reader goroutine, before registerStream advances maxClientStreamID.
+func (sc *ServerConn) validateClientStreamID(id uint32) error {
+	if id%2 == 0 {
+		return connError{code: frame.ErrCodeProtocolError, msg: "client-initiated stream ID must be odd"}
+	}
+	if id <= sc.maxClientStreamID.Load() {
+		return connError{code: frame.ErrCodeProtocolError, msg: "client stream ID must exceed all previous client streams"}
+	}
+	return nil
+}
+
 func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
 	for i := range peer.N {
 		p := peer.Pairs[i]

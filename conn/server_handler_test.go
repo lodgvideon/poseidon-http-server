@@ -124,6 +124,7 @@ type mockConnOps struct {
 }
 
 func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
+func (m *mockConnOps) validateClientStreamID(uint32) error { return nil }
 func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool {
 	if m.refuseAfter > 0 && len(m.streams) >= m.refuseAfter {
 		return false
