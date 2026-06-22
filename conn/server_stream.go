@@ -91,7 +91,6 @@ type StreamEvent struct {
 	Data      []byte
 	EndStream bool
 	RSTCode   frame.ErrCode
-	Slab      *[]byte
 }
 
 // ID returns the HTTP/2 stream identifier.

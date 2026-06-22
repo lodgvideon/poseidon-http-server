@@ -9,14 +9,6 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-// HeaderSlabPool recycles the byte backing for HPACK-decoded header fields.
-var HeaderSlabPool = &sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 512)
-		return &b
-	},
-}
-
 // encBufPool recycles the HPACK block-fragment buffer used by writeServerHeaders.
 var encBufPool = sync.Pool{
 	New: func() any {

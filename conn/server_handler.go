@@ -231,19 +231,27 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		h.streams.markStreamDone(s.id)
 	}
 
-	// Copy headers for the event.
-	slabPtr := HeaderSlabPool.Get().(*[]byte)
-	*slabPtr = (*slabPtr)[:0]
+	// Copy the decoded headers into a single right-sized backing slab the event
+	// owns. The reader goroutine reuses h.scratch immediately after this returns,
+	// and the handler goroutine may retain the fields (req.Headers alias the
+	// slab), so a sync.Pool would be unsafe — like net/http we allocate per
+	// request. Pre-sizing to the exact total means the appends never reallocate,
+	// keeping the three-index sub-slices valid.
+	total := 0
+	for i := range h.scratch {
+		total += len(h.scratch[i].Name) + len(h.scratch[i].Value)
+	}
+	slab := make([]byte, 0, total)
 	copied := make([]hpack.HeaderField, len(h.scratch))
 	for i, f := range h.scratch {
-		nameOff := len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Name...)
-		valOff := len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Value...)
-		endOff := len(*slabPtr)
+		nameOff := len(slab)
+		slab = append(slab, f.Name...)
+		valOff := len(slab)
+		slab = append(slab, f.Value...)
+		endOff := len(slab)
 		copied[i] = hpack.HeaderField{
-			Name:      (*slabPtr)[nameOff:valOff:valOff],
-			Value:     (*slabPtr)[valOff:endOff:endOff],
+			Name:      slab[nameOff:valOff:valOff],
+			Value:     slab[valOff:endOff:endOff],
 			Sensitive: f.Sensitive,
 		}
 	}
@@ -251,7 +259,6 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	s.push(StreamEvent{
 		Type:      evType,
 		Headers:   copied,
-		Slab:      slabPtr,
 		EndStream: endStream,
 	})
 	return nil
