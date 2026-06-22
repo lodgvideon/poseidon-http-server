@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 
@@ -318,10 +319,20 @@ func gzipCompress(src []byte, level int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// DefaultMaxDecompressedSize bounds the output of [DecompressBody] to mitigate
+// decompression bombs — a tiny gzip stream that inflates to gigabytes and
+// exhausts memory. Callers needing a different ceiling use [DecompressBodyLimit].
+const DefaultMaxDecompressedSize = 10 << 20 // 10 MiB
+
+// ErrBodyTooLarge is returned while reading a body opened by [DecompressBody]
+// or [DecompressBodyLimit] when the decompressed size exceeds the limit.
+var ErrBodyTooLarge = errors.New("poseidon: decompressed body exceeds limit")
+
 // gzipReadCloser wraps a gzip.Reader so callers can decompress
 // gzip-compressed request bodies.
 type gzipReadCloser struct {
-	gr io.ReadCloser
+	gr   io.ReadCloser
+	body io.Closer // underlying source; gzip.Reader.Close does not close it
 }
 
 // Read decompresses data from the underlying gzip reader.
@@ -329,18 +340,95 @@ func (g *gzipReadCloser) Read(p []byte) (int, error) {
 	return g.gr.Read(p)
 }
 
-// Close closes the underlying gzip reader.
+// Close closes the gzip reader and the underlying source body. gzip.Reader.Close
+// only finalizes the decompressor, so we close the source explicitly to avoid
+// leaking it.
 func (g *gzipReadCloser) Close() error {
-	return g.gr.Close()
+	err := g.gr.Close()
+	if g.body != nil {
+		if cerr := g.body.Close(); err == nil {
+			err = cerr
+		}
+	}
+	return err
 }
 
-// DecompressBody decompresses a gzip-compressed request body.
-// Returns a ReadCloser that must be closed by the caller.
+// limitedDecompressReader caps total decompressed output at a fixed budget and
+// returns [ErrBodyTooLarge] if the source would produce more. A body exactly at
+// the limit is allowed; only strictly larger input is rejected.
+//
+// It deliberately does NOT use io.LimitReader, which signals EOF at the limit
+// and so silently truncates — turning an attack into a plausibly-valid short
+// body. Instead, once the budget is spent it probes one more byte from the
+// underlying reader: any byte means the source is larger than the limit; a
+// clean EOF means the body fit exactly.
+type limitedDecompressReader struct {
+	gr   io.ReadCloser
+	body io.Closer // underlying source; gzip.Reader.Close does not close it
+	n    int64     // remaining decompressed-byte budget
+}
+
+func (l *limitedDecompressReader) Read(p []byte) (int, error) {
+	if l.n <= 0 {
+		// Budget spent: probe for any further byte. The io.Reader contract
+		// permits a transient (0, nil), so loop until we observe a byte (the
+		// source is larger than the limit) or a terminal error/EOF (the body
+		// fit exactly).
+		var probe [1]byte
+		for {
+			m, err := l.gr.Read(probe[:])
+			if m > 0 {
+				return 0, ErrBodyTooLarge
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+	// Never hand the caller more than the budget allows.
+	if int64(len(p)) > l.n {
+		p = p[:l.n]
+	}
+	n, err := l.gr.Read(p)
+	l.n -= int64(n)
+	return n, err
+}
+
+// Close closes the gzip reader and the underlying source body (see
+// gzipReadCloser.Close).
+func (l *limitedDecompressReader) Close() error {
+	err := l.gr.Close()
+	if l.body != nil {
+		if cerr := l.body.Close(); err == nil {
+			err = cerr
+		}
+	}
+	return err
+}
+
+// DecompressBody decompresses a gzip-compressed request body, bounding the
+// decompressed size at [DefaultMaxDecompressedSize] to guard against
+// decompression bombs. Reading past that ceiling yields [ErrBodyTooLarge].
+// The returned ReadCloser must be closed by the caller. Use
+// [DecompressBodyLimit] to choose a different ceiling (or to opt out of it).
 func DecompressBody(body io.ReadCloser) (io.ReadCloser, error) {
+	return DecompressBodyLimit(body, DefaultMaxDecompressedSize)
+}
+
+// DecompressBodyLimit is like [DecompressBody] but caps the decompressed output
+// at maxBytes: reading a body that inflates beyond maxBytes yields
+// [ErrBodyTooLarge] rather than streaming unbounded data. A body whose
+// decompressed size equals maxBytes exactly is allowed. A maxBytes <= 0 disables
+// the limit (unbounded — use only for trusted input). The returned ReadCloser
+// must be closed by the caller.
+func DecompressBodyLimit(body io.ReadCloser, maxBytes int64) (io.ReadCloser, error) {
 	gr, err := gzip.NewReader(body)
 	if err != nil {
 		_ = body.Close()
 		return nil, err
 	}
-	return &gzipReadCloser{gr: gr}, nil
+	if maxBytes <= 0 {
+		return &gzipReadCloser{gr: gr, body: body}, nil
+	}
+	return &limitedDecompressReader{gr: gr, body: body, n: maxBytes}, nil
 }

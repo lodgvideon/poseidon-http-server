@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -126,6 +127,112 @@ func TestDecompressBody(t *testing.T) {
 	result, _ := io.ReadAll(dr)
 	if !bytes.Equal(result, original) {
 		t.Fatalf("decompressed %q != original %q", result, original)
+	}
+}
+
+// gzipOf returns a gzip stream that decompresses to n zero bytes. Runs of
+// zeros compress to a tiny envelope, so this builds a "decompression bomb"
+// cheaply (a few KB of gzip inflating to n bytes).
+func gzipOf(n int) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	chunk := make([]byte, 4096)
+	for n > 0 {
+		m := len(chunk)
+		if n < m {
+			m = n
+		}
+		_, _ = zw.Write(chunk[:m])
+		n -= m
+	}
+	_ = zw.Close()
+	return buf.Bytes()
+}
+
+func TestDecompressBodyLimit_RejectsBomb(t *testing.T) {
+	t.Parallel()
+	// 64 KiB of zeros inflates well past a 1 KiB limit.
+	body := io.NopCloser(bytes.NewReader(gzipOf(64 << 10)))
+	dr, err := DecompressBodyLimit(body, 1<<10)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer dr.Close()
+	if _, err := io.ReadAll(dr); !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("reading a decompression bomb: err = %v, want ErrBodyTooLarge", err)
+	}
+}
+
+func TestDecompressBodyLimit_AllowsUnderLimit(t *testing.T) {
+	t.Parallel()
+	const size = 4096
+	body := io.NopCloser(bytes.NewReader(gzipOf(size)))
+	dr, err := DecompressBodyLimit(body, 1<<20)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer dr.Close()
+	out, err := io.ReadAll(dr)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(out) != size {
+		t.Fatalf("decompressed %d bytes, want %d", len(out), size)
+	}
+}
+
+func TestDecompressBodyLimit_ExactLimitAllowed(t *testing.T) {
+	t.Parallel()
+	// A body whose decompressed size equals the limit exactly must pass:
+	// the limit is a ceiling on what's allowed, not a strict "<".
+	const size = 8192
+	body := io.NopCloser(bytes.NewReader(gzipOf(size)))
+	dr, err := DecompressBodyLimit(body, size)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer dr.Close()
+	out, err := io.ReadAll(dr)
+	if err != nil {
+		t.Fatalf("a body exactly at the limit must be allowed: %v", err)
+	}
+	if len(out) != size {
+		t.Fatalf("decompressed %d, want %d", len(out), size)
+	}
+}
+
+func TestDecompressBodyLimit_Unbounded(t *testing.T) {
+	t.Parallel()
+	// max <= 0 means "no limit" — the explicit opt-out for callers that
+	// genuinely need unbounded decompression.
+	const size = 32 << 10
+	body := io.NopCloser(bytes.NewReader(gzipOf(size)))
+	dr, err := DecompressBodyLimit(body, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer dr.Close()
+	out, err := io.ReadAll(dr)
+	if err != nil {
+		t.Fatalf("unbounded read: %v", err)
+	}
+	if len(out) != size {
+		t.Fatalf("decompressed %d, want %d", len(out), size)
+	}
+}
+
+func TestDecompressBody_DefaultLimitBoundsBomb(t *testing.T) {
+	t.Parallel()
+	// One byte beyond the default cap must be rejected by the default helper,
+	// proving DecompressBody now enforces DefaultMaxDecompressedSize.
+	body := io.NopCloser(bytes.NewReader(gzipOf(DefaultMaxDecompressedSize + 1)))
+	dr, err := DecompressBody(body)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer dr.Close()
+	if _, err := io.ReadAll(dr); !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("DecompressBody must enforce DefaultMaxDecompressedSize: err = %v", err)
 	}
 }
 
