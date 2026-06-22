@@ -100,12 +100,14 @@ func (ss *ServerStream) ID() uint32 { return ss.id }
 // Context returns a context that is cancelled when the stream is reset by the
 // client (RST_STREAM), completes, or the underlying connection closes. Handlers
 // should select on its Done channel (or pass it to blocking calls) to abort
-// work promptly when the client goes away. It is never nil.
+// work promptly when the client goes away. It is never nil and is safe to call
+// on a nil stream (returns a background context) so constructors that tolerate
+// a nil stream — e.g. server.NewResponseWriter(nil) in tests — do not panic.
 func (ss *ServerStream) Context() context.Context {
-	if ss.ctx != nil {
-		return ss.ctx
+	if ss == nil || ss.ctx == nil {
+		return context.Background()
 	}
-	return context.Background()
+	return ss.ctx
 }
 
 // SendHeaders sends a response HEADERS frame with the given fields.
