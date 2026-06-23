@@ -480,7 +480,7 @@ func HTTPRequestToRequest(r *http.Request) *Request {
 			})
 		}
 	}
-	return &Request{
+	req := &Request{
 		Method:    r.Method,
 		Path:      r.URL.Path,
 		RawQuery:  r.URL.RawQuery,
@@ -488,6 +488,16 @@ func HTTPRequestToRequest(r *http.Request) *Request {
 		Authority: r.URL.Host,
 		Headers:   headers,
 	}
+	// Expose the request body to the Poseidon handler. r.Body is already an
+	// io.ReadCloser (net/http guarantees it is non-nil for server requests —
+	// http.NoBody for empty ones — but a hand-built request may leave it nil),
+	// so map it straight onto BodyReader. Streaming rather than buffering keeps
+	// the conversion allocation-free and can't fail mid-read — important since
+	// this helper returns no error — mirroring the server's StreamingBody mode.
+	if r.Body != nil {
+		req.BodyReader = r.Body
+	}
+	return req
 }
 
 // closeableReader wraps a byte slice as io.ReadCloser.
