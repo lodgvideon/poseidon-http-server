@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.3.0...v0.4.0) (2026-06-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* ResponseWriter interface (fixes Gzip) + HTTP/2 Rapid Reset mitigation ([#1](https://github.com/lodgvideon/poseidon-http-server/issues/1))
+
+### Features
+
+* **metrics:** surface HTTP/2 transport metrics (conns, bytes, frames, streams, rapid-resets, GOAWAYs) ([#12](https://github.com/lodgvideon/poseidon-http-server/issues/12)) ([1c05177](https://github.com/lodgvideon/poseidon-http-server/commit/1c05177235ea3ed040368bb53c180ea7f3413637))
+* **middleware:** bound RateLimit bucket map with eviction (memory-DoS fix) ([#13](https://github.com/lodgvideon/poseidon-http-server/issues/13)) ([6f5eab1](https://github.com/lodgvideon/poseidon-http-server/commit/6f5eab1db016b5491115837252288b8f8431fdf0))
+* **middleware:** per-client rate-limit keying + gzip decompression-bomb bound ([#11](https://github.com/lodgvideon/poseidon-http-server/issues/11)) ([4b443b5](https://github.com/lodgvideon/poseidon-http-server/commit/4b443b5a9dabc23e58ad6df114740f16aedc8b1d))
+* production-readiness hardening + ResponseWriter interface completion ([#3](https://github.com/lodgvideon/poseidon-http-server/issues/3)) ([2b01ef5](https://github.com/lodgvideon/poseidon-http-server/commit/2b01ef5d1f3db8f5e7910bb370a8c312fe93550f))
+* ResponseWriter interface (fixes Gzip) + HTTP/2 Rapid Reset mitigation ([#1](https://github.com/lodgvideon/poseidon-http-server/issues/1)) ([161754b](https://github.com/lodgvideon/poseidon-http-server/commit/161754b944342f4c33ef98a5b913b6229883c51d))
+
+
+### Bug Fixes
+
+* **grpcserver:** close two health-Watch concurrency bugs (lost update + send-on-closed panic) ([#15](https://github.com/lodgvideon/poseidon-http-server/issues/15)) ([bfdd7ff](https://github.com/lodgvideon/poseidon-http-server/commit/bfdd7fff4435f5251c5c551a773c9491dbe7c195))
+* **server,conn:** unblock Serve on Close (bg ctx) + per-stream recv window seeded from advertised window ([#17](https://github.com/lodgvideon/poseidon-http-server/issues/17)) ([e7d878f](https://github.com/lodgvideon/poseidon-http-server/commit/e7d878fd4ba4b22b64715d584d8a43e45f616e6c))
+* **server:** forward request body in HTTPRequestToRequest / ToHTTPHandler ([#19](https://github.com/lodgvideon/poseidon-http-server/issues/19)) ([83f234d](https://github.com/lodgvideon/poseidon-http-server/commit/83f234df8bc2e56508c91c29cf0509875feff4b2))
+* **server:** wire streaming Request.BodyReader into FromHTTPHandler requests ([#18](https://github.com/lodgvideon/poseidon-http-server/issues/18)) ([a3eaa8e](https://github.com/lodgvideon/poseidon-http-server/commit/a3eaa8e86058a81e7ff78bdda5c7567eac1deb13))
+
 ## [Unreleased]
 
 This release hardens Poseidon for production: DoS mitigations, a security/
