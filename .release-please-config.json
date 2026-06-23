@@ -8,11 +8,11 @@
   "tag-separator": "-",
   "separate-pull-requests": false,
   "changelog-path": "CHANGELOG.md",
-  "pull-request-title-pattern": "chore: release ${version}",
   "pull-request-header": ":robot: Release is at your command",
   "packages": {
     ".": {
       "package-name": "poseidon-http-server",
+      "component": "poseidon-http-server",
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
         { "type": "fix", "section": "Bug Fixes" },
