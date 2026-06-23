@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -253,6 +255,58 @@ func TestHTTPRequestToRequest(t *testing.T) {
 	}
 	if !found {
 		t.Error("x-request-id header not found in converted request")
+	}
+}
+
+// HTTPRequestToRequest must wire the incoming http.Request body into the
+// Poseidon Request so downstream handlers can read it. Before the fix it built
+// the Request without consulting r.Body at all, leaving BodyReader nil — the
+// request body was silently dropped during conversion. (Mirror image of the
+// FromHTTPHandler BodyReader bug fixed in #18.)
+func TestHTTPRequestToRequest_ForwardsBody(t *testing.T) {
+	const payload = "converted-request-body"
+	httpReq := httptest.NewRequest("PUT", "http://api.example.com/x", strings.NewReader(payload))
+
+	req := HTTPRequestToRequest(httpReq)
+	if req.BodyReader == nil {
+		t.Fatal("BodyReader is nil — r.Body was dropped during conversion")
+	}
+	got, err := io.ReadAll(req.BodyReader)
+	if err != nil {
+		t.Fatalf("read BodyReader: %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("BodyReader = %q, want %q", got, payload)
+	}
+}
+
+// End-to-end: a Poseidon handler wrapped via ToHTTPHandler must see the request
+// body that the net/http layer delivered. Before the fix the body was dropped
+// in HTTPRequestToRequest, so the handler echoed an empty body.
+func TestToHTTPHandler_ForwardsRequestBody(t *testing.T) {
+	echo := HandlerFunc(func(_ context.Context, req *Request, w ResponseWriter) error {
+		body := req.Body
+		if req.BodyReader != nil {
+			b, err := io.ReadAll(req.BodyReader)
+			if err != nil {
+				return err
+			}
+			body = b
+		}
+		_, err := w.Write(body)
+		return err
+	})
+
+	httpHandler := ToHTTPHandler(echo)
+	rec := httptest.NewRecorder()
+	const payload = "request body bytes"
+	httpHandler.ServeHTTP(rec, httptest.NewRequest("POST", "/echo", strings.NewReader(payload)))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != payload {
+		t.Fatalf("echoed body = %q, want %q (request body dropped in conversion)", got, payload)
 	}
 }
 
