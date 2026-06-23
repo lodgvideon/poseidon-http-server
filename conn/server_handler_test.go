@@ -60,7 +60,7 @@ func TestServerConn_OnPushPromise_HandlerLevel(t *testing.T) {
 	mock := &mockConnOps{
 		streams: make(map[uint32]*ServerStream),
 	}
-	h := newServerConnHandler(mock, hpack.NewDecoder(), 0)
+	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0)
 
 	err := h.OnPushPromise(frame.FrameHeader{StreamID: 1}, 3, nil, 0)
 	if err == nil {

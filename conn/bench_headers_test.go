@@ -13,7 +13,7 @@ import (
 // right-sized backing per request. This benchmark gates that path's cost.
 func BenchmarkOnHeaders(b *testing.B) {
 	mock := &mockConnOps{streams: make(map[uint32]*ServerStream)}
-	h := newServerConnHandler(mock, hpack.NewDecoder(), 0)
+	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0)
 	enc := hpack.NewEncoder()
 	block := enc.EncodeBlock(nil, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
