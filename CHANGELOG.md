@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.0...v0.4.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* drop release-please component so merged release PRs can be tagged ([#21](https://github.com/lodgvideon/poseidon-http-server/issues/21)) ([2168363](https://github.com/lodgvideon/poseidon-http-server/commit/2168363e6de9f3c768e21d02044a58fd482d6364))
+* restore component-carrying release-please title pattern ([#22](https://github.com/lodgvideon/poseidon-http-server/issues/22)) ([8c7ea50](https://github.com/lodgvideon/poseidon-http-server/commit/8c7ea50a6a4857cde94ddbc2d194c6b8fa729e48))
+
 ## [0.4.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.3.0...v0.4.0) (2026-06-23)
 
 
