@@ -13,7 +13,7 @@ history.
 | ADR | Title | Status |
 | --- | --- | --- |
 | [ADR-0001](0001-zero-allocation-hot-path-contract.md) | Zero-allocation contract on hot paths | Accepted |
-| [ADR-0002](0002-reuse-client-codec-via-relative-replace.md) | Reuse the client frame/HPACK codec via a relative `replace` | Accepted |
+| [ADR-0002](0002-reuse-client-codec-via-relative-replace.md) | Reuse the client frame/HPACK codec via a relative `replace` | Superseded by [ADR-0008](0008-consume-client-codec-as-tagged-module.md) |
 | [ADR-0003](0003-serverconn-accept-stream-goroutine-model.md) | `ServerConn` accept-stream + per-stream-goroutine model | Accepted |
 | [ADR-0004](0004-grpc-framing-and-status-trailers.md) | gRPC Length-Prefixed-Message framing + status-trailer design | Accepted |
 | [ADR-0005](0005-h2c-prior-knowledge-and-upgrade.md) | h2c support: prior knowledge vs HTTP/1.1 Upgrade | Accepted |
