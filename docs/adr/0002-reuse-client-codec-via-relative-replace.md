@@ -1,7 +1,14 @@
 # ADR-0002: Reuse the client frame/HPACK codec via a relative `replace`
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0008](0008-consume-client-codec-as-tagged-module.md)
 - **Date:** 2026-06-21
+
+> **Superseded (2026-07-06):** the client is now published as a tagged module,
+> so the relative `replace` was dropped in favour of a versioned `require`
+> (`poseidon-http-client v0.6.0`) with a committed `go.sum`. This was required
+> to make the server module consumable via `go get`. See
+> [ADR-0008](0008-consume-client-codec-as-tagged-module.md). The record below is
+> retained for history.
 
 ## Context
 

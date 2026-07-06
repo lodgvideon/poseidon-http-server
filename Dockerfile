@@ -3,15 +3,10 @@
 # ---------------------------------------------------------------------------
 # Poseidon HTTP server — production container image.
 #
-# The module uses a RELATIVE replace directive in go.mod:
-#
-#     replace github.com/lodgvideon/poseidon-http-client => ../poseidon-http-client
-#
-# so a naive in-image `go build` fails: the sibling repository is not part of
-# the Docker build context. The builder stage below resolves this by cloning
-# poseidon-http-client into the sibling path that the replace directive points
-# at (../poseidon-http-client relative to the copied server source), then
-# producing a fully static, CGO-free binary.
+# The builder stage compiles cmd/poseidon-server into a fully static, CGO-free
+# binary. Dependencies (including github.com/lodgvideon/poseidon-http-client, a
+# normal tagged module dependency) are fetched from the Go module proxy — no
+# sibling checkout or replace directive is involved.
 #
 # Build:
 #   docker build \
@@ -30,35 +25,19 @@ ARG version=dev
 ARG commit=none
 ARG date=unknown
 
-# Pin the sibling client revision for reproducible builds; override with
-# --build-arg client_ref=<sha|tag> when a specific version is required.
-ARG client_ref=main
-
-# git is needed to clone the sibling client repo; ca-certificates so the
-# module proxy / TLS clone works.
+# ca-certificates for TLS to the Go module proxy; git for any direct-mode
+# (VCS) module fetch fallback.
 RUN apk add --no-cache git ca-certificates
 
-# Lay the source out so that the go.mod replace target resolves:
-#   /src/poseidon-http-server   <- this repo (build context)
-#   /src/poseidon-http-client   <- sibling, cloned below
 WORKDIR /src/poseidon-http-server
 
-# Clone the sibling client into ../poseidon-http-client (relative to the server
-# source), matching the replace directive. Done before COPY so it is cached
-# independently of server-source changes.
-RUN git clone --depth 1 --branch "${client_ref}" \
-        https://github.com/lodgvideon/poseidon-http-client.git \
-        /src/poseidon-http-client
-
 # Copy the server module files first to leverage layer caching for deps.
-COPY go.mod ./
-COPY go.su[m] ./
+COPY go.mod go.sum ./
 
-# Warm the module cache. The server module has no committed go.sum, so allow
-# go to resolve and record checksums during the build.
+# Warm the module cache from the committed go.sum.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go mod download all || true
+    go mod download
 
 # Copy the rest of the server source.
 COPY . .
