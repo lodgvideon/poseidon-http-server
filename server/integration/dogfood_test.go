@@ -81,28 +81,17 @@ func TestDogfood_MaxStreamsSetStillAdvertisesWindow(t *testing.T) {
 	}
 	req.ContentLength = int64(size)
 
-	cli := &http.Client{Transport: ts.client.Transport, Timeout: 20 * time.Second}
-	done := make(chan *http.Response, 1)
-	errc := make(chan error, 1)
-	go func() {
-		resp, err := cli.Do(req) //nolint:bodyclose // closed by the receiver in the select below
-		if err != nil {
-			errc <- err
-			return
-		}
-		done <- resp
-	}()
-	select {
-	case resp := <-done:
-		defer resp.Body.Close()
-		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		if got := resp.Header.Get("X-Body-Len"); got != strconv.Itoa(size) {
-			t.Fatalf("X-Body-Len = %q, want %d", got, size)
-		}
-	case err := <-errc:
-		t.Fatalf("request error: %v", err)
-	case <-time.After(20 * time.Second):
-		t.Fatal("body deadlocked: advertised InitialWindowSize was 0 (Bug 3 consistency)")
+	// A generous client timeout (not a tight wall-clock deadline) — see
+	// TestDogfood_LargeBodyFlowControl for the rationale.
+	cli := &http.Client{Transport: ts.client.Transport, Timeout: 45 * time.Second}
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("body deadlocked — advertised InitialWindowSize was 0? (Bug 3 consistency): %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if got := resp.Header.Get("X-Body-Len"); got != strconv.Itoa(size) {
+		t.Fatalf("X-Body-Len = %q, want %d", got, size)
 	}
 }
 
@@ -132,32 +121,27 @@ func TestDogfood_LargeBodyFlowControl(t *testing.T) {
 			}
 			req.ContentLength = int64(size)
 
-			cli := &http.Client{Transport: ts.client.Transport, Timeout: 20 * time.Second}
-			done := make(chan *http.Response, 1)
-			errc := make(chan error, 1)
-			go func() {
-				resp, err := cli.Do(req) //nolint:bodyclose // closed by the receiver in the select below
-				if err != nil {
-					errc <- err
-					return
-				}
-				done <- resp
-			}()
-
-			select {
-			case resp := <-done:
-				defer resp.Body.Close()
-				io.Copy(io.Discard, resp.Body) //nolint:errcheck
-				if resp.StatusCode != http.StatusOK {
-					t.Fatalf("status = %d, want 200", resp.StatusCode)
-				}
-				if got := resp.Header.Get("X-Body-Len"); got != strconv.Itoa(size) {
-					t.Fatalf("X-Body-Len = %q, want %d (body did not fully transfer)", got, size)
-				}
-			case err := <-errc:
-				t.Fatalf("request error: %v", err)
-			case <-time.After(20 * time.Second):
-				t.Fatalf("body of %d bytes deadlocked (no per-stream WINDOW_UPDATE refund; Bug 3)", size)
+			// A successful transfer completes in milliseconds; a genuine
+			// flow-control deadlock never completes. We deliberately avoid a
+			// tight wall-clock deadline: on a shared CI runner a
+			// coverage-instrumented process can be frozen by noisy-neighbour CPU
+			// steal for many seconds — long enough to trip a short deadline even
+			// though the transfer would finish (the source of this test's past
+			// flakiness). A generous client timeout still fails a real hang
+			// (backstopped by `go test -timeout`) while surviving realistic
+			// runner stalls.
+			cli := &http.Client{Transport: ts.client.Transport, Timeout: 45 * time.Second}
+			resp, err := cli.Do(req)
+			if err != nil {
+				t.Fatalf("body of %d bytes failed — flow-control deadlock? (no per-stream WINDOW_UPDATE refund; Bug 3): %v", size, err)
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if got := resp.Header.Get("X-Body-Len"); got != strconv.Itoa(size) {
+				t.Fatalf("X-Body-Len = %q, want %d (body did not fully transfer)", got, size)
 			}
 		})
 	}

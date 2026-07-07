@@ -21,11 +21,11 @@ jobs:
         run: go mod download
 
       - name: Test with race detector
-        run: go test -race -count=1 -timeout 60s ./...
+        run: go test -race -count=1 -timeout 120s ./...
 
       - name: Coverage
         run: |
-          go test -count=1 -timeout 60s -coverprofile=coverage.out ./...
+          go test -count=1 -timeout 120s -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
 
   lint:
@@ -68,7 +68,7 @@ jobs:
 
       - name: Check coverage (library packages, examples/cmd excluded)
         run: |
-          go test -count=1 -timeout 60s -coverprofile=coverage.out ./...
+          go test -count=1 -timeout 120s -coverprofile=coverage.out ./...
           bash scripts/coverage-gate.sh 80 coverage.out
 
   bench:
