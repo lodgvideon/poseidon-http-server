@@ -13,11 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
-      # must exist next to this checkout. Track the same ref local dev uses (main).
-      - name: Check out poseidon-http-client (replace target)
-        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
-
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
@@ -38,11 +33,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
-      # must exist next to this checkout. Track the same ref local dev uses (main).
-      - name: Check out poseidon-http-client (replace target)
-        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
 
       - uses: actions/setup-go@v6
         with:
@@ -72,11 +62,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
-      # must exist next to this checkout. Track the same ref local dev uses (main).
-      - name: Check out poseidon-http-client (replace target)
-        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
-
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
@@ -91,11 +76,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
-      # must exist next to this checkout. Track the same ref local dev uses (main).
-      - name: Check out poseidon-http-client (replace target)
-        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
 
       - uses: actions/setup-go@v6
         with:

@@ -22,11 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # go.mod has `replace ... => ../poseidon-http-client`, so the sibling repo
-      # must exist next to this checkout or the module graph won't resolve.
-      - name: Check out poseidon-http-client (replace target)
-        run: git clone --depth 1 https://github.com/lodgvideon/poseidon-http-client.git ../poseidon-http-client
-
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
