@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.1...v0.4.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* make the module go-gettable — pin client to v0.6.0, drop local replace ([#25](https://github.com/lodgvideon/poseidon-http-server/issues/25)) ([e1c739a](https://github.com/lodgvideon/poseidon-http-server/commit/e1c739a850a3798f50a523e44bb26464a498079f))
+
 ## [0.4.1](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.0...v0.4.1) (2026-06-23)
 
 
