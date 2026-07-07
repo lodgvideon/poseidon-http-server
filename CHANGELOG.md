@@ -49,12 +49,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * **server:** forward request body in HTTPRequestToRequest / ToHTTPHandler ([#19](https://github.com/lodgvideon/poseidon-http-server/issues/19)) ([83f234d](https://github.com/lodgvideon/poseidon-http-server/commit/83f234df8bc2e56508c91c29cf0509875feff4b2))
 * **server:** wire streaming Request.BodyReader into FromHTTPHandler requests ([#18](https://github.com/lodgvideon/poseidon-http-server/issues/18)) ([a3eaa8e](https://github.com/lodgvideon/poseidon-http-server/commit/a3eaa8e86058a81e7ff78bdda5c7567eac1deb13))
 
-## [Unreleased]
+### Details
 
-This release hardens Poseidon for production: DoS mitigations, a security/
-observability middleware suite, a 12-factor server binary, and container/
-Kubernetes deployment assets. It includes a few **breaking** API changes — see
-[Migration](#migration) below.
+The following hand-written notes expand the auto-generated v0.4.0 summary above
+— DoS mitigations, a security/observability middleware suite, a 12-factor server
+binary, and container/Kubernetes deployment assets, plus a few **breaking** API
+changes (see [Migration](#migration) below).
 
 ### Added
 
