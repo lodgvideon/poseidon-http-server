@@ -1,0 +1,50 @@
+name: Fuzz
+
+# Mutation fuzzing of the binary-protocol parsers (HTTP/2 frames + HPACK, gRPC
+# length-prefixed messages, request :path). Kept OFF the PR path — the regular
+# CI only exercises the seed corpus via `go test`; this job runs `-fuzz` with
+# real mutation on a nightly cadence, where a slow (minutes-long) run is fine.
+on:
+  schedule:
+    - cron: '30 3 * * *' # nightly, 03:30 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false # one crashing target must not cancel the others
+      matrix:
+        include:
+          - pkg: ./conn
+            target: FuzzServerConn
+          - pkg: ./grpcserver
+            target: FuzzDecodeLP
+          - pkg: ./grpcserver
+            target: FuzzTrailersToStatus
+          - pkg: ./server
+            target: FuzzRequestPath
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26'
+
+      - name: Fuzz ${{ matrix.target }}
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime=5m ${{ matrix.pkg }}
+
+      # A crash writes its reproducer to <pkg>/testdata/fuzz/<Target>/<hash>.
+      # Publish it so the failing input can be replayed locally.
+      - name: Upload crash reproducer on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore
