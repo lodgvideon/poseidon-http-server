@@ -6,11 +6,11 @@ description: |
 type: application
 
 # Chart version — bump on every chart change (SemVer).
-version: 0.1.0
+version: 0.1.1
 
 # Version of the poseidon-server application this chart deploys by default.
 # Keep in sync with the container image tag in values.yaml (image.tag).
-appVersion: "0.3.0"
+appVersion: "0.4.3"
 
 home: https://github.com/lodgvideon/poseidon-http-server
 sources:

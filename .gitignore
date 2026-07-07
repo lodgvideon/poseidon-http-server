@@ -16,16 +16,12 @@ Thumbs.db
 vendor/
 
 # Test / coverage
-cover.out
+*.out
 *.prof
 *.test
 
 # Logs
 .logs/
-server-cov.out
-cov.out
-coverage.out
-coverage_server.out
 http-server
 
 # codesearch local index
