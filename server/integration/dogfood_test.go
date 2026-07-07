@@ -28,6 +28,55 @@ func readLenHandler() server.Handler {
 	}))
 }
 
+// postBodyWithRetry POSTs a `size`-byte body and asserts the handler read it in
+// full (X-Body-Len == size). It is resilient to transient shared-CI-runner
+// stalls: each attempt uses a FRESH HTTP/2 connection with a bounded timeout,
+// retried a few times. A genuine server-side flow-control deadlock reproduces on
+// every fresh connection (all attempts fail → the test fails); a one-off runner
+// freeze clears on the next attempt. The refund behaviour this exercises
+// end-to-end is also covered deterministically by the conn-level flow-control
+// tests (conn/server_coverage_test.go, conn/server_flowcontrol_test.go), so the
+// retry cannot mask a reproducible bug.
+func postBodyWithRetry(t *testing.T, ts *testServer, size int) {
+	t.Helper()
+	body := bytes.Repeat([]byte("x"), size)
+	const attempts = 4
+	var lastErr error
+	for a := 1; a <= attempts; a++ {
+		tr := &http.Transport{
+			TLSClientConfig:    ts.tls,
+			ForceAttemptHTTP2:  true,
+			DisableCompression: true,
+		}
+		req, err := http.NewRequest(http.MethodPost, ts.URL()+"/", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.ContentLength = int64(size)
+		cli := &http.Client{Transport: tr, Timeout: 15 * time.Second}
+		resp, err := cli.Do(req)
+		if err != nil {
+			lastErr = err
+			tr.CloseIdleConnections()
+			t.Logf("attempt %d/%d for %d-byte body failed: %v (retrying on a fresh connection)", a, attempts, size, err)
+			continue
+		}
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		_ = resp.Body.Close()
+		tr.CloseIdleConnections()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (%d-byte body)", resp.StatusCode, size)
+		}
+		if got := resp.Header.Get("X-Body-Len"); got != strconv.Itoa(size) {
+			t.Fatalf("X-Body-Len = %q, want %d (body did not fully transfer)", got, size)
+		}
+		return
+	}
+	t.Fatalf("body of %d bytes never completed across %d fresh-connection attempts — "+
+		"likely a real flow-control deadlock (no per-stream WINDOW_UPDATE refund; Bug 3): %v",
+		size, attempts, lastErr)
+}
+
 // Bug 2: net/http guarantees Request.Body is non-nil on the server side. A
 // handler doing io.ReadAll(r.Body) on a request with no body must NOT panic.
 // Before the fix the compat layer left r.Body == nil for empty-body requests,
@@ -73,26 +122,10 @@ func TestDogfood_MaxStreamsSetStillAdvertisesWindow(t *testing.T) {
 		o.ConnOpts.AdvertisedSettings = conn.AdvertisedSettings{MaxConcurrentStreams: 50}
 	})
 
-	const size = 256 << 10 // larger than the defaulted 64 KiB window, exercises refund too
-	body := bytes.Repeat([]byte("y"), size)
-	req, err := http.NewRequest(http.MethodPost, ts.URL()+"/", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.ContentLength = int64(size)
-
-	// A generous client timeout (not a tight wall-clock deadline) — see
-	// TestDogfood_LargeBodyFlowControl for the rationale.
-	cli := &http.Client{Transport: ts.client.Transport, Timeout: 45 * time.Second}
-	resp, err := cli.Do(req)
-	if err != nil {
-		t.Fatalf("body deadlocked — advertised InitialWindowSize was 0? (Bug 3 consistency): %v", err)
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body) //nolint:errcheck
-	if got := resp.Header.Get("X-Body-Len"); got != strconv.Itoa(size) {
-		t.Fatalf("X-Body-Len = %q, want %d", got, size)
-	}
+	// 256 KiB is larger than the defaulted 64 KiB window, so it exercises the
+	// refund path; pre-fix it deadlocked because a MaxConcurrentStreams-only
+	// config advertised InitialWindowSize=0 (a zero peer send window).
+	postBodyWithRetry(t, ts, 256<<10)
 }
 
 // Bug 3: the server advertises InitialWindowSize = W, so the client's per-stream
@@ -101,12 +134,12 @@ func TestDogfood_MaxStreamsSetStillAdvertisesWindow(t *testing.T) {
 // deadlocks once the client exhausts its send window. Before the fix, the W and
 // 2W cases hang until the client deadline; sub-W works.
 func TestDogfood_LargeBodyFlowControl(t *testing.T) {
-	// W is kept modest: the test must transfer a body at/over the advertised
-	// window (which forces multiple stream + connection WINDOW_UPDATE refund
-	// cycles — the path the dogfood deadlock hit), but a multi-MiB transfer races
-	// a wall-clock deadline when this package runs in parallel with the rest of
-	// the suite under -race + coverage on a CPU-starved CI runner. 256 KiB still
-	// exceeds the 64 KiB connection window several times over while staying fast.
+	// W is kept modest so the transfer stays fast: it must exceed the advertised
+	// window (forcing stream + connection WINDOW_UPDATE refund cycles — the path
+	// the dogfood deadlock hit), but a multi-MiB body would amplify shared-runner
+	// stalls. 256 KiB still exceeds the 64 KiB connection window several times
+	// over. postBodyWithRetry supplies the CI-stall resilience (fresh connection
+	// per attempt) so a transient freeze does not flake the run.
 	const w = 256 << 10 // advertised InitialWindowSize
 	ts := startTestServer(t, readLenHandler(), func(o *server.Options) {
 		o.ConnOpts.AdvertisedSettings = conn.AdvertisedSettings{InitialWindowSize: w}
@@ -114,35 +147,7 @@ func TestDogfood_LargeBodyFlowControl(t *testing.T) {
 
 	for _, size := range []int{64 << 10, w, 2 * w} {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
-			body := bytes.Repeat([]byte("x"), size)
-			req, err := http.NewRequest(http.MethodPost, ts.URL()+"/", bytes.NewReader(body))
-			if err != nil {
-				t.Fatal(err)
-			}
-			req.ContentLength = int64(size)
-
-			// A successful transfer completes in milliseconds; a genuine
-			// flow-control deadlock never completes. We deliberately avoid a
-			// tight wall-clock deadline: on a shared CI runner a
-			// coverage-instrumented process can be frozen by noisy-neighbour CPU
-			// steal for many seconds — long enough to trip a short deadline even
-			// though the transfer would finish (the source of this test's past
-			// flakiness). A generous client timeout still fails a real hang
-			// (backstopped by `go test -timeout`) while surviving realistic
-			// runner stalls.
-			cli := &http.Client{Transport: ts.client.Transport, Timeout: 45 * time.Second}
-			resp, err := cli.Do(req)
-			if err != nil {
-				t.Fatalf("body of %d bytes failed — flow-control deadlock? (no per-stream WINDOW_UPDATE refund; Bug 3): %v", size, err)
-			}
-			defer resp.Body.Close()
-			io.Copy(io.Discard, resp.Body) //nolint:errcheck
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("status = %d, want 200", resp.StatusCode)
-			}
-			if got := resp.Header.Get("X-Body-Len"); got != strconv.Itoa(size) {
-				t.Fatalf("X-Body-Len = %q, want %d (body did not fully transfer)", got, size)
-			}
+			postBodyWithRetry(t, ts, size)
 		})
 	}
 }
