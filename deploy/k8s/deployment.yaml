@@ -36,7 +36,7 @@ spec:
       containers:
         - name: poseidon-server
           # Pin to an immutable tag or digest in production.
-          image: ghcr.io/lodgvideon/poseidon-server:0.3.0
+          image: ghcr.io/lodgvideon/poseidon-server:0.4.3
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
