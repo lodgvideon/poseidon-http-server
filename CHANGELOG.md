@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.2...v0.4.3) (2026-07-07)
+
+
+### Dependencies
+
+* bump poseidon-http-client v0.6.0 → v0.7.0 ([#28](https://github.com/lodgvideon/poseidon-http-server/issues/28)) ([c0b5a11](https://github.com/lodgvideon/poseidon-http-server/commit/c0b5a11c5e5e05b893e231b6579f18caf816a2b9))
+
 ## [0.4.2](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.1...v0.4.2) (2026-07-06)
 
 
