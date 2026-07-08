@@ -132,6 +132,19 @@ type ServerConnOptions struct {
 	//   <0 => disabled
 	//   >0 => explicit timeout
 	HandshakeTimeout time.Duration
+
+	// ConnRecvWindow optionally enlarges the connection-level HTTP/2 flow-control
+	// receive window (RFC 9113 §6.9.1): the total unacknowledged request-body
+	// bytes the server accepts across ALL streams before the peer must await a
+	// connection WINDOW_UPDATE. The protocol default is 64 KiB, which throttles
+	// large uploads into many WINDOW_UPDATE round-trips; setting a larger value
+	// makes the server emit one initial WINDOW_UPDATE at connection start (as
+	// net/http2's server does with a ~1 MiB default). This is distinct from
+	// AdvertisedSettings.InitialWindowSize, which is the PER-STREAM window.
+	//
+	//   ≤ 64 KiB (incl. 0) => protocol default; no enlargement
+	//   > 64 KiB           => enlarge to this value (clamped to 2^31-1)
+	ConnRecvWindow int32
 }
 
 // defaultHandshakeTimeout is the secure-by-default bound on completing the
@@ -173,6 +186,32 @@ func (o ServerConnOptions) rapidResetBudget() int {
 		return 0
 	}
 	return o.MaxRapidResets
+}
+
+// effectiveConnRecvWindow returns the connection-level recv window to seed: the
+// 64 KiB protocol default, or the caller's larger ConnRecvWindow (clamped to a
+// valid window) when it opted into one.
+func (o ServerConnOptions) effectiveConnRecvWindow() int32 {
+	if o.ConnRecvWindow <= connInitialRecvWindow {
+		return connInitialRecvWindow
+	}
+	v := int64(o.ConnRecvWindow)
+	if v > 1<<31-1 {
+		v = 1<<31 - 1
+	}
+	return int32(v) //nolint:gosec // clamped to (64 KiB, 2^31-1]
+}
+
+// sendInitialConnWindowUpdate advertises an enlarged connection recv window with
+// one WINDOW_UPDATE(0, delta). It is a no-op (emits nothing) when the window is
+// the 64 KiB protocol default, so a default connection sends no unsolicited
+// frame. Called once during setup, before the reader goroutine starts.
+func (sc *ServerConn) sendInitialConnWindowUpdate() error {
+	delta := sc.connRecvWindow - int32(connInitialRecvWindow)
+	if delta <= 0 {
+		return nil
+	}
+	return sc.writeWindowUpdate(0, uint32(delta)) //nolint:gosec // delta > 0 checked above
 }
 
 // ConnStats is a point-in-time counter snapshot.
@@ -236,7 +275,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		readerDone:         make(chan struct{}),
 		acceptCh:           make(chan *ServerStream, 64),
 		pingWaiters:        make(map[[8]byte]chan struct{}),
-		connRecvWindow:     int32(connInitialRecvWindow),
+		connRecvWindow:     opts.effectiveConnRecvWindow(),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 		pushIDs:            newPushIDCounter(),
 	}
@@ -285,6 +324,14 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	sc.peerSettings = peer
 	sc.psMu.Unlock()
 	sc.applyInitialPeerSettings(peer)
+
+	// If the caller opted into a larger connection recv window, advertise it now
+	// (one WINDOW_UPDATE, after the handshake and before the reader starts so
+	// there is no wmu contention). No-op — and no unsolicited frame — by default.
+	if err := sc.sendInitialConnWindowUpdate(); err != nil {
+		_ = nc.Close()
+		return nil, fmt.Errorf("server initial connection window update: %w", err)
+	}
 
 	// Handshake complete: clear the read deadline so the long-lived, multiplexed
 	// connection is never killed by a stale handshake deadline. Post-handshake
