@@ -243,6 +243,18 @@ func buildScenarios(cfg config, grpcURL string) []scenario {
 			payload := []byte(fmt.Sprintf("echo-%d-%d", v.uploaded, v.rng.Int63()))
 			return grpcEcho(ctx, cli, grpcURL, payload, m)
 		}},
+		// gRPC server-streaming: 1 request → grpcStreamCount responses.
+		{name: "grpc-sstream", weight: 4, run: func(ctx context.Context, cli *http.Client, _ string, v *vus, m *metrics) error {
+			return grpcServerStream(ctx, cli, grpcURL, []byte(fmt.Sprintf("ss-%d", v.rng.Int63())), m)
+		}},
+		// gRPC client-streaming: N requests → 1 response (the count).
+		{name: "grpc-cstream", weight: 4, run: func(ctx context.Context, cli *http.Client, _ string, v *vus, m *metrics) error {
+			return grpcClientStream(ctx, cli, grpcURL, randPayloads(v, 6), m)
+		}},
+		// gRPC bidi-streaming: N requests ↔ N echoes.
+		{name: "grpc-bidi", weight: 4, run: func(ctx context.Context, cli *http.Client, _ string, v *vus, m *metrics) error {
+			return grpcBidi(ctx, cli, grpcURL, randPayloads(v, 5), m)
+		}},
 		// Scrape + assert the Prometheus exposition under load, driving the
 		// MetricsCollector aggregation → WritePrometheus path end-to-end.
 		{name: "metrics", weight: 3, run: func(ctx context.Context, cli *http.Client, base string, _ *vus, m *metrics) error {
@@ -504,55 +516,154 @@ func (c *countReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// grpcEcho sends one unary gRPC Echo and asserts an exact round-trip. It speaks
-// the gRPC wire format by hand — a 5-byte length-prefixed message plus HTTP/2
-// status trailers — over the shared h2 client, so it needs no grpc-go client
-// dependency and directly exercises poseidon's grpcserver framing + dispatch.
-func grpcEcho(ctx context.Context, cli *http.Client, grpcBase string, payload []byte, m *metrics) error {
-	frame := make([]byte, 5+len(payload))
-	frame[0] = 0 // uncompressed flag
-	binary.BigEndian.PutUint32(frame[1:5], uint32(len(payload)))
-	copy(frame[5:], payload)
+// grpcFrame length-prefixes a single gRPC message: a 1-byte uncompressed flag,
+// a 4-byte big-endian length, then the payload.
+func grpcFrame(payload []byte) []byte {
+	f := make([]byte, 5+len(payload))
+	binary.BigEndian.PutUint32(f[1:5], uint32(len(payload)))
+	copy(f[5:], payload)
+	return f
+}
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, grpcBase+"/loadgen.EchoService/Echo", bytes.NewReader(frame))
+// grpcFrames concatenates several messages into one request body. The client
+// sends them all up front, then the transport's END_STREAM half-closes the
+// stream — which the server reads as the client-side end (io.EOF from recv()).
+func grpcFrames(payloads [][]byte) []byte {
+	var b []byte
+	for _, p := range payloads {
+		b = append(b, grpcFrame(p)...)
+	}
+	return b
+}
+
+// grpcCall posts a pre-framed request body to a gRPC method and returns every
+// length-prefixed response message, after verifying the grpc-status trailer. It
+// speaks the wire format by hand over the shared h2 client (no grpc-go dep), so
+// one code path covers unary, server-, client-, and bidi-streaming.
+func grpcCall(ctx context.Context, cli *http.Client, grpcBase, method string, reqBody []byte, m *metrics) ([][]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, grpcBase+method, bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/grpc")
 	resp, err := do(ctx, cli, req, m)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer drain(resp)
 	if resp.StatusCode != 200 {
 		m.errs.Add(1)
-		return fmt.Errorf("grpc: HTTP status %d", resp.StatusCode)
+		return nil, fmt.Errorf("grpc %s: HTTP status %d", method, resp.StatusCode)
 	}
+	var msgs [][]byte
 	hdr := make([]byte, 5)
-	if _, err := io.ReadFull(resp.Body, hdr); err != nil {
-		if ctx.Err() == nil {
-			m.errs.Add(1)
+	for {
+		if _, err := io.ReadFull(resp.Body, hdr); err != nil {
+			if err == io.EOF {
+				break // clean end of the response stream
+			}
+			if ctx.Err() == nil {
+				m.errs.Add(1)
+			}
+			return msgs, err
 		}
-		return err
-	}
-	out := make([]byte, binary.BigEndian.Uint32(hdr[1:5]))
-	if _, err := io.ReadFull(resp.Body, out); err != nil {
-		if ctx.Err() == nil {
-			m.errs.Add(1)
+		out := make([]byte, binary.BigEndian.Uint32(hdr[1:5]))
+		if _, err := io.ReadFull(resp.Body, out); err != nil {
+			if ctx.Err() == nil {
+				m.errs.Add(1)
+			}
+			return msgs, err
 		}
-		return err
+		m.bytes.Add(int64(5 + len(out)))
+		msgs = append(msgs, out)
 	}
-	m.bytes.Add(int64(5 + len(out)))
-	_, _ = io.Copy(io.Discard, resp.Body) // reach EOF so the grpc-status trailer lands
 	if st := resp.Trailer.Get("grpc-status"); st != "" && st != "0" {
 		m.errs.Add(1)
-		return fmt.Errorf("grpc-status=%s", st)
+		return msgs, fmt.Errorf("grpc %s: grpc-status=%s", method, st)
 	}
-	if !bytes.Equal(out, payload) {
+	return msgs, nil
+}
+
+// grpcEcho does one unary echo and asserts an exact round-trip.
+func grpcEcho(ctx context.Context, cli *http.Client, grpcBase string, payload []byte, m *metrics) error {
+	msgs, err := grpcCall(ctx, cli, grpcBase, "/loadgen.EchoService/Echo", grpcFrame(payload), m)
+	if err != nil {
+		return err
+	}
+	if len(msgs) != 1 || !bytes.Equal(msgs[0], payload) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		m.errs.Add(1)
-		return fmt.Errorf("grpc echo mismatch: got %d bytes want %d", len(out), len(payload))
+		return fmt.Errorf("grpc echo: got %d msgs, exact-match=%v", len(msgs), len(msgs) == 1 && bytes.Equal(msgs[0], payload))
 	}
 	return nil
+}
+
+// grpcServerStream sends one request and asserts it is echoed grpcStreamCount times.
+func grpcServerStream(ctx context.Context, cli *http.Client, grpcBase string, payload []byte, m *metrics) error {
+	msgs, err := grpcCall(ctx, cli, grpcBase, "/loadgen.EchoService/EchoServerStream", grpcFrame(payload), m)
+	if err != nil {
+		return err
+	}
+	if len(msgs) != grpcStreamCount {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		m.errs.Add(1)
+		return fmt.Errorf("grpc server-stream: got %d msgs want %d", len(msgs), grpcStreamCount)
+	}
+	for _, msg := range msgs {
+		if !bytes.Equal(msg, payload) {
+			m.errs.Add(1)
+			return fmt.Errorf("grpc server-stream: message mismatch")
+		}
+	}
+	return nil
+}
+
+// grpcClientStream sends len(payloads) messages and asserts the server counted them all.
+func grpcClientStream(ctx context.Context, cli *http.Client, grpcBase string, payloads [][]byte, m *metrics) error {
+	msgs, err := grpcCall(ctx, cli, grpcBase, "/loadgen.EchoService/EchoClientStream", grpcFrames(payloads), m)
+	if err != nil {
+		return err
+	}
+	if len(msgs) != 1 || string(msgs[0]) != fmt.Sprint(len(payloads)) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		m.errs.Add(1)
+		return fmt.Errorf("grpc client-stream: got %d msgs want count %d", len(msgs), len(payloads))
+	}
+	return nil
+}
+
+// grpcBidi sends len(payloads) messages and asserts each is echoed back in order.
+func grpcBidi(ctx context.Context, cli *http.Client, grpcBase string, payloads [][]byte, m *metrics) error {
+	msgs, err := grpcCall(ctx, cli, grpcBase, "/loadgen.EchoService/EchoBidi", grpcFrames(payloads), m)
+	if err != nil {
+		return err
+	}
+	if len(msgs) != len(payloads) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		m.errs.Add(1)
+		return fmt.Errorf("grpc bidi: got %d echoes want %d", len(msgs), len(payloads))
+	}
+	for i := range payloads {
+		if !bytes.Equal(msgs[i], payloads[i]) {
+			m.errs.Add(1)
+			return fmt.Errorf("grpc bidi: echo %d mismatch", i)
+		}
+	}
+	return nil
+}
+
+// randPayloads builds n distinct small messages for the streaming scenarios.
+func randPayloads(v *vus, n int) [][]byte {
+	p := make([][]byte, n)
+	for i := range p {
+		p[i] = []byte(fmt.Sprintf("msg-%d-%d", i, v.rng.Int63()))
+	}
+	return p
 }
 
 // scrapeMetrics GETs the Prometheus exposition and asserts it rendered a known

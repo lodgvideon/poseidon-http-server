@@ -141,7 +141,19 @@ func TestFeatureServers_EndToEnd(t *testing.T) {
 	// gRPC unary echo — exact round-trip through poseidon's grpcserver.
 	payload := []byte("hello-grpc-⚡-12345")
 	if err := grpcEcho(ctx, cli, fs.grpcURL, payload, m); err != nil {
-		t.Fatalf("grpc: %v", err)
+		t.Fatalf("grpc unary: %v", err)
+	}
+	// gRPC server-streaming: one request echoed grpcStreamCount times.
+	if err := grpcServerStream(ctx, cli, fs.grpcURL, payload, m); err != nil {
+		t.Fatalf("grpc server-stream: %v", err)
+	}
+	// gRPC client-streaming: N requests → the server-counted total.
+	if err := grpcClientStream(ctx, cli, fs.grpcURL, [][]byte{[]byte("a"), []byte("bb"), []byte("ccc")}, m); err != nil {
+		t.Fatalf("grpc client-stream: %v", err)
+	}
+	// gRPC bidi-streaming: N requests echoed back in order.
+	if err := grpcBidi(ctx, cli, fs.grpcURL, [][]byte{[]byte("x"), []byte("yy"), []byte("zzz"), []byte("w")}, m); err != nil {
+		t.Fatalf("grpc bidi: %v", err)
 	}
 
 	if e := m.errs.Load(); e != 0 {
