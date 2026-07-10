@@ -1,2 +1,6 @@
-github.com/lodgvideon/poseidon-http-client v0.7.0 h1:SBM7Qzzsez6D6IsrgPR8Kf5/Lq1LHjOpIFuw7fx5mb8=
-github.com/lodgvideon/poseidon-http-client v0.7.0/go.mod h1:udg06QIRvDd6orCSVuTwAe7Xb0sg/D6X0LM7EN1NOnM=
+github.com/lodgvideon/poseidon-http-client v0.7.1 h1:Ei+iWSySfldWKq1ew7p5TBn+M/C5eQVajcaK1QPXVvI=
+github.com/lodgvideon/poseidon-http-client v0.7.1/go.mod h1:udg06QIRvDd6orCSVuTwAe7Xb0sg/D6X0LM7EN1NOnM=
+golang.org/x/net v0.34.0 h1:Mb7Mrk043xzHgnRM88suvJFwzVrRfHEHJEl5/71CKw0=
+golang.org/x/net v0.34.0/go.mod h1:di0qlW3YNM5oh6GqDGQr92MyTozJPmybPK4Ev/Gm31k=
+golang.org/x/text v0.21.0 h1:zyQAAkrwaneQ066sspRyJaG9VNi/YJ1NfzcGB3hZ/qo=
+golang.org/x/text v0.21.0/go.mod h1:4IBbMaMmOPCJ8SecivzSH54+73PCFmPWxNTLm+vZkEQ=
