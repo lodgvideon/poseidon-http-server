@@ -44,6 +44,10 @@ import (
 	"github.com/lodgvideon/poseidon-http-server/server"
 )
 
+// grpcStreamCount is how many messages the server-streaming Echo emits per call
+// (shared with the client scenario so it can assert the exact count).
+const grpcStreamCount = 8
+
 // patternBuf is a read-only 32 KiB block of a repeating printable pattern shared
 // by every patternReader. It is written once at init and only ever copied out of
 // (never mutated), so sharing it across concurrent readers is safe and — unlike a
@@ -191,6 +195,45 @@ func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, er
 			// trailers.
 			{Name: "Echo", UnaryHandler: func(_ context.Context, req []byte) ([]byte, error) {
 				return req, nil
+			}},
+			// Server-streaming: echoes the single request back grpcStreamCount times.
+			{Name: "EchoServerStream", ServerStreamH: func(_ context.Context, req []byte, send grpcserver.StreamSender) error {
+				for i := 0; i < grpcStreamCount; i++ {
+					if err := send(req); err != nil {
+						return err
+					}
+				}
+				return nil
+			}},
+			// Client-streaming: drains every request message, replies with the count.
+			{Name: "EchoClientStream", ClientStreamH: func(_ context.Context, recv func() ([]byte, error)) ([]byte, error) {
+				n := 0
+				for {
+					_, err := recv()
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						return nil, err
+					}
+					n++
+				}
+				return []byte(strconv.Itoa(n)), nil
+			}},
+			// Bidi-streaming: echoes each received message straight back.
+			{Name: "EchoBidi", BidiStreamH: func(_ context.Context, recv func() ([]byte, error), send grpcserver.StreamSender) error {
+				for {
+					msg, err := recv()
+					if err == io.EOF {
+						return nil
+					}
+					if err != nil {
+						return err
+					}
+					if err := send(msg); err != nil {
+						return err
+					}
+				}
 			}},
 		},
 	})

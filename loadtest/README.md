@@ -129,6 +129,7 @@ variable state (dozens of distinct calls):
 | `gzip` | asserts the Gzip middleware actually compresses (`Content-Encoding: gzip` round-trip) |
 | `headers` | header-heavy request/response (HPACK pressure) |
 | `grpc` | unary gRPC echo against the in-process gRPC server — exact round-trip through poseidon's length-prefixed framing + status trailers (hand-rolled client, no grpc-go dependency) |
+| `grpc-sstream` / `grpc-cstream` / `grpc-bidi` | gRPC **server-**, **client-**, and **bidi-streaming** echoes — multi-message length-prefixed framing in both directions, asserted per message |
 | `metrics` | scrapes the Prometheus `/metrics` exposition under load and asserts a known counter (drives the `MetricsCollector` → `WritePrometheus` path) |
 | `health` | poseidon's `/readyz` readiness probe |
 | `errors` | error-status paths (404/500/503) |
@@ -140,11 +141,12 @@ the enlarged connection recv window (`ConnRecvWindow`), the full middleware onio
 (Recovery, RequestID, RealIP, StructuredAccessLog, Tracing, SecurityHeaders, Gzip,
 RateLimit, Metrics + its Prometheus exposition), request-body limits, chunked
 streaming, HPACK header pressure, error-status handling, health probes, and
-**unary gRPC** (framing + status trailers). *Not exercised:* gRPC **streaming**
-(server/client/bidi — only unary), server **push**/`PUSH_PROMISE`, h2c (this
-harness is TLS-only), ORIGIN/ALTSVC, the rapid-reset budget, and gRPC reflection.
-It is a load/soak/profiling tool, not a conformance suite — the excluded items are
-covered by the package unit/integration tests instead.
+**gRPC** (unary + server-, client-, and bidi-streaming; framing + status
+trailers). *Not exercised:* server **push**/`PUSH_PROMISE`, h2c (this harness is
+TLS-only), ORIGIN/ALTSVC (poseidon has no server-side send API for these frames —
+only the client-side receive handlers exist), the rapid-reset budget, and gRPC
+reflection. It is a load/soak/profiling tool, not a conformance suite — the
+excluded items are covered by the package unit/integration tests instead.
 
 **Streaming, not buffering:** `-data-size` bodies are generated on the fly from a
 single shared, read-only 32 KiB buffer (never a per-request allocation), so
