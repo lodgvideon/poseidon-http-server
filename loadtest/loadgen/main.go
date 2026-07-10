@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	hclient "github.com/lodgvideon/poseidon-http-client/client"
 )
 
 // ---------------------------------------------------------------------------
@@ -184,7 +186,7 @@ type scenario struct {
 	run    func(ctx context.Context, cli *http.Client, base string, v *vus, m *metrics) error
 }
 
-func buildScenarios(cfg config, grpcURL string) []scenario {
+func buildScenarios(cfg config, grpcURL string, h2cCli *hclient.Client) []scenario {
 	small := int64(1 << 20) // 1 MiB round-trip inside the upload scenario
 	return []scenario{
 		{name: "ping", weight: 40, run: func(ctx context.Context, cli *http.Client, base string, _ *vus, m *metrics) error {
@@ -254,6 +256,14 @@ func buildScenarios(cfg config, grpcURL string) []scenario {
 		// gRPC bidi-streaming: N requests ↔ N echoes.
 		{name: "grpc-bidi", weight: 4, run: func(ctx context.Context, cli *http.Client, _ string, v *vus, m *metrics) error {
 			return grpcBidi(ctx, cli, grpcURL, randPayloads(v, 5), m)
+		}},
+		// h2c: cleartext HTTP/2 via the poseidon-http-client (dogfoods
+		// client↔server) — a hot GET plus a streamed download.
+		{name: "h2c", weight: 4, run: func(ctx context.Context, _ *http.Client, _ string, _ *vus, m *metrics) error {
+			if err := h2cGet(ctx, h2cCli, "/", m); err != nil {
+				return err
+			}
+			return h2cGet(ctx, h2cCli, "/download?n="+fmt.Sprint(64<<10), m)
 		}},
 		// Scrape + assert the Prometheus exposition under load, driving the
 		// MetricsCollector aggregation → WritePrometheus path end-to-end.
@@ -373,6 +383,31 @@ func get(ctx context.Context, cli *http.Client, url string, wantCode int, m *met
 // on a retryable REFUSED_STREAM — a server may refuse then reopen a stream under
 // load, and without GetBody the stdlib h2 client fails such a retry outright
 // ("cannot retry … after Request.Body was written").
+// h2cGet issues a GET over the poseidon-http-client (cleartext HTTP/2). Because
+// that client is HTTP/2-only, a successful round-trip IS an h2c round-trip —
+// there is no HTTP/1.1 fallback to guard against. It replicates do()'s counters
+// since it bypasses the net/http path.
+func h2cGet(ctx context.Context, c *hclient.Client, path string, m *metrics) error {
+	m.attempts.Add(1)
+	resp := &hclient.Response{}
+	if err := c.Do(ctx, hclient.GET(path), resp); err != nil {
+		if ctx.Err() == nil {
+			m.errs.Add(1)
+		}
+		return err
+	}
+	m.reqs.Add(1)
+	m.bytes.Add(resp.BytesReceived)
+	if sc, ok := m.status[resp.Status]; ok {
+		sc.Add(1)
+	}
+	if resp.Status != 200 {
+		m.errs.Add(1)
+		return fmt.Errorf("h2c %s: status %d", path, resp.Status)
+	}
+	return nil
+}
+
 func post(ctx context.Context, cli *http.Client, url string, size int64, m *metrics) (*http.Response, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, newPatternReader(size))
 	req.ContentLength = size
@@ -727,7 +762,7 @@ func main() {
 		},
 	}
 
-	scs := buildScenarios(cfg, fs.grpcURL)
+	scs := buildScenarios(cfg, fs.grpcURL, fs.h2cClient)
 	m := newMetrics(scs)
 
 	// pprof CPU profile spans the whole run.

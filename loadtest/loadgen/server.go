@@ -38,6 +38,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	hclient "github.com/lodgvideon/poseidon-http-client/client"
+	hconn "github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-server/conn"
 	"github.com/lodgvideon/poseidon-http-server/grpcserver"
 	"github.com/lodgvideon/poseidon-http-server/middleware"
@@ -91,9 +93,10 @@ func (r *patternReader) Read(p []byte) (int, error) {
 // mux behind the full middleware onion, and a gRPC server — whose surface a load
 // run wants to hit.
 type featureServer struct {
-	baseURL   string // HTTP feature mux
-	grpcURL   string // gRPC EchoService
+	baseURL   string // HTTP feature mux (TLS h2)
+	grpcURL   string // gRPC EchoService (TLS h2)
 	clientTLS *tls.Config
+	h2cClient *hclient.Client // poseidon-http-client speaking cleartext HTTP/2 (h2c)
 	metrics   *middleware.MetricsCollector
 	tracer    *countingTracer
 	stop      func()
@@ -249,17 +252,56 @@ func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, er
 		return nil, err
 	}
 
+	// ---- h2c feature server (cleartext HTTP/2 — no TLS) ----
+	h2cLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = httpLn.Close()
+		_ = grpcLn.Close()
+		return nil, err
+	}
+	h2cSrv, err := server.NewServer(server.Options{
+		Addr:          h2cLn.Addr().String(),
+		HTTPHandler:   newFeatureMux(metrics),
+		H2C:           true, // serve HTTP/2 over cleartext (prior-knowledge + Upgrade)
+		StreamingBody: true,
+		Logger:        noopLogger{},
+	})
+	if err != nil {
+		_ = httpLn.Close()
+		_ = grpcLn.Close()
+		_ = h2cLn.Close()
+		return nil, err
+	}
+	// A dedicated cleartext-h2 client: poseidon-http-client itself, dialing a
+	// plain TCP conn with :scheme=http — so the h2c path is dogfooded end-to-end
+	// (poseidon client ↔ poseidon server) with no third-party HTTP/2 dependency.
+	h2cClient, err := hclient.NewPoolClient(
+		h2cLn.Addr().String(),
+		&hconn.PlaintextDialer{},
+		hclient.PoolOptions{MaxConnsPerHost: 8},
+		hclient.WithDefaultScheme("http"),
+	)
+	if err != nil {
+		_ = httpLn.Close()
+		_ = grpcLn.Close()
+		_ = h2cLn.Close()
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	httpErr := make(chan error, 1)
 	grpcErr := make(chan error, 1)
+	h2cErr := make(chan error, 1)
 	go func() { httpErr <- httpSrv.Serve(ctx, tls.NewListener(httpLn, serverTLS)) }()
 	go func() { grpcErr <- grpcSrv.Serve(ctx, tls.NewListener(grpcLn, serverTLS)) }()
+	go func() { h2cErr <- h2cSrv.Serve(ctx, h2cLn) }() // plain listener, no TLS
 
-	for _, addr := range []string{httpLn.Addr().String(), grpcLn.Addr().String()} {
+	for _, addr := range []string{httpLn.Addr().String(), grpcLn.Addr().String(), h2cLn.Addr().String()} {
 		if err := waitReachable(addr); err != nil {
 			cancel()
 			_ = httpSrv.Close()
 			_ = grpcSrv.Close()
+			_ = h2cSrv.Close()
 			return nil, err
 		}
 	}
@@ -268,13 +310,16 @@ func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, er
 		baseURL:   "https://" + httpLn.Addr().String(),
 		grpcURL:   "https://" + grpcLn.Addr().String(),
 		clientTLS: clientTLS,
+		h2cClient: h2cClient,
 		metrics:   metrics,
 		tracer:    tracer,
 		stop: func() {
 			cancel()
 			_ = httpSrv.Close()
 			_ = grpcSrv.Close()
-			for _, ch := range []chan error{httpErr, grpcErr} {
+			_ = h2cSrv.Close()
+			_ = h2cClient.Close()
+			for _, ch := range []chan error{httpErr, grpcErr, h2cErr} {
 				select {
 				case <-ch:
 				case <-time.After(3 * time.Second):

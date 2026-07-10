@@ -98,11 +98,12 @@ Install: `brew install k6` / <https://k6.io/docs/get-started/installation/> /
 
 [`loadtest/loadgen`](./loadgen) is a **self-contained** load/soak + profiling
 harness written in Go. Unlike h2load/ghz/k6 it needs no external tool and no
-separately-started server: it boots **two in-process** poseidon servers (an HTTP/2
-TLS mux behind the full middleware onion, plus a gRPC server) and drives them
-end-to-end, so one run exercises a broad slice of the feature surface at once and
-captures pprof profiles + a resource report. It has unit + end-to-end tests
-(`go test ./loadtest/loadgen`), so it runs in the normal test/race gate.
+separately-started server: it boots **three in-process** poseidon servers (an
+HTTP/2 TLS mux behind the full middleware onion, a gRPC server, and a cleartext
+**h2c** mux) and drives them end-to-end, so one run exercises a broad slice of the
+feature surface at once and captures pprof profiles + a resource report. It has
+unit + end-to-end tests (`go test ./loadtest/loadgen`), so it runs in the normal
+test/race gate.
 
 ```sh
 # smoke it (small + fast)
@@ -130,6 +131,7 @@ variable state (dozens of distinct calls):
 | `headers` | header-heavy request/response (HPACK pressure) |
 | `grpc` | unary gRPC echo against the in-process gRPC server — exact round-trip through poseidon's length-prefixed framing + status trailers (hand-rolled client, no grpc-go dependency) |
 | `grpc-sstream` / `grpc-cstream` / `grpc-bidi` | gRPC **server-**, **client-**, and **bidi-streaming** echoes — multi-message length-prefixed framing in both directions, asserted per message |
+| `h2c` | **cleartext HTTP/2** (no TLS) driven by **poseidon-http-client** itself (`DefaultScheme:"http"`, plaintext dialer) — dogfoods the poseidon client ↔ poseidon server over h2c, no third-party HTTP/2 dependency |
 | `metrics` | scrapes the Prometheus `/metrics` exposition under load and asserts a known counter (drives the `MetricsCollector` → `WritePrometheus` path) |
 | `health` | poseidon's `/readyz` readiness probe |
 | `errors` | error-status paths (404/500/503) |
@@ -140,13 +142,16 @@ variable state (dozens of distinct calls):
 the enlarged connection recv window (`ConnRecvWindow`), the full middleware onion
 (Recovery, RequestID, RealIP, StructuredAccessLog, Tracing, SecurityHeaders, Gzip,
 RateLimit, Metrics + its Prometheus exposition), request-body limits, chunked
-streaming, HPACK header pressure, error-status handling, health probes, and
+streaming, HPACK header pressure, error-status handling, health probes,
 **gRPC** (unary + server-, client-, and bidi-streaming; framing + status
-trailers). *Not exercised:* server **push**/`PUSH_PROMISE`, h2c (this harness is
-TLS-only), ORIGIN/ALTSVC (poseidon has no server-side send API for these frames —
-only the client-side receive handlers exist), the rapid-reset budget, and gRPC
-reflection. It is a load/soak/profiling tool, not a conformance suite — the
-excluded items are covered by the package unit/integration tests instead.
+trailers), and cleartext **h2c**. *Not exercised:* server **push**/`PUSH_PROMISE`
+(not reachable through the net/http mux adapter, which exposes Flusher but not
+Pusher, and no Go HTTP/2 client accepts pushed streams — so delivery can't be
+driven or asserted in-process), **ORIGIN/ALTSVC** (poseidon has no server-side
+send API for these frames — only client-side receive handlers exist), the
+rapid-reset budget, and gRPC reflection. It is a load/soak/profiling tool, not a
+conformance suite — the excluded items are covered by the package unit/integration
+tests instead.
 
 **Streaming, not buffering:** `-data-size` bodies are generated on the fly from a
 single shared, read-only 32 KiB buffer (never a per-request allocation), so

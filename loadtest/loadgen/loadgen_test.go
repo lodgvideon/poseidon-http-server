@@ -96,7 +96,7 @@ func TestFeatureServers_EndToEnd(t *testing.T) {
 	defer cancel()
 
 	const dataSize = int64(1 << 20) // 1 MiB
-	m := newMetrics(buildScenarios(config{dataSize: dataSize, jsonItems: 800}, fs.grpcURL))
+	m := newMetrics(buildScenarios(config{dataSize: dataSize, jsonItems: 800}, fs.grpcURL, fs.h2cClient))
 
 	// HTTP hot path.
 	if err := get(ctx, cli, fs.baseURL+"/", 200, m); err != nil {
@@ -154,6 +154,13 @@ func TestFeatureServers_EndToEnd(t *testing.T) {
 	// gRPC bidi-streaming: N requests echoed back in order.
 	if err := grpcBidi(ctx, cli, fs.grpcURL, [][]byte{[]byte("x"), []byte("yy"), []byte("zzz"), []byte("w")}, m); err != nil {
 		t.Fatalf("grpc bidi: %v", err)
+	}
+	// h2c: cleartext HTTP/2 via the poseidon client (dogfoods client↔server).
+	if err := h2cGet(ctx, fs.h2cClient, "/", m); err != nil {
+		t.Fatalf("h2c: %v", err)
+	}
+	if err := h2cGet(ctx, fs.h2cClient, "/download?n=65536", m); err != nil {
+		t.Fatalf("h2c download: %v", err)
 	}
 
 	if e := m.errs.Load(); e != 0 {
