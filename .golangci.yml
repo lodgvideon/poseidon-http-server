@@ -123,6 +123,9 @@ linters:
       # the library's strict style/security gate (examples favour pedagogical
       # clarity over hardening, and are already excluded from the coverage gate).
       - examples
+      # Load/soak + profiling harness (loadtest/loadgen): tooling, not library
+      # code — same rationale as examples/. Still build- and vet-checked by CI.
+      - loadtest
     rules:
       - path: _test\.go$
         linters:

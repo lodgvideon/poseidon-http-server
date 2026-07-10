@@ -18,10 +18,11 @@ if [ ! -f "$PROFILE" ]; then
   exit 1
 fi
 
-# Scope the gate to library packages: exclude non-testable main packages (examples/*,
-# cmd/*) which carry no unit tests and would otherwise drag the total below the gate.
-# The "mode:" header line is preserved. Override the pattern via COVERAGE_EXCLUDE.
-EXCLUDE="${COVERAGE_EXCLUDE:-/(examples|cmd)/}"
+# Scope the gate to library packages: exclude non-testable main packages
+# (examples/*, cmd/*, loadtest/* tooling) which carry no unit tests and would
+# otherwise drag the total below the gate. The "mode:" header line is preserved.
+# Override the pattern via COVERAGE_EXCLUDE.
+EXCLUDE="${COVERAGE_EXCLUDE:-/(examples|cmd|loadtest)/}"
 filtered="$(mktemp 2>/dev/null || echo cover.filtered.out)"
 grep -vE "$EXCLUDE" "$PROFILE" > "$filtered" || true
 

@@ -94,6 +94,79 @@ Read `http_reqs` (RPS), `http_req_duration` (`p(50)/p(95)/p(99)`), and `checks`.
 Install: `brew install k6` / <https://k6.io/docs/get-started/installation/> /
 `docker run --rm -i grafana/k6 run - <loadtest/k6_http2.js`.
 
+## d) All-in-one Go harness — `loadgen` (no external tools)
+
+[`loadtest/loadgen`](./loadgen) is a **self-contained** load/soak + profiling
+harness written in Go. Unlike h2load/ghz/k6 it needs no external tool and no
+separately-started server: it boots **two in-process** poseidon servers (an HTTP/2
+TLS mux behind the full middleware onion, plus a gRPC server) and drives them
+end-to-end, so one run exercises a broad slice of the feature surface at once and
+captures pprof profiles + a resource report. It has unit + end-to-end tests
+(`go test ./loadtest/loadgen`), so it runs in the normal test/race gate.
+
+```sh
+# smoke it (small + fast)
+go run ./loadtest/loadgen -duration=15s -vus=32 -data-size=32MiB
+
+# heavy soak with a 2-minute spike + profiling (run on real hardware)
+go run ./loadtest/loadgen \
+    -duration=10m -vus=128 -data-size=10GiB -json-items=40000 \
+    -spike-after=2m -spike-dur=2m -spike-vus=512 \
+    -cpuprofile=cpu.out -memprofile=heap.out
+go tool pprof cpu.out    # where CPU goes
+go tool pprof heap.out   # where memory goes
+```
+
+**One run exercises** a weighted + conditional + nested scenario mix with per-VU
+variable state (dozens of distinct calls):
+
+| scenario | feature |
+| --- | --- |
+| `ping` | hot-path GET — the RPS/latency baseline |
+| `login` → `upload+verify` | variable correlation: a session token gates the upload scenario, which streams a large body then does a nested download round-trip |
+| `bigparse` / `adaptive` | streams a **~3.3 MiB JSON** response (at the default `-json-items=40000`), parsed element-by-element (bounded memory); `adaptive` branches on the per-VU upload counter (`if`-based selection) |
+| `stream` | chunked streaming response |
+| `gzip` | asserts the Gzip middleware actually compresses (`Content-Encoding: gzip` round-trip) |
+| `headers` | header-heavy request/response (HPACK pressure) |
+| `grpc` | unary gRPC echo against the in-process gRPC server — exact round-trip through poseidon's length-prefixed framing + status trailers (hand-rolled client, no grpc-go dependency) |
+| `metrics` | scrapes the Prometheus `/metrics` exposition under load and asserts a known counter (drives the `MetricsCollector` → `WritePrometheus` path) |
+| `health` | poseidon's `/readyz` readiness probe |
+| `errors` | error-status paths (404/500/503) |
+| `slow` | long-lived streams (concurrency pressure) |
+| **spike** | a barrier that **unblocks after `-spike-after`** and blasts `-spike-vus` VUs at a heavy path (big-parse + large upload/download) for `-spike-dur` — the sharp burst |
+
+**Feature coverage (honest).** *Covered:* TLS h2, inbound + outbound flow control,
+the enlarged connection recv window (`ConnRecvWindow`), the full middleware onion
+(Recovery, RequestID, RealIP, StructuredAccessLog, Tracing, SecurityHeaders, Gzip,
+RateLimit, Metrics + its Prometheus exposition), request-body limits, chunked
+streaming, HPACK header pressure, error-status handling, health probes, and
+**unary gRPC** (framing + status trailers). *Not exercised:* gRPC **streaming**
+(server/client/bidi — only unary), server **push**/`PUSH_PROMISE`, h2c (this
+harness is TLS-only), ORIGIN/ALTSVC, the rapid-reset budget, and gRPC reflection.
+It is a load/soak/profiling tool, not a conformance suite — the excluded items are
+covered by the package unit/integration tests instead.
+
+**Streaming, not buffering:** `-data-size` bodies are generated on the fly from a
+single shared, read-only 32 KiB buffer (never a per-request allocation), so
+`-data-size=10GiB` streams 10 GiB while server + client memory stays flat — the
+report's `heap alloc max` shows tens of MiB, not GiB.
+
+**Report:** RPS; error rate over **attempts** (a true fraction — in-flight
+requests cut off at the deadline are *not* counted, and a genuine mid-stream body
+failure *is*); **sustained** latency p50/p90/p95/p99 plus a separate **spike**
+latency line (the burst's own tail, sampled independently); per-scenario iteration
+counts; status-code distribution; and a **resource footprint** (max/avg heap
+alloc, GC cycles, max goroutines, tracing spans, rendered `/metrics` size) — the
+"minimal resources" signal. A healthy run reports **0 errors** even under the
+spike. Flags: `go run ./loadtest/loadgen -h`.
+
+> **Scale note:** the flags reach 10 GiB bodies + a 2-minute spike, but that scale
+> needs real hardware (time/RAM/CPU). The harness is validated at reduced scale
+> (hundreds of MiB, seconds) in the tests and smoke runs; dial the flags up on a
+> dedicated load box. The `spike latency` line only appears once heavy iterations
+> complete inside the spike window — a very short spike over huge bodies may end
+> before any single `heavy` finishes.
+
 ## Run via Make
 
 ```sh
