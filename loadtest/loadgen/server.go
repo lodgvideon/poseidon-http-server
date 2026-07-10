@@ -1,18 +1,19 @@
 // Command loadgen is a self-contained load/soak + profiling harness for
 // poseidon-http-server. Unlike the external-tool scripts in this directory
-// (h2load/ghz/k6), it drives a real HTTP/2 server end-to-end from Go, so it can:
+// (h2load/ghz/k6), it drives real poseidon servers end-to-end from Go, so it can:
 //
-//   - exercise ~all of the HTTP/2 + middleware feature surface in one run,
-//   - stream arbitrarily large bodies (up to 10 GiB) from a fixed buffer, so
-//     memory stays flat regardless of -data-size,
+//   - exercise a broad slice of the HTTP/2 + gRPC + middleware feature surface
+//     in one run (see loadtest/README.md for the honest covered/excluded list),
+//   - stream arbitrarily large bodies (up to 10 GiB) from a fixed shared buffer,
+//     so memory stays flat regardless of -data-size,
 //   - correlate variables across a weighted + conditional + nested scenario mix,
 //   - fire a sharp traffic spike partway through a sustained soak,
-//   - stream-parse large (>3 MiB) responses under load, and
-//   - capture CPU/heap pprof profiles + a runtime resource report to prove the
+//   - stream-parse large (multi-MiB) responses under load, and
+//   - capture CPU/heap pprof profiles + a runtime resource report to show the
 //     server stays lean.
 //
-// This file defines the feature server; main.go defines the driver, scenarios,
-// spike, profiling, and report. Build/run:
+// This file defines the feature servers (an HTTP mux server + a gRPC server);
+// main.go defines the driver, scenarios, spike, profiling, and report. Build/run:
 //
 //	go run ./loadtest/loadgen -h
 //	go run ./loadtest/loadgen -duration=20s -vus=64 -data-size=64MiB \
@@ -29,31 +30,42 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-server/conn"
+	"github.com/lodgvideon/poseidon-http-server/grpcserver"
 	"github.com/lodgvideon/poseidon-http-server/middleware"
 	"github.com/lodgvideon/poseidon-http-server/server"
 )
 
-// patternReader yields n bytes of a repeating printable pattern from a small
-// fixed buffer, so streaming a 10 GiB body never allocates 10 GiB. Not safe for
-// concurrent use; each request makes its own.
-type patternReader struct {
-	remaining int64
-	buf       []byte
-}
-
-func newPatternReader(n int64) *patternReader {
+// patternBuf is a read-only 32 KiB block of a repeating printable pattern shared
+// by every patternReader. It is written once at init and only ever copied out of
+// (never mutated), so sharing it across concurrent readers is safe and — unlike a
+// per-request buffer — keeps the harness's own allocations out of the heap/GC
+// footprint the resource sampler attributes to the server.
+var patternBuf = func() []byte {
 	b := make([]byte, 32*1024)
 	for i := range b {
 		b[i] = byte('A' + i%26)
 	}
-	return &patternReader{remaining: n, buf: b}
+	return b
+}()
+
+// patternReader yields n bytes of patternBuf, so streaming a 10 GiB body never
+// allocates 10 GiB. Only the small `remaining` counter is per-instance, so it is
+// not safe for concurrent use by multiple goroutines; each request makes its own.
+type patternReader struct {
+	remaining int64
+}
+
+func newPatternReader(n int64) *patternReader {
+	return &patternReader{remaining: n}
 }
 
 func (r *patternReader) Read(p []byte) (int, error) {
@@ -65,47 +77,75 @@ func (r *patternReader) Read(p []byte) (int, error) {
 		n = int(r.remaining)
 	}
 	for w := 0; w < n; {
-		w += copy(p[w:n], r.buf)
+		w += copy(p[w:n], patternBuf)
 	}
 	r.remaining -= int64(n)
 	return n, nil
 }
 
-// featureServer is an in-process poseidon HTTP/2 (TLS) server whose mux
-// exercises the feature surface a load run wants to hit.
+// featureServer is a pair of in-process poseidon HTTP/2 (TLS) servers — an HTTP
+// mux behind the full middleware onion, and a gRPC server — whose surface a load
+// run wants to hit.
 type featureServer struct {
-	baseURL   string
+	baseURL   string // HTTP feature mux
+	grpcURL   string // gRPC EchoService
 	clientTLS *tls.Config
 	metrics   *middleware.MetricsCollector
+	tracer    *countingTracer
 	stop      func()
 }
 
-// newFeatureServer starts the server on a random localhost port and returns it
-// ready to accept requests. rateLimit is the global token-bucket rate (req/s);
-// a soak stays under it while the spike deliberately exceeds it to exercise 429s.
-func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, err
-	}
-	cert, serverTLS, clientTLS, err := selfSignedTLS()
-	if err != nil {
-		_ = ln.Close()
-		return nil, err
-	}
-	_ = cert
+// countingTracer is a minimal middleware.Tracer that records how many spans the
+// Tracing middleware created, so the run actually exercises the span code path
+// (a nil Tracer would make Tracing a zero-cost pass-through).
+type countingTracer struct{ spans atomic.Int64 }
 
-	mux := newFeatureMux()
+func (t *countingTracer) StartSpan(ctx context.Context, _ string) (context.Context, middleware.Span) {
+	t.spans.Add(1)
+	return ctx, noopSpan{}
+}
+
+type noopSpan struct{}
+
+func (noopSpan) SetAttribute(string, any) {}
+func (noopSpan) SetStatus(int)            {}
+func (noopSpan) End()                     {}
+
+// newFeatureServer starts both servers on random localhost ports (sharing one
+// self-signed cert) and returns them ready to accept requests. rateLimit is the
+// global token-bucket rate (req/s); it is kept high enough that the soak and
+// spike stay under it, so the RateLimit middleware is traversed on every request
+// without rejecting — lower it below achievable throughput to actually exercise
+// 429s (the assertion helpers treat 429 as an expected rate-limit rejection).
+func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, error) {
+	_, serverTLS, clientTLS, err := selfSignedTLS()
+	if err != nil {
+		return nil, err
+	}
+
 	metrics := middleware.NewMetricsCollector()
+	tracer := &countingTracer{}
+
+	// ---- HTTP feature server ----
+	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
 
 	secCfg := middleware.DefaultSecurityHeadersConfig()
 	secCfg.HSTSMaxAge = 0 // meaningless for a local test cert
+	discardLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Onion order (outermost first): Recovery → RequestID → SecurityHeaders →
-	// Gzip → RateLimit → Metrics. Every request flows through the full stack.
+	// Onion order (outermost first): Recovery → RequestID → RealIP →
+	// StructuredAccessLog → Tracing → SecurityHeaders → Gzip → RateLimit →
+	// Metrics. RealIP precedes RateLimit so KeyByClientIP() resolves a non-empty
+	// key (the loopback peer is a trusted proxy, so ClientIP is the peer IP).
 	mw := []server.Middleware{
 		middleware.Recovery(noopLogger{}),
 		middleware.RequestID(),
+		middleware.RealIP(middleware.RealIPConfig{TrustedProxies: []string{"127.0.0.1/32", "::1/128"}}),
+		middleware.StructuredAccessLog(discardLog),
+		middleware.Tracing(middleware.TracingConfig{Tracer: tracer}),
 		middleware.SecurityHeaders(secCfg),
 		middleware.Gzip(middleware.DefaultGzipConfig()),
 		middleware.RateLimit(middleware.RateLimitConfig{
@@ -116,9 +156,9 @@ func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, er
 		metrics.Metrics(),
 	}
 
-	srv, err := server.NewServer(server.Options{
-		Addr:                ln.Addr().String(),
-		HTTPHandler:         mux,
+	httpSrv, err := server.NewServer(server.Options{
+		Addr:                httpLn.Addr().String(),
+		HTTPHandler:         newFeatureMux(metrics),
 		Middleware:          mw,
 		MaxRequestBodyBytes: maxBodyBytes,
 		// Enlarge the connection recv window so large uploads are not throttled
@@ -127,32 +167,71 @@ func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, er
 		Logger:   noopLogger{},
 	})
 	if err != nil {
-		_ = ln.Close()
+		_ = httpLn.Close()
 		return nil, err
 	}
-	metrics.SetTransportSource(srv.TransportStats)
+	metrics.SetTransportSource(httpSrv.TransportStats)
+
+	// ---- gRPC feature server (second listener, same cert) ----
+	grpcLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = httpLn.Close()
+		return nil, err
+	}
+	reg := grpcserver.NewServiceRegistrar()
+	reg.RegisterService(&grpcserver.ServiceDesc{
+		Name: "loadgen.EchoService",
+		Methods: []grpcserver.MethodDesc{
+			// Unary echo: returns the request bytes verbatim, so the client can
+			// assert an exact round-trip through poseidon's gRPC framing + status
+			// trailers.
+			{Name: "Echo", UnaryHandler: func(_ context.Context, req []byte) ([]byte, error) {
+				return req, nil
+			}},
+		},
+	})
+	grpcSrv, err := server.NewServer(server.Options{
+		Addr:          grpcLn.Addr().String(),
+		Handler:       reg.Handler(),
+		StreamingBody: true, // gRPC needs a streaming request body
+		Logger:        noopLogger{},
+	})
+	if err != nil {
+		_ = httpLn.Close()
+		_ = grpcLn.Close()
+		return nil, err
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tlsLn := tls.NewListener(ln, serverTLS)
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ctx, tlsLn) }()
+	httpErr := make(chan error, 1)
+	grpcErr := make(chan error, 1)
+	go func() { httpErr <- httpSrv.Serve(ctx, tls.NewListener(httpLn, serverTLS)) }()
+	go func() { grpcErr <- grpcSrv.Serve(ctx, tls.NewListener(grpcLn, serverTLS)) }()
 
-	if err := waitReachable(ln.Addr().String()); err != nil {
-		cancel()
-		_ = srv.Close()
-		return nil, err
+	for _, addr := range []string{httpLn.Addr().String(), grpcLn.Addr().String()} {
+		if err := waitReachable(addr); err != nil {
+			cancel()
+			_ = httpSrv.Close()
+			_ = grpcSrv.Close()
+			return nil, err
+		}
 	}
 
 	return &featureServer{
-		baseURL:   "https://" + ln.Addr().String(),
+		baseURL:   "https://" + httpLn.Addr().String(),
+		grpcURL:   "https://" + grpcLn.Addr().String(),
 		clientTLS: clientTLS,
 		metrics:   metrics,
+		tracer:    tracer,
 		stop: func() {
 			cancel()
-			_ = srv.Close()
-			select {
-			case <-serveErr:
-			case <-time.After(3 * time.Second):
+			_ = httpSrv.Close()
+			_ = grpcSrv.Close()
+			for _, ch := range []chan error{httpErr, grpcErr} {
+				select {
+				case <-ch:
+				case <-time.After(3 * time.Second):
+				}
 			}
 		},
 	}, nil
@@ -160,7 +239,7 @@ func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, er
 
 // newFeatureMux builds the endpoint set. Each endpoint isolates one feature so a
 // scenario can target it precisely.
-func newFeatureMux() *http.ServeMux {
+func newFeatureMux(metrics *middleware.MetricsCollector) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Tiny hot-path GET — the RPS/latency baseline.
@@ -197,7 +276,7 @@ func newFeatureMux() *http.ServeMux {
 		_, _ = io.Copy(w, newPatternReader(n))
 	})
 
-	// Big JSON array (> a few MiB) for the large-response stream-parse scenario.
+	// Big JSON array (a few MiB) for the large-response stream-parse scenario.
 	// Written incrementally so the SERVER also stays lean.
 	mux.HandleFunc("GET /bigjson", func(w http.ResponseWriter, r *http.Request) {
 		count := queryInt64(r, "n", 20000)
@@ -257,6 +336,24 @@ func newFeatureMux() *http.ServeMux {
 		case <-r.Context().Done():
 		}
 	})
+
+	// Prometheus exposition — renders the MetricsCollector's counter set. The
+	// `metrics` scenario scrapes this under load and asserts it, so the whole
+	// aggregation → WritePrometheus path is exercised end-to-end (not just the
+	// per-request Metrics() middleware).
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = io.WriteString(w, metrics.WritePrometheus())
+	})
+
+	// Liveness/readiness probes mounted from poseidon's own HealthHandler (which
+	// serves /healthz + /readyz), adapted back to net/http — exercises
+	// server/health.go.
+	hs := server.NewHealthState()
+	hs.SetReady(true)
+	health := server.ToHTTPHandler(server.HealthHandler(hs))
+	mux.Handle("GET /healthz", health)
+	mux.Handle("GET /readyz", health)
 
 	return mux
 }

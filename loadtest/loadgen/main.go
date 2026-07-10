@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -44,8 +46,8 @@ func parseFlags() config {
 	flag.DurationVar(&c.duration, "duration", 15*time.Second, "sustained soak duration")
 	flag.IntVar(&c.vus, "vus", 32, "sustained virtual users (concurrent goroutines)")
 	flag.StringVar(&dataSize, "data-size", "16MiB", "upload/download body size (e.g. 64MiB, 10GiB) — streamed, so memory stays flat")
-	flag.Int64Var(&c.jsonItems, "json-items", 30000, "items in the big-JSON response (~>3MiB) for the large-response parse scenario")
-	flag.Float64Var(&c.rateLimit, "rate-limit", 100000, "global token-bucket rate (req/s); the soak stays under it, the spike exceeds it to exercise 429s")
+	flag.Int64Var(&c.jsonItems, "json-items", 40000, "items in the big-JSON response for the large-response parse scenario (~3.3MiB at the default; each item ≈83B)")
+	flag.Float64Var(&c.rateLimit, "rate-limit", 100000, "global token-bucket rate (req/s); kept high so soak+spike stay under it (RateLimit is traversed but does not reject) — lower it below achievable throughput to exercise 429s, which the helpers treat as expected")
 	flag.StringVar(&maxBody, "max-body", "-1", "server request-body limit (e.g. 12GiB); -1 disables")
 	flag.DurationVar(&c.spikeAfter, "spike-after", 6*time.Second, "delay before the spike unblocks (0 disables the spike)")
 	flag.DurationVar(&c.spikeDur, "spike-dur", 5*time.Second, "spike duration (set 2m for the full-scale burst)")
@@ -73,16 +75,26 @@ func mustSize(s string) int64 {
 }
 
 // parseSize parses "10GiB", "64MiB", "3MB", "-1", "1048576".
+//
+// Suffixes are matched from an ORDERED slice, not a map: every unit suffix ends
+// in the byte suffix "B", so a map's randomized iteration order would let "B"
+// win for "16MiB" (→ TrimSuffix → "16Mi" → 16 bytes) on a random fraction of
+// calls. The bare "B" fallback must therefore be checked last.
 func parseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
+	units := []struct {
+		suffix string
+		mult   int64
+	}{
+		{"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10},
+		{"GB", 1e9}, {"MB", 1e6}, {"KB", 1e3},
+		{"B", 1}, // must be last: every other suffix also ends in "B"
+	}
 	mult := int64(1)
-	for suffix, m := range map[string]int64{
-		"GiB": 1 << 30, "MiB": 1 << 20, "KiB": 1 << 10,
-		"GB": 1e9, "MB": 1e6, "KB": 1e3, "B": 1,
-	} {
-		if strings.HasSuffix(s, suffix) {
-			mult = m
-			s = strings.TrimSuffix(s, suffix)
+	for _, u := range units {
+		if strings.HasSuffix(s, u.suffix) {
+			mult = u.mult
+			s = strings.TrimSuffix(s, u.suffix)
 			break
 		}
 	}
@@ -98,11 +110,12 @@ func parseSize(s string) (int64, error) {
 // ---------------------------------------------------------------------------
 
 type metrics struct {
-	reqs   atomic.Int64
-	errs   atomic.Int64
-	bytes  atomic.Int64
-	perSc  map[string]*atomic.Int64
-	status map[int]*atomic.Int64
+	attempts atomic.Int64 // requests attempted (incl. transport failures) — the error% denominator
+	reqs     atomic.Int64 // requests that got a response
+	errs     atomic.Int64
+	bytes    atomic.Int64
+	perSc    map[string]*atomic.Int64
+	status   map[int]*atomic.Int64
 
 	mu         sync.Mutex
 	errSamples map[string]int // capped distinct error strings → count
@@ -171,7 +184,7 @@ type scenario struct {
 	run    func(ctx context.Context, cli *http.Client, base string, v *vus, m *metrics) error
 }
 
-func buildScenarios(cfg config) []scenario {
+func buildScenarios(cfg config, grpcURL string) []scenario {
 	small := int64(1 << 20) // 1 MiB round-trip inside the upload scenario
 	return []scenario{
 		{name: "ping", weight: 40, run: func(ctx context.Context, cli *http.Client, base string, _ *vus, m *metrics) error {
@@ -197,6 +210,7 @@ func buildScenarios(cfg config) []scenario {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				m.errs.Add(1)
 				return fmt.Errorf("sink len=%s want %d", got, cfg.dataSize)
 			}
 			drain(resp)
@@ -221,6 +235,22 @@ func buildScenarios(cfg config) []scenario {
 		}},
 		{name: "slow", weight: 4, run: func(ctx context.Context, cli *http.Client, base string, _ *vus, m *metrics) error {
 			return get(ctx, cli, base+"/slow?ms=40", 200, m)
+		}},
+		// gRPC unary echo against the second (gRPC) server — exercises the whole
+		// grpcserver package (length-prefixed framing + status trailers) with a
+		// hand-rolled client, no grpc-go client dependency.
+		{name: "grpc", weight: 7, run: func(ctx context.Context, cli *http.Client, _ string, v *vus, m *metrics) error {
+			payload := []byte(fmt.Sprintf("echo-%d-%d", v.uploaded, v.rng.Int63()))
+			return grpcEcho(ctx, cli, grpcURL, payload, m)
+		}},
+		// Scrape + assert the Prometheus exposition under load, driving the
+		// MetricsCollector aggregation → WritePrometheus path end-to-end.
+		{name: "metrics", weight: 3, run: func(ctx context.Context, cli *http.Client, base string, _ *vus, m *metrics) error {
+			return scrapeMetrics(ctx, cli, base+"/metrics", m)
+		}},
+		// Readiness probe — exercises poseidon's HealthHandler (/readyz).
+		{name: "health", weight: 3, run: func(ctx context.Context, cli *http.Client, base string, _ *vus, m *metrics) error {
+			return get(ctx, cli, base+"/readyz", 200, m)
 		}},
 		// Variable-driven branching: only "warm" VUs (that have uploaded a few
 		// times) take the heavy adaptive path; the rest stay light.
@@ -281,6 +311,7 @@ func pickWeighted(scs []scenario, v *vus) *scenario {
 // error ONLY if it is genuine — an in-flight request cancelled by our own
 // end-of-run/end-of-spike context deadline is expected, not a server failure.
 func do(ctx context.Context, cli *http.Client, req *http.Request, m *metrics) (*http.Response, error) {
+	m.attempts.Add(1)
 	resp, err := cli.Do(req)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -301,9 +332,23 @@ func get(ctx context.Context, cli *http.Client, url string, wantCode int, m *met
 	if err != nil {
 		return err
 	}
-	n, _ := io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode == http.StatusTooManyRequests && wantCode != http.StatusTooManyRequests {
+		drain(resp) // expected rate-limit rejection, not a genuine failure
+		return nil
+	}
+	// The body error matters: in HTTP/2 the status line arrives before the DATA
+	// frames, so a 200 header followed by a mid-body RST_STREAM/GOAWAY/reset only
+	// surfaces here. Count it (unless it is our own end-of-run cancellation) so
+	// the "0 errors" signal actually means large downloads completed.
+	n, cerr := io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	m.bytes.Add(n)
+	if cerr != nil {
+		if ctx.Err() == nil {
+			m.errs.Add(1)
+		}
+		return cerr
+	}
 	if resp.StatusCode != wantCode {
 		m.errs.Add(1)
 		return fmt.Errorf("GET %s: status %d want %d", url, resp.StatusCode, wantCode)
@@ -332,6 +377,9 @@ func getHeaders(ctx context.Context, cli *http.Client, url string, m *metrics) e
 		return err
 	}
 	drain(resp)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil // expected rate-limit rejection
+	}
 	if resp.StatusCode != 200 {
 		m.errs.Add(1)
 		return fmt.Errorf("headers: %d", resp.StatusCode)
@@ -350,6 +398,9 @@ func gzipGet(ctx context.Context, cli *http.Client, url string, m *metrics) erro
 		return err
 	}
 	defer drain(resp)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil // expected rate-limit rejection
+	}
 	if resp.Header.Get("Content-Encoding") != "gzip" {
 		m.errs.Add(1)
 		return fmt.Errorf("gzip: Content-Encoding=%q", resp.Header.Get("Content-Encoding"))
@@ -380,6 +431,9 @@ func bigParse(ctx context.Context, cli *http.Client, url string, want int64, m *
 		return err
 	}
 	defer drain(resp)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil // expected rate-limit rejection
+	}
 	if resp.StatusCode != 200 {
 		m.errs.Add(1)
 		return fmt.Errorf("bigjson: %d", resp.StatusCode)
@@ -443,6 +497,92 @@ func (c *countReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// grpcEcho sends one unary gRPC Echo and asserts an exact round-trip. It speaks
+// the gRPC wire format by hand — a 5-byte length-prefixed message plus HTTP/2
+// status trailers — over the shared h2 client, so it needs no grpc-go client
+// dependency and directly exercises poseidon's grpcserver framing + dispatch.
+func grpcEcho(ctx context.Context, cli *http.Client, grpcBase string, payload []byte, m *metrics) error {
+	frame := make([]byte, 5+len(payload))
+	frame[0] = 0 // uncompressed flag
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(payload)))
+	copy(frame[5:], payload)
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, grpcBase+"/loadgen.EchoService/Echo", bytes.NewReader(frame))
+	req.Header.Set("Content-Type", "application/grpc")
+	resp, err := do(ctx, cli, req, m)
+	if err != nil {
+		return err
+	}
+	defer drain(resp)
+	if resp.StatusCode != 200 {
+		m.errs.Add(1)
+		return fmt.Errorf("grpc: HTTP status %d", resp.StatusCode)
+	}
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(resp.Body, hdr); err != nil {
+		if ctx.Err() == nil {
+			m.errs.Add(1)
+		}
+		return err
+	}
+	out := make([]byte, binary.BigEndian.Uint32(hdr[1:5]))
+	if _, err := io.ReadFull(resp.Body, out); err != nil {
+		if ctx.Err() == nil {
+			m.errs.Add(1)
+		}
+		return err
+	}
+	m.bytes.Add(int64(5 + len(out)))
+	_, _ = io.Copy(io.Discard, resp.Body) // reach EOF so the grpc-status trailer lands
+	if st := resp.Trailer.Get("grpc-status"); st != "" && st != "0" {
+		m.errs.Add(1)
+		return fmt.Errorf("grpc-status=%s", st)
+	}
+	if !bytes.Equal(out, payload) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		m.errs.Add(1)
+		return fmt.Errorf("grpc echo mismatch: got %d bytes want %d", len(out), len(payload))
+	}
+	return nil
+}
+
+// scrapeMetrics GETs the Prometheus exposition and asserts it rendered a known
+// counter — driving the MetricsCollector aggregation → WritePrometheus path
+// end-to-end under load. The exposition is small, so reading it whole is bounded.
+func scrapeMetrics(ctx context.Context, cli *http.Client, url string, m *metrics) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := do(ctx, cli, req, m)
+	if err != nil {
+		return err
+	}
+	body, cerr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	m.bytes.Add(int64(len(body)))
+	if cerr != nil {
+		if ctx.Err() == nil {
+			m.errs.Add(1)
+		}
+		return cerr
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil // expected rate-limit rejection
+	}
+	if resp.StatusCode != 200 {
+		m.errs.Add(1)
+		return fmt.Errorf("metrics: status %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "poseidon_requests_total") {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		m.errs.Add(1)
+		return fmt.Errorf("metrics: exposition missing poseidon_requests_total (%d bytes)", len(body))
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
@@ -469,7 +609,7 @@ func main() {
 		},
 	}
 
-	scs := buildScenarios(cfg)
+	scs := buildScenarios(cfg, fs.grpcURL)
 	m := newMetrics(scs)
 
 	// pprof CPU profile spans the whole run.
@@ -519,7 +659,11 @@ func main() {
 		}()
 	}
 
-	// Spike: unblocks after spikeAfter, then blasts `heavy` for spikeDur.
+	// Spike: unblocks after spikeAfter, then blasts `heavy` for spikeDur. Each
+	// spike VU records into its OWN reservoir (reservoir.add is not concurrency
+	// safe) so the burst's own tail latency is visible, reported on a separate
+	// line rather than diluted into the sustained single-request distribution.
+	spikeReservoirs := make([]*reservoir, cfg.spikeVUs)
 	if cfg.spikeAfter > 0 && cfg.spikeDur > 0 {
 		wg.Add(1)
 		go func() {
@@ -539,8 +683,16 @@ func main() {
 				go func() {
 					defer sw.Done()
 					v := &vus{rng: rand.New(rand.NewSource(cfg.seed*1000 + int64(j)))}
+					sr := newReservoir(4096, v.rng)
+					spikeReservoirs[j] = sr
 					for spikeCtx.Err() == nil {
-						_ = heavy(spikeCtx, cli, fs.baseURL, v, m, cfg)
+						t0 := time.Now()
+						err := heavy(spikeCtx, cli, fs.baseURL, v, m, cfg)
+						if err == nil {
+							sr.add(time.Since(t0))
+						} else if spikeCtx.Err() == nil {
+							m.sampleErr(err)
+						}
 						m.perSc["spike-heavy"].Add(1)
 					}
 				}()
@@ -563,7 +715,7 @@ func main() {
 		}
 	}
 
-	report(cfg, m, reservoirs, rs, elapsed, fs)
+	report(cfg, m, reservoirs, spikeReservoirs, rs, elapsed, fs)
 }
 
 // ---------------------------------------------------------------------------
@@ -620,23 +772,25 @@ func (s *resourceSampler) start(every time.Duration) func() {
 // Report
 // ---------------------------------------------------------------------------
 
-func report(cfg config, m *metrics, reservoirs []*reservoir, rs *resourceSampler, elapsed time.Duration, fs *featureServer) {
-	var all []time.Duration
-	for _, r := range reservoirs {
-		if r != nil {
-			all = append(all, r.xs...)
-		}
-	}
-	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
+func report(cfg config, m *metrics, reservoirs, spikeReservoirs []*reservoir, rs *resourceSampler, elapsed time.Duration, fs *featureServer) {
+	all := mergeReservoirs(reservoirs)
+	spikeAll := mergeReservoirs(spikeReservoirs)
 
 	reqs := m.reqs.Load()
+	attempts := m.attempts.Load()
 	fmt.Printf("\n================ loadgen report ================\n")
 	fmt.Printf("elapsed        %s\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("requests       %d  (%.0f req/s)\n", reqs, float64(reqs)/elapsed.Seconds())
-	fmt.Printf("errors         %d  (%.3f%%)\n", m.errs.Load(), 100*float64(m.errs.Load())/float64(max64(reqs, 1)))
+	// error%% is over attempts (which includes transport failures that never
+	// produced a response), so the ratio is a true fraction and cannot exceed 100%%.
+	fmt.Printf("errors         %d  (%.3f%% of %d attempts)\n", m.errs.Load(), 100*float64(m.errs.Load())/float64(max64(attempts, 1)), attempts)
 	fmt.Printf("body bytes     %s  (%.1f MiB/s)\n", human(m.bytes.Load()), float64(m.bytes.Load())/(1<<20)/elapsed.Seconds())
-	fmt.Printf("latency        p50=%s p90=%s p95=%s p99=%s max=%s  (over %d samples)\n",
+	fmt.Printf("latency        p50=%s p90=%s p95=%s p99=%s max=%s  (sustained, over %d samples)\n",
 		pct(all, 0.50), pct(all, 0.90), pct(all, 0.95), pct(all, 0.99), pct(all, 1.0), len(all))
+	if len(spikeAll) > 0 {
+		fmt.Printf("spike latency  p50=%s p90=%s p95=%s p99=%s max=%s  (burst `heavy`, over %d samples)\n",
+			pct(spikeAll, 0.50), pct(spikeAll, 0.90), pct(spikeAll, 0.95), pct(spikeAll, 0.99), pct(spikeAll, 1.0), len(spikeAll))
+	}
 
 	fmt.Printf("\nper-scenario iterations:\n")
 	names := make([]string, 0, len(m.perSc))
@@ -682,8 +836,11 @@ func report(cfg config, m *metrics, reservoirs []*reservoir, rs *resourceSampler
 	fmt.Printf("  heap alloc     max=%s  avg=%s\n", human(int64(rs.maxHeap)), human(int64(avgHeap)))
 	fmt.Printf("  GC cycles      %d during run\n", rs.endNumGC-rs.startNumGC)
 	fmt.Printf("  goroutines     max=%d\n", rs.maxGor)
-	ts := fs.metrics // transport metrics source is wired; the /metrics text is the authoritative counter set
-	_ = ts
+	fmt.Printf("  tracing spans  %d (Tracing middleware exercised)\n", fs.tracer.spans.Load())
+	// Render the server-side Prometheus exposition so a broken WritePrometheus /
+	// counter wiring would surface here (the `metrics` scenario also scrapes it
+	// under load); the printed report's own numbers come from the client atomics.
+	fmt.Printf("  /metrics expo  %d bytes rendered (scraped + asserted under load)\n", len(fs.metrics.WritePrometheus()))
 	if cfg.cpuProfile != "" {
 		fmt.Printf("\ncpu profile -> %s   (go tool pprof %s)\n", cfg.cpuProfile, cfg.cpuProfile)
 	}
@@ -691,6 +848,19 @@ func report(cfg config, m *metrics, reservoirs []*reservoir, rs *resourceSampler
 		fmt.Printf("heap profile -> %s   (go tool pprof %s)\n", cfg.memProfile, cfg.memProfile)
 	}
 	fmt.Printf("================================================\n")
+}
+
+// mergeReservoirs concatenates and sorts every reservoir's samples for
+// percentile extraction. Called after the WaitGroup barrier, so no locking.
+func mergeReservoirs(reservoirs []*reservoir) []time.Duration {
+	var all []time.Duration
+	for _, r := range reservoirs {
+		if r != nil {
+			all = append(all, r.xs...)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
+	return all
 }
 
 func pct(sorted []time.Duration, p float64) time.Duration {
