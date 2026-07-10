@@ -94,6 +94,57 @@ Read `http_reqs` (RPS), `http_req_duration` (`p(50)/p(95)/p(99)`), and `checks`.
 Install: `brew install k6` / <https://k6.io/docs/get-started/installation/> /
 `docker run --rm -i grafana/k6 run - <loadtest/k6_http2.js`.
 
+## d) All-in-one Go harness — `loadgen` (no external tools)
+
+[`loadtest/loadgen`](./loadgen) is a **self-contained** load/soak + profiling
+harness written in Go. Unlike h2load/ghz/k6 it needs no external tool and no
+separately-started server: it boots an **in-process** poseidon HTTP/2 (TLS, real
+h2) server with a feature-rich mux and drives it end-to-end, so one run exercises
+most of the feature surface at once and captures pprof profiles + a resource
+report.
+
+```sh
+# smoke it (small + fast)
+go run ./loadtest/loadgen -duration=15s -vus=32 -data-size=32MiB
+
+# heavy soak with a 2-minute spike + profiling (run on real hardware)
+go run ./loadtest/loadgen \
+    -duration=10m -vus=128 -data-size=10GiB -json-items=40000 \
+    -spike-after=2m -spike-dur=2m -spike-vus=512 \
+    -cpuprofile=cpu.out -memprofile=heap.out
+go tool pprof cpu.out    # where CPU goes
+go tool pprof heap.out   # where memory goes
+```
+
+**One run exercises** a weighted + conditional + nested scenario mix with per-VU
+variable state (dozens of distinct calls):
+
+| scenario | feature |
+| --- | --- |
+| `ping` | hot-path GET — the RPS/latency baseline |
+| `login` → `upload+verify` | variable correlation: a session token gates the upload scenario, which streams a large body then does a nested download round-trip |
+| `bigparse` / `adaptive` | streams a **>3 MiB JSON** response, parsed element-by-element (bounded memory); `adaptive` branches on the per-VU upload counter (`if`-based selection) |
+| `stream` | chunked streaming response |
+| `gzip` | asserts the Gzip middleware actually compresses (`Content-Encoding: gzip` round-trip) |
+| `headers` | header-heavy request/response (HPACK pressure) |
+| `errors` | error-status paths (404/500/503) |
+| `slow` | long-lived streams (concurrency pressure) |
+| **spike** | a barrier that **unblocks after `-spike-after`** and blasts `-spike-vus` VUs at a heavy path (big-parse + large upload/download) for `-spike-dur` — the sharp burst |
+
+**Streaming, not buffering:** `-data-size` bodies are generated on the fly from a
+fixed 32 KiB buffer, so `-data-size=10GiB` streams 10 GiB while server + client
+memory stays flat — the report's `heap alloc max` shows tens of MiB, not GiB.
+
+**Report:** RPS, error rate (in-flight requests cut off at the deadline are *not*
+counted as errors), latency p50/p90/p95/p99, per-scenario iteration counts,
+status-code distribution, and a **resource footprint** (max/avg heap alloc, GC
+cycles, max goroutines) — the "minimal resources" signal. A healthy run reports
+**0 errors** even under the spike. Flags: `go run ./loadtest/loadgen -h`.
+
+> **Scale note:** the flags reach 10 GiB bodies + a 2-minute spike, but that scale
+> needs real hardware (time/RAM/CPU). The harness is validated at reduced scale
+> (tens of MiB, seconds); dial the flags up on a dedicated load box.
+
 ## Run via Make
 
 ```sh
