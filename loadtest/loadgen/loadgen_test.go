@@ -103,7 +103,7 @@ func TestFeatureServers_EndToEnd(t *testing.T) {
 		t.Fatalf("ping: %v", err)
 	}
 	// Large upload + X-Body-Len echo.
-	resp, err := post(ctx, cli, fs.baseURL+"/sink", newPatternReader(dataSize), m)
+	resp, err := post(ctx, cli, fs.baseURL+"/sink", dataSize, m)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}

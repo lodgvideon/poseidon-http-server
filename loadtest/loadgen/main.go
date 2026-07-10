@@ -191,7 +191,7 @@ func buildScenarios(cfg config, grpcURL string) []scenario {
 			return get(ctx, cli, base+"/", 200, m)
 		}},
 		{name: "login", weight: 8, cond: func(v *vus) bool { return v.session == "" }, run: func(ctx context.Context, cli *http.Client, base string, v *vus, m *metrics) error {
-			resp, err := post(ctx, cli, base+"/login", newPatternReader(64), m)
+			resp, err := post(ctx, cli, base+"/login", 64, m)
 			if err != nil {
 				return err
 			}
@@ -201,7 +201,7 @@ func buildScenarios(cfg config, grpcURL string) []scenario {
 		}},
 		{name: "upload+verify", weight: 15, cond: func(v *vus) bool { return v.session != "" }, run: func(ctx context.Context, cli *http.Client, base string, v *vus, m *metrics) error {
 			// Streamed large upload, then a nested download round-trip.
-			resp, err := post(ctx, cli, base+"/sink", newPatternReader(cfg.dataSize), m)
+			resp, err := post(ctx, cli, base+"/sink", cfg.dataSize, m)
 			if err != nil {
 				return err
 			}
@@ -272,7 +272,7 @@ func heavy(ctx context.Context, cli *http.Client, base string, v *vus, m *metric
 	if err := bigParse(ctx, cli, base+"/bigjson?n="+fmt.Sprint(cfg.jsonItems), cfg.jsonItems, m); err != nil {
 		return err
 	}
-	resp, err := post(ctx, cli, base+"/sink", newPatternReader(cfg.dataSize), m)
+	resp, err := post(ctx, cli, base+"/sink", cfg.dataSize, m)
 	if err != nil {
 		return err
 	}
@@ -356,8 +356,15 @@ func get(ctx context.Context, cli *http.Client, url string, wantCode int, m *met
 	return nil
 }
 
-func post(ctx context.Context, cli *http.Client, url string, body io.Reader, m *metrics) (*http.Response, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+// post streams a `size`-byte pattern body. It sets ContentLength and GetBody so
+// the transport can transparently replay the (otherwise non-rewindable) stream
+// on a retryable REFUSED_STREAM — a server may refuse then reopen a stream under
+// load, and without GetBody the stdlib h2 client fails such a retry outright
+// ("cannot retry … after Request.Body was written").
+func post(ctx context.Context, cli *http.Client, url string, size int64, m *metrics) (*http.Response, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, newPatternReader(size))
+	req.ContentLength = size
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(newPatternReader(size)), nil }
 	req.Header.Set("Content-Type", "application/octet-stream")
 	return do(ctx, cli, req, m)
 }

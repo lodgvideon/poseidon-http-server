@@ -157,9 +157,13 @@ func newFeatureServer(rateLimit float64, maxBodyBytes int64) (*featureServer, er
 	}
 
 	httpSrv, err := server.NewServer(server.Options{
-		Addr:                httpLn.Addr().String(),
-		HTTPHandler:         newFeatureMux(metrics),
-		Middleware:          mw,
+		Addr:        httpLn.Addr().String(),
+		HTTPHandler: newFeatureMux(metrics),
+		Middleware:  mw,
+		// Stream request bodies instead of buffering them: /sink drains a
+		// 10 GiB upload with io.Copy, so buffered mode would hold the whole body
+		// in RAM and defeat the "server stays lean" goal.
+		StreamingBody:       true,
 		MaxRequestBodyBytes: maxBodyBytes,
 		// Enlarge the connection recv window so large uploads are not throttled
 		// into many WINDOW_UPDATE round-trips (the opt-in knob added in #37).
