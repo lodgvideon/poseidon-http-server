@@ -52,7 +52,7 @@ func testCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 
 // serveTest starts a Server on the loopback with h and returns its address and a
 // pool trusting its certificate.
-func serveTest(t *testing.T, ctx context.Context, h http.Handler) (addr string, pool *x509.CertPool) {
+func serveTest(ctx context.Context, t *testing.T, h http.Handler) (addr string, pool *x509.CertPool) {
 	t.Helper()
 	cert, pool := testCert(t)
 	srv := &Server{Handler: h, TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}}}
@@ -77,7 +77,7 @@ func TestServer_ServesRealHTTP3Client(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	addr, pool := serveTest(t, ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	addr, pool := serveTest(ctx, t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "hello %s %s", r.Method, r.URL.Path)
 	}))
@@ -114,7 +114,7 @@ func TestServer_RequestBodyAndStatus(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	addr, pool := serveTest(t, ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	addr, pool := serveTest(ctx, t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := make([]byte, 32)
 		n, _ := r.Body.Read(got)
 		w.Header().Set("X-Echo", string(got[:n]))
