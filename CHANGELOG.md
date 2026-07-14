@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.3...v0.5.0) (2026-07-14)
+
+
+### Features
+
+* **conn:** optional larger connection recv window (ConnRecvWindow) ([#37](https://github.com/lodgvideon/poseidon-http-server/issues/37)) ([2d41fa4](https://github.com/lodgvideon/poseidon-http-server/commit/2d41fa46b09d663d5918048d3d11b20367b79311))
+
+
+### Dependencies
+
+* bump poseidon-http-client v0.7.0 → v0.7.1 ([#44](https://github.com/lodgvideon/poseidon-http-server/issues/44)) ([76f5bcc](https://github.com/lodgvideon/poseidon-http-server/commit/76f5bccd641736283792340da12433f205c1382d))
+
 ## [0.4.3](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.2...v0.4.3) (2026-07-07)
 
 
