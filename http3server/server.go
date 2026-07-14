@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -199,8 +200,8 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 	)
 	for {
 		typ, payload, err := fr.ReadFrame()
-		if err == http3.ErrNeedMore {
-			break
+		if errors.Is(err, http3.ErrNeedMore) {
+			break // a partial trailing frame: the request holds nothing more
 		}
 		if err != nil {
 			return nil, err
