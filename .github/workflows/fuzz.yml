@@ -1,9 +1,10 @@
 name: Fuzz
 
 # Mutation fuzzing of the binary-protocol parsers (HTTP/2 frames + HPACK, gRPC
-# length-prefixed messages, request :path). Kept OFF the PR path — the regular
-# CI only exercises the seed corpus via `go test`; this job runs `-fuzz` with
-# real mutation on a nightly cadence, where a slow (minutes-long) run is fine.
+# length-prefixed messages, request :path, HTTP/3 request streams + QPACK). Kept
+# OFF the PR path — the regular CI only exercises the seed corpus via `go test`;
+# this job runs `-fuzz` with real mutation on a nightly cadence, where a slow
+# (minutes-long) run is fine.
 on:
   schedule:
     - cron: '30 3 * * *' # nightly, 03:30 UTC
@@ -29,6 +30,13 @@ jobs:
             target: FuzzTrailersToStatus
           - pkg: ./server
             target: FuzzRequestPath
+          # HTTP/3: every byte below arrives on a peer-controlled request stream.
+          - pkg: ./http3server
+            target: FuzzDecodeRequest
+          - pkg: ./http3server
+            target: FuzzBuildRequest
+          - pkg: ./http3server
+            target: FuzzDecodeFields
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
