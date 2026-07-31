@@ -69,18 +69,24 @@ at all and landed on §8.3 as the HTTP/2-native way to state the rule.
 | §8.3 (`rfc9113.txt:2614`, `:2619`, `:2624`, `:2690`, `:2699`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError` |
 | §8.3 (`rfc9113.txt:2643`, `:2703`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_ValidRequestsAccepted` |
 | §8.1.1 (`rfc9113.txt:2463`) | Regression | `TestServerConnHandler_MalformedStream_KeepsHPACKDecoderSynced` |
+| §8.4 (`rfc9113.txt:2811`) | Conformance | `TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority` |
+| §8.4 / §8.3 (`rfc9113.txt:2624`) | Conformance | `TestConformance_RFC9113_Sec84_PushPromiseCallerAuthorityWins` |
+| §8.4 (`rfc9113.txt:2815`) | Conformance | `TestConformance_RFC9113_Sec84_PushRefusedWithoutAuthority` |
+| §8.4 (`rfc9113.txt:2811`) | Conformance | `TestConformance_RFC9113_Sec84_PushWithPriorityCarriesAuthority` |
 
-The last row is not a conformance test but guards the trap that makes the other
-two safe to implement: a rejected block must still be fed to the shared HPACK
-decoder, or its dynamic table desyncs from the client's encoder and every later
-stream on the connection decodes corrupt headers.
+The `MalformedStream_KeepsHPACKDecoderSynced` row is not a conformance test but
+guards the trap that makes §8.3 validation safe to implement at all: a rejected
+block must still be fed to the shared HPACK decoder, or its dynamic table
+desyncs from the client's encoder and every later stream on the connection
+decodes corrupt headers.
 
 ## Known gaps
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-gaps — response correctness (HEAD body suppression,
-`Date`, trailer/header separation, gzip `Content-Encoding`) and server push
-(`:authority` on PUSH_PROMISE) — are listed with per-item evidence in
+gaps — response correctness (HEAD body suppression, `Date`, trailer/header
+separation, gzip `Content-Encoding`), `Expect: 100-continue`, the missing 421
+path, and whitespace before a field-name colon — are listed with per-item
+evidence in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).
 Each should arrive as a new row here plus the test that proves it.

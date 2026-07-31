@@ -50,7 +50,7 @@ const (
 // pusher is the subset of connStreamWriter that supports Push.
 // We use a separate type to keep the check explicit.
 type pusher interface {
-canPush() (pushableStream, bool)
+	canPush() (pushableStream, bool)
 }
 
 // pushableStream is the subset of conn.ServerStream we need for Push.
@@ -63,10 +63,65 @@ type pushableStream interface {
 // pusher returns the underlying stream if this ResponseWriter can issue
 // push promises. Currently only connStreamWriter-backed writers support it.
 func (w *responseWriter) pusher() (pushableStream, bool) {
-if cs, ok := w.sw.(pusher); ok {
-	return cs.canPush()
+	if cs, ok := w.sw.(pusher); ok {
+		return cs.canPush()
+	}
+	return nil, false
 }
-return nil, false
+
+// ErrPushNoAuthority is returned when a PUSH_PROMISE would have to be emitted
+// without an ":authority": neither the originating request nor the caller
+// supplied one.
+//
+// RFC 9113 §8.4 (rfc9113.txt:2811): "The header fields in PUSH_PROMISE and any
+// subsequent CONTINUATION frames MUST be a valid and complete set of request
+// header fields (Section 8.3.1)." Without an authority the promised request's
+// target URI has an empty host, which RFC 9110 §4.2 forbids a sender from
+// generating — and a conformant client "MUST respond on the promised stream
+// with a stream error ... of type PROTOCOL_ERROR" (rfc9113.txt:2815). Refusing
+// locally is strictly better than emitting a promise guaranteed to be reset.
+var ErrPushNoAuthority = errors.New("poseidon: cannot push without an :authority; promised request would have an empty host")
+
+// promiseFields builds the complete request field set for a PUSH_PROMISE.
+//
+// The authority defaults to the originating request's — a pushed resource
+// belongs to the same origin as the request that triggered it. A caller-supplied
+// ":authority" overrides it and is hoisted into the pseudo-header block, because
+// pseudo-headers "MUST appear in a field block before all regular field lines"
+// (rfc9113.txt:2619) and must not repeat (:2624).
+func (w *responseWriter) promiseFields(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) ([]hpack.HeaderField, error) {
+	if promiseScheme == "" {
+		promiseScheme = schemeHTTPS
+	}
+	authority := ""
+	if w.req != nil {
+		authority = w.req.Authority
+	}
+	callerSuppliedAuthority := false
+	for _, h := range promiseHeaders {
+		if string(h.Name) == ":authority" {
+			authority, callerSuppliedAuthority = string(h.Value), true
+			break
+		}
+	}
+	if authority == "" {
+		return nil, ErrPushNoAuthority
+	}
+
+	fields := make([]hpack.HeaderField, 0, 4+len(promiseHeaders))
+	fields = append(fields,
+		hpack.HeaderField{Name: []byte(":method"), Value: []byte("GET")},
+		hpack.HeaderField{Name: []byte(":path"), Value: []byte(promisePath)},
+		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(promiseScheme)},
+		hpack.HeaderField{Name: []byte(":authority"), Value: []byte(authority)},
+	)
+	for _, h := range promiseHeaders {
+		if callerSuppliedAuthority && string(h.Name) == ":authority" {
+			continue // already emitted above, in the pseudo-header block
+		}
+		fields = append(fields, h)
+	}
+	return fields, nil
 }
 
 // Push creates a PUSH_PROMISE on the current stream and returns a
@@ -101,18 +156,10 @@ func (w *responseWriter) PushWithScheme(promisePath, promiseScheme string, promi
 		return nil, ErrPushNotSupported
 	}
 
-	if promiseScheme == "" {
-		promiseScheme = schemeHTTPS
+	fields, err := w.promiseFields(promisePath, promiseScheme, promiseHeaders)
+	if err != nil {
+		return nil, err
 	}
-
-	// Build the request headers for the promised response.
-	fields := make([]hpack.HeaderField, 0, 4+len(promiseHeaders))
-	fields = append(fields,
-		hpack.HeaderField{Name: []byte(":method"), Value: []byte("GET")},
-		hpack.HeaderField{Name: []byte(":path"), Value: []byte(promisePath)},
-		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(promiseScheme)},
-	)
-	fields = append(fields, promiseHeaders...)
 
 	// Issue PUSH_PROMISE and create the push stream.
 	pushStream, err := ps.Push(context.Background(), fields)
@@ -147,16 +194,10 @@ func (w *responseWriter) pushWithPriorityAndScheme(promisePath, promiseScheme st
 	if !ok {
 		return nil, ErrPushNotSupported
 	}
-	if promiseScheme == "" {
-		promiseScheme = schemeHTTPS
+	fields, err := w.promiseFields(promisePath, promiseScheme, promiseHeaders)
+	if err != nil {
+		return nil, err
 	}
-	fields := make([]hpack.HeaderField, 0, 4+len(promiseHeaders))
-	fields = append(fields,
-		hpack.HeaderField{Name: []byte(":method"), Value: []byte("GET")},
-		hpack.HeaderField{Name: []byte(":path"), Value: []byte(promisePath)},
-		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(promiseScheme)},
-	)
-	fields = append(fields, promiseHeaders...)
 
 	pushStream, err := ps.PushWithPriority(context.Background(), fields, prio)
 	if err != nil {

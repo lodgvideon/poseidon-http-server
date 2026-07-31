@@ -61,7 +61,12 @@ func TestResponseWriter_Push_BeforeHeaders(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 
 	pushed, err := w.Push("/style.css", nil)
 	if err != nil {
@@ -84,7 +89,12 @@ func TestResponseWriter_Push_AfterHeaders_Fails(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 
 	// Mark as already written.
 	w.written = true
@@ -112,7 +122,12 @@ func TestResponseWriter_Push_MultiplePromises(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 
 	paths := []string{"/style.css", "/app.js", "/favicon.ico"}
 	for _, p := range paths {
@@ -133,7 +148,12 @@ func TestResponseWriter_Push_WithCustomHeaders(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 
 	customHeaders := []hpack.HeaderField{
 		{Name: []byte("if-none-match"), Value: []byte(`"abc"`)},
@@ -149,11 +169,11 @@ func TestResponseWriter_Push_WithCustomHeaders(t *testing.T) {
 	// Verify :method, :path, :scheme are present + custom headers.
 	got := stream.headerSets[0]
 	wantHeaders := map[string]string{
-		":method":        "GET",
-		":path":          "/style.css",
-		":scheme":        "https",
-		"if-none-match":  `"abc"`,
-		"accept":         "text/css",
+		":method":       "GET",
+		":path":         "/style.css",
+		":scheme":       "https",
+		"if-none-match": `"abc"`,
+		"accept":        "text/css",
 	}
 	for _, h := range got {
 		if want, ok := wantHeaders[string(h.Name)]; ok {
@@ -198,7 +218,7 @@ func TestResponseWriter_PushWithScheme_H2C(t *testing.T) {
 	stream := &mockPushableStream{id: 1}
 	w := &responseWriter{
 		sw:  &mockPusher{stream: stream},
-		req: &Request{Scheme: "http", Path: "/foo"}, // h2c request
+		req: &Request{Scheme: "http", Path: "/foo", Authority: "example.com"}, // h2c request
 	}
 
 	_, _ = w.PushWithScheme("/style.css", "http", nil)
@@ -218,7 +238,7 @@ func TestResponseWriter_Push_DerivesSchemeFromRequest(t *testing.T) {
 	stream := &mockPushableStream{id: 1}
 	w := &responseWriter{
 		sw:  &mockPusher{stream: stream},
-		req: &Request{Scheme: "http", Path: "/foo"}, // h2c
+		req: &Request{Scheme: "http", Path: "/foo", Authority: "example.com"}, // h2c
 	}
 
 	_, _ = w.Push("/style.css", nil)
@@ -238,7 +258,12 @@ func TestResponseWriter_Push_NoRequestContextDefaultsToHTTPS(t *testing.T) {
 	stream := &mockPushableStream{id: 1}
 	w := &responseWriter{sw: &mockPusher{stream: stream}} // req=nil
 
-	_, _ = w.Push("/style.css", nil)
+	// With no request context the authority has to be supplied by the caller;
+	// a promise without one is refused (see
+	// TestConformance_RFC9113_Sec84_PushRefusedWithoutAuthority).
+	_, _ = w.Push("/style.css", []hpack.HeaderField{
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+	})
 
 	scheme := schemeValue(stream.headerSets[0])
 	if scheme != "https" {
@@ -252,7 +277,9 @@ func TestResponseWriter_PushWithScheme_EmptyDefaultsToHTTPS(t *testing.T) {
 	stream := &mockPushableStream{id: 1}
 	w := &responseWriter{sw: &mockPusher{stream: stream}}
 
-	_, _ = w.PushWithScheme("/style.css", "", nil)
+	_, _ = w.PushWithScheme("/style.css", "", []hpack.HeaderField{
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+	})
 
 	scheme := schemeValue(stream.headerSets[0])
 	if scheme != "https" {
@@ -264,7 +291,12 @@ func TestResponseWriter_PushWithScheme_AfterHeadersFails(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 	w.written = true
 
 	_, err := w.PushWithScheme("/style.css", "https", nil)
@@ -280,7 +312,12 @@ func TestResponseWriter_PushWithPriority_PropagatesPrio(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 
 	prio := &frame.Priority{StreamDep: 0, Exclusive: true, Weight: 200}
 	_, err := w.PushWithPriority("/style.css", nil, prio)
@@ -300,7 +337,12 @@ func TestResponseWriter_PushWithPriority_AfterHeadersFails(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 	w.written = true
 
 	prio := &frame.Priority{StreamDep: 0, Exclusive: false, Weight: 100}
@@ -316,7 +358,12 @@ func TestResponseWriter_PushWithPriority_NilIsEquivalentToPush(t *testing.T) {
 	t.Parallel()
 
 	stream := &mockPushableStream{id: 1}
-	w := &responseWriter{sw: &mockPusher{stream: stream}}
+	w := &responseWriter{
+		sw: &mockPusher{stream: stream},
+		// A real writer always carries the originating request, whose
+		// authority the promise inherits (RFC 9113 §8.4).
+		req: &Request{Authority: "example.com"},
+	}
 
 	_, err := w.PushWithPriority("/style.css", nil, nil)
 	if !errors.Is(err, errMockPushNotUsed) {
