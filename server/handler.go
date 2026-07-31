@@ -459,6 +459,18 @@ func ToHTTPHandler(h Handler) http.Handler {
 		if len(buf.body) > 0 {
 			_, _ = w.Write(buf.body)
 		}
+		// Forward the trailer section as trailers. RFC 9110 §6.5.1 notes that
+		// "in most cases, the trailers are simply discarded" (rfc9110.txt:2244),
+		// which would also satisfy the MUST above, but dropping grpc-status
+		// would lose the outcome of the call. http.TrailerPrefix is net/http's
+		// mechanism for trailers whose names are not known before WriteHeader.
+		for _, f := range buf.trailers {
+			name := string(f.Name)
+			if name == "" || name[0] == ':' {
+				continue
+			}
+			w.Header().Set(http.TrailerPrefix+name, string(f.Value))
+		}
 	})
 }
 
@@ -467,13 +479,25 @@ func ToHTTPHandler(h Handler) http.Handler {
 // http.ResponseWriter. It is not concurrency-safe; one is used per request.
 type bufferStreamWriter struct {
 	headerFields []hpack.HeaderField
+	trailers     []hpack.HeaderField
 	body         []byte
 }
 
-func (b *bufferStreamWriter) sendHeaders(_ context.Context, headers []hpack.HeaderField, _ bool) error {
-	// Capture the first (response) HEADERS frame's fields. Trailers (endStream)
-	// also arrive here; appending them is harmless since the status comes from
-	// responseWriter.Status() and pseudo-headers are filtered on replay.
+func (b *bufferStreamWriter) sendHeaders(_ context.Context, headers []hpack.HeaderField, endStream bool) error {
+	// The response header section and the trailer section both arrive here; the
+	// endStream flag is what tells them apart, because responseWriter sends the
+	// header section with endStream=false (WriteHeaders) and the trailer section
+	// with endStream=true (WriteTrailers).
+	//
+	// They must not be pooled. RFC 9110 §6.5.1 (rfc9110.txt:2245): "A recipient
+	// MUST NOT merge a trailer field into a header section unless the recipient
+	// understands the corresponding header field definition and that definition
+	// explicitly permits and defines how trailer field values can be safely
+	// merged." Merging surfaced a handler's grpc-status in the response headers.
+	if endStream {
+		b.trailers = append(b.trailers, headers...)
+		return nil
+	}
 	b.headerFields = append(b.headerFields, headers...)
 	return nil
 }

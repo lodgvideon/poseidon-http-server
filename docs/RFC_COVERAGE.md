@@ -49,6 +49,9 @@ that mechanism.
 | §8.4 (`rfc9110.txt:3059`) | Conformance | `TestConformance_RFC9110_Sec84_NativePreEncodedNotRecompressed` |
 | §8.4 (`rfc9110.txt:3059`) | Conformance | `TestConformance_RFC9110_Sec84_HTTPPreEncodedNotRecompressed` |
 | §8.4 control | Conformance | `TestConformance_RFC9110_Sec84_UnencodedStillCompressed` |
+| §6.5.1 (`rfc9110.txt:2245`) | Conformance | `TestConformance_RFC9110_Sec651_TrailersNotMergedIntoHeaders` |
+| §6.5.1 (`rfc9110.txt:2244`) | Conformance | `TestConformance_RFC9110_Sec651_TrailersForwardedAsTrailers` |
+| §6.5.1 boundary | Conformance | `TestConformance_RFC9110_Sec651_HeaderOnlyResponseUnaffected` |
 
 RFC 9110 §2.2 — *"A sender MUST NOT generate protocol elements that do not
 match the grammar defined by the corresponding ABNF rules"* — is the hook by
@@ -93,8 +96,7 @@ decodes corrupt headers.
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-gaps — trailer/header separation, `Expect: 100-continue`, the missing 421
-path, and whitespace before a field-name colon — are listed with per-item
-evidence in
+gaps — `Expect: 100-continue`, the missing 421 path, and whitespace before a
+field-name colon — are listed with per-item evidence in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).
 Each should arrive as a new row here plus the test that proves it.
