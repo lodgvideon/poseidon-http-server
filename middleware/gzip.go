@@ -221,7 +221,7 @@ func (g *gzipResponseWriter) flush() error {
 
 	body := g.buf.Bytes()
 	out := body
-	compress := len(body) >= g.cfg.MinSize
+	compress := len(body) >= g.cfg.MinSize && !g.alreadyEncoded()
 	if compress {
 		if c, err := gzipCompress(body, g.cfg.Level); err == nil {
 			out = c
@@ -239,6 +239,31 @@ func (g *gzipResponseWriter) flush() error {
 		return g.flushHTTP(status, out, compress)
 	}
 	return g.flushNative(status, out, compress)
+}
+
+// alreadyEncoded reports whether the handler has already applied a content
+// coding to this representation.
+//
+// RFC 9110 §8.4 (rfc9110.txt:3059): "If one or more encodings have been applied
+// to a representation, the sender that applied the encodings MUST generate a
+// Content-Encoding header field that lists the content codings in the order in
+// which they were applied."
+//
+// Compressing on top of an existing coding made that impossible to honour on
+// the stdlib path, which used Set() and so announced only "gzip" for a body
+// that had two codings applied. Declining to compress satisfies the rule on
+// both paths and avoids double compression, which burns CPU and usually grows
+// the body. The check follows whichever header source flush is about to use.
+func (g *gzipResponseWriter) alreadyEncoded() bool {
+	if g.usedHTTP {
+		return g.Header().Get("Content-Encoding") != ""
+	}
+	for _, h := range g.nativeHeaders {
+		if bytes.EqualFold(h.Name, hdrContentEncoding) {
+			return true
+		}
+	}
+	return false
 }
 
 // flushNative emits via the native WriteHeaders/WriteData path.

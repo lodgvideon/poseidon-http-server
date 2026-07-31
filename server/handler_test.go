@@ -223,7 +223,7 @@ func TestNewHTTPRequest(t *testing.T) {
 }
 
 func TestNewHTTPRequest_Defaults(t *testing.T) {
-	req := &Request{Method: "GET", Path: "/"}
+	req := &Request{Method: "GET", Path: "/", Authority: "example.com"}
 	httpReq, err := NewHTTPRequest(req)
 	if err != nil {
 		t.Fatalf("NewHTTPRequest: %v", err)
@@ -231,8 +231,12 @@ func TestNewHTTPRequest_Defaults(t *testing.T) {
 	if httpReq.URL.Scheme != "http" {
 		t.Errorf("default Scheme = %q, want http", httpReq.URL.Scheme)
 	}
-	if httpReq.URL.Host != "localhost" {
-		t.Errorf("default Host = %q, want localhost", httpReq.URL.Host)
+	// The host comes from the request's authority. It used to default to the
+	// literal "localhost" when there was none, inventing an authority the client
+	// never sent; a hostless http/https request is now rejected instead
+	// (RFC 9110 §4.2, see TestConformance_RFC9110_Sec42_EmptyHostRejected).
+	if httpReq.URL.Host != "example.com" {
+		t.Errorf("Host = %q, want the request's authority", httpReq.URL.Host)
 	}
 }
 
@@ -360,7 +364,7 @@ func TestFromHTTPHandler_UsesContext(t *testing.T) {
 	handler := FromHTTPHandler(stdHandler)
 	ctx := context.WithValue(context.Background(), contextKey("testkey"), "ctx-works")
 
-	req := &Request{Method: "GET", Path: "/ctx"}
+	req := &Request{Method: "GET", Path: "/ctx", Authority: "example.com"}
 	w, sw := newTestWriter()
 
 	if err := handler.ServeHTTP(ctx, req, w); err != nil {
@@ -419,7 +423,7 @@ func TestHandlerFunc_ServeHTTP(t *testing.T) {
 		return nil
 	})
 	w, _ := newTestWriter()
-	if err := h.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/"}, w); err != nil {
+	if err := h.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/", Authority: "example.com"}, w); err != nil {
 		t.Fatalf("ServeHTTP: %v", err)
 	}
 	if !called {
@@ -445,7 +449,7 @@ func TestChiStyleRouter_DropIn(t *testing.T) {
 
 	// Test /ping
 	w, sw := newTestWriter()
-	if err := handler.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/ping"}, w); err != nil {
+	if err := handler.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/ping", Authority: "example.com"}, w); err != nil {
 		t.Fatalf("/ping: %v", err)
 	}
 	if len(sw.dataSent) != 1 || string(sw.dataSent[0]) != "pong" {
@@ -454,7 +458,7 @@ func TestChiStyleRouter_DropIn(t *testing.T) {
 
 	// Test /echo
 	w2, sw2 := newTestWriter()
-	if err := handler.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/echo?msg=hi"}, w2); err != nil {
+	if err := handler.ServeHTTP(context.Background(), &Request{Method: "GET", Path: "/echo?msg=hi", Authority: "example.com"}, w2); err != nil {
 		t.Fatalf("/echo: %v", err)
 	}
 	if len(sw2.dataSent) != 1 || string(sw2.dataSent[0]) != "hi" {

@@ -82,7 +82,7 @@ func TestH2C_Upgrade(t *testing.T) {
 	defer c.Close()
 
 	// Send HTTP/1.1 Upgrade request.
-	_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\n"+
+	_, _ = fmt.Fprintf(c, "GET /upgraded HTTP/1.1\r\n"+
 		"Host: localhost\r\n"+
 		"Upgrade: h2c\r\n"+
 		"HTTP2-Settings: \r\n"+
@@ -108,17 +108,9 @@ func TestH2C_Upgrade(t *testing.T) {
 	fr := frame.NewFramer(rwc, rwc)
 	_ = performClientHandshakeAfterPreface(fr)
 
-	enc := hpack.NewEncoder()
-	block := enc.EncodeBlock(nil, []hpack.HeaderField{
-		{Name: []byte(":method"), Value: []byte("GET")},
-		{Name: []byte(":path"), Value: []byte("/upgraded")},
-		{Name: []byte(":scheme"), Value: []byte("http")},
-		{Name: []byte(":authority"), Value: []byte("localhost")},
-	})
-	_ = fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID: 1, BlockFragment: block, EndHeaders: true, EndStream: true,
-	})
-
+	// No stream is opened here: RFC 7540 §3.2 assigns the upgrading request
+	// stream 1, so the response arrives unprompted. Sending HEADERS on stream 1
+	// would be a client-side protocol violation.
 	headers, herr := readResponseHeaders(fr)
 	if herr != nil {
 		t.Fatal(herr)

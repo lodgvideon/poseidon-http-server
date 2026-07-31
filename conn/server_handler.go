@@ -16,6 +16,10 @@ type serverConnOps interface {
 	// sent). The caller must not process a refused stream.
 	registerStream(id uint32, s *ServerStream) bool
 	markStreamDone(id uint32)
+	// writeServerRSTStream resets a single stream without disturbing the
+	// connection — the reaction RFC 9113 §8.1.1 mandates for a malformed
+	// request. It calls markStreamDone itself.
+	writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error
 	writeSettingsAck() error
 	writePingAck(payload [8]byte) error
 	deliverPingAck(payload [8]byte)
@@ -238,13 +242,41 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// HEADERS via append(pendingBuf[:0], ...).
 	h.pendingStreamID = 0
 	h.scratch = h.scratch[:0]
+	// Field validation runs inside the decode callback so it costs one pass and
+	// no allocation, but it only *flags* — the whole block must still decode or
+	// the shared HPACK dynamic table desyncs from the client's encoder and every
+	// later stream on this connection is corrupted.
+	malformed := false
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
+		if !malformed && hasProhibitedFieldChar(f.Value) {
+			malformed = true
+		}
 		h.scratch = append(h.scratch, f)
 		return nil
 	})
 	if err != nil {
 		_ = s.Close()
 		return err
+	}
+	// RFC 9113 §8.3 — request pseudo-headers must be present, unique, defined,
+	// and ahead of every regular field. Only a request header block carries
+	// them; a trailer section is judged by the character rules alone.
+	if !isTrailer && !validRequestPseudoHeaders(h.scratch) {
+		malformed = true
+	}
+	if malformed {
+		// RFC 9110 §5.5 — reject a message whose field value carries CR, LF or
+		// NUL; RFC 9113 §8.1.1 — as a STREAM error of type PROTOCOL_ERROR, so
+		// the connection and its sibling streams survive. Nothing is delivered
+		// to the handler: an unvalidated value is a header-injection primitive.
+		// Best-effort like the MaxConcurrentStreams refusal above; a write
+		// failure here means the connection is already going away. Do NOT
+		// s.Close() first — that emits its own RST_STREAM(CANCEL), which would
+		// reach the peer ahead of the PROTOCOL_ERROR the RFC calls for.
+		// writeServerRSTStream calls markStreamDone, cancelling the stream
+		// context, which is what releases the accept side.
+		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeProtocolError)
+		return nil
 	}
 
 	evType := EventHeaders

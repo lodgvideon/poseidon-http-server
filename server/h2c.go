@@ -4,16 +4,24 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/lodgvideon/poseidon-http-client/hpack"
 
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
 
 // ---------------------------------------------------------------------------
 // h2c (HTTP/2 Cleartext) support — RFC 7540 §3.2, §3.4
+//
+// RFC 9113 marks the h2c upgrade token and the HTTP2-Settings header field as
+// obsolete (rfc9113.txt:3613), so RFC 7540 remains the governing text for the
+// Upgrade path implemented here. Conformance tests: server/conformance_h2c_test.go.
 // ---------------------------------------------------------------------------
 
 // h2cPreface is the first bytes of the HTTP/2 client connection preface.
@@ -23,7 +31,12 @@ var h2cPreface = []byte("PRI * HTTP/2.0")
 // If the client sends HTTP/1.1 Upgrade: h2c, we respond with 101 Switching.
 // If the client sends the preface directly (prior knowledge), we pass through.
 // Otherwise we respond with 400 Bad Request.
-func (s *Server) detectAndServe(ctx context.Context, nc net.Conn) {
+// cfg is the TLS config that produced the listener, or nil. H2C and TLS are not
+// mutually exclusive — Options.H2C only decides whether the first bytes are
+// sniffed — so the config has to reach conn.NewServerConn here too, or the
+// RFC 9110 §7.4 check would be silently off for a TLS listener served with
+// H2C enabled.
+func (s *Server) detectAndServe(ctx context.Context, nc net.Conn, cfg *tls.Config) {
 	br := bufio.NewReaderSize(nc, 1024)
 
 	// Peek first bytes to determine protocol.
@@ -36,18 +49,157 @@ func (s *Server) detectAndServe(ctx context.Context, nc net.Conn) {
 
 	if bytes.Equal(head, h2cPreface) {
 		// Prior knowledge h2c — client speaks HTTP/2 directly.
-		s.serveConnReader(ctx, nc, br)
+		s.serveConnReader(ctx, nc, br, nil, cfg)
 		return
 	}
 
 	// Could be HTTP/1.1 with Upgrade: h2c, or plain HTTP/1.1.
-	s.handleHTTP1Upgrade(ctx, nc, br)
+	s.handleHTTP1Upgrade(ctx, nc, br, cfg)
 }
 
-// handleHTTP1Upgrade processes an HTTP/1.1 request that may contain
-// an Upgrade: h2c header. If so, responds with 101 Switching Protocols
-// and continues as HTTP/2. Otherwise returns 400.
-func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.Reader) {
+// writeBadRequest writes a minimal HTTP/1.1 400 response and closes. This
+// server speaks only HTTP/2, so every HTTP/1.1 request that is not a conformant
+// h2c upgrade ends here — 400 is the only status this path ever produces.
+func writeBadRequest(nc net.Conn, reason string) {
+	body := reason + "\n"
+	_, _ = fmt.Fprintf(nc, "HTTP/1.1 400 Bad Request\r\n"+
+		"Content-Type: text/plain\r\n"+
+		"Connection: close\r\n"+
+		"Content-Length: %d\r\n\r\n%s", len(body), body)
+	_ = nc.Close()
+}
+
+// hasUpgradeToken reports whether the Upgrade header field offers the exact
+// token "h2c". The field is a comma-separated list, so it is split rather than
+// compared whole.
+//
+// RFC 7540 §3.2 (rfc7540.txt:464): "A server MUST ignore an "h2" token in an
+// Upgrade header field." Ignoring means behaving as though it were absent, so
+// "h2" is simply never matched here — including in a list such as "h2, h2c",
+// where the "h2c" element still counts.
+func hasUpgradeToken(values []string) bool {
+	for _, v := range values {
+		for _, tok := range strings.Split(v, ",") {
+			// A protocol element may carry a version: "name/version".
+			if strings.EqualFold(strings.TrimSpace(tok), "h2c") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validHTTP2SettingsPayload reports whether v is a well-formed HTTP2-Settings
+// field value: base64url without padding (RFC 7540 §3.2.1) decoding to a
+// SETTINGS frame payload, which is a sequence of 6-octet parameter entries
+// (RFC 7540 §6.5.1). An empty payload is legal — SETTINGS "MAY be empty".
+func validHTTP2SettingsPayload(v string) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(v)
+	if err != nil {
+		return false
+	}
+	return len(raw)%6 == 0
+}
+
+// tokenChar reports whether c is a tchar (RFC 9110 §5.6.2, rfc9110.txt:1735):
+//
+//	tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+//	        "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+func tokenChar(c byte) bool {
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+		return true
+	}
+	switch c {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
+}
+
+// validFieldName reports whether name matches field-name = token
+// (RFC 9110 §5.1).
+//
+// This exists because of RFC 9112 §5.1 (rfc9112.txt:716): "A server MUST
+// reject, with a response status code of 400 (Bad Request), any received
+// request message that contains whitespace between a header field name and
+// colon." Go's net/textproto deliberately accepts a SP there
+// (go.dev/issue/34540) and returns the field under a key carrying the trailing
+// space, so the check cannot be delegated to http.ReadRequest. A HTAB in the
+// same position textproto does reject outright.
+//
+// Validating the whole name as a token rather than just hunting for a trailing
+// space costs the same and covers every other way a name can be malformed.
+func validFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		if !tokenChar(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// connectionSpecificFields are dropped when translating the HTTP/1.1 upgrade
+// request into HTTP/2 request fields. RFC 9113 §8.2.2 forbids them in HTTP/2,
+// and "HTTP2-Settings" is meaningful only to the upgrade itself.
+var connectionSpecificFields = map[string]bool{
+	"connection":        true,
+	"upgrade":           true,
+	"http2-settings":    true,
+	"keep-alive":        true,
+	"proxy-connection":  true,
+	"transfer-encoding": true,
+	"host":              true, // carried as :authority
+}
+
+// upgradeRequestFields translates the HTTP/1.1 request that initiated the
+// upgrade into HTTP/2 request fields: pseudo-headers first (RFC 9113 §8.3),
+// then the regular fields with connection-specific ones removed.
+func upgradeRequestFields(req *http.Request) []hpack.HeaderField {
+	fields := make([]hpack.HeaderField, 0, 4+len(req.Header))
+	add := func(name, value string) {
+		fields = append(fields, hpack.HeaderField{Name: []byte(name), Value: []byte(value)})
+	}
+	add(":method", req.Method)
+	// The upgrade path is cleartext by construction, so the scheme is "http".
+	add(":scheme", "http")
+	add(":authority", req.Host)
+	add(":path", req.URL.RequestURI())
+
+	for name, values := range req.Header {
+		lower := strings.ToLower(name)
+		if connectionSpecificFields[lower] {
+			continue
+		}
+		for _, v := range values {
+			add(lower, v)
+		}
+	}
+	return fields
+}
+
+// handleHTTP1Upgrade processes an HTTP/1.1 request that may contain an
+// Upgrade: h2c header. A conformant upgrade gets 101 Switching Protocols and
+// the request is carried onto stream 1; anything else gets 400.
+//
+// Every rejection below is a normative requirement, not a policy choice:
+//
+//   - HTTP/1.0 request        RFC 9110 §7.8  — MUST ignore the Upgrade field;
+//     RFC 9110 §15.2 — MUST NOT send 1xx to an HTTP/1.0 client
+//   - no/duplicate/bad Host   RFC 9112 §2.2  — MUST respond 400
+//   - "h2" token              RFC 7540 §3.2  — MUST ignore it
+//   - no/duplicate            RFC 7540 §3.2.1 — MUST NOT upgrade
+//     HTTP2-Settings
+//   - request with content    RFC 9112 §9.6  — MUST read the entire body or
+//     close; declining the upgrade is always
+//     allowed (§3.2: a server "can respond to
+//     the request as though the Upgrade header
+//     field were absent") and it keeps unread
+//     HTTP/1.1 octets from being re-read as
+//     HTTP/2 frames.
+func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.Reader, cfg *tls.Config) {
 	// Set a deadline to avoid hanging on malformed input.
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = nc.SetReadDeadline(deadline)
@@ -55,37 +207,64 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		_ = nc.Close()
+		// Includes the duplicate-Host case, which net/http rejects for us.
+		writeBadRequest(nc, "Malformed request")
 		return
 	}
 
-	// Check for Upgrade: h2c
-	if !strings.EqualFold(req.Header.Get("Upgrade"), "h2c") &&
-		!strings.EqualFold(req.Header.Get("Upgrade"), "h2") {
-		// Not an upgrade request — respond 400.
-		resp := fmt.Sprintf("HTTP/1.1 400 Bad Request\r\n"+
-			"Content-Type: text/plain\r\n"+
-			"Connection: close\r\n"+
-			"Content-Length: 19\r\n\r\n"+
-			"Only h2c supported\n")
-		_, _ = nc.Write([]byte(resp))
-		_ = nc.Close()
+	// RFC 9112 §5.1 — a field name that is not a token means whitespace crept
+	// in before the colon, which net/textproto passes through.
+	for name := range req.Header {
+		if !validFieldName(name) {
+			writeBadRequest(nc, "Malformed field name")
+			return
+		}
+	}
+
+	switch {
+	case req.ProtoMajor != 1 || req.ProtoMinor < 1:
+		// RFC 9110 §7.8 / §15.2 — no upgrade, and never a 1xx, below HTTP/1.1.
+		writeBadRequest(nc, "Only h2c supported")
+		return
+	case req.Host == "":
+		// RFC 9112 §2.2 (rfc9112.txt:445).
+		writeBadRequest(nc, "Missing Host header field")
+		return
+	case !hasUpgradeToken(req.Header.Values("Upgrade")):
+		writeBadRequest(nc, "Only h2c supported")
 		return
 	}
 
-	// Send 101 Switching Protocols.
+	// RFC 7540 §3.2.1 (rfc7540.txt:511): exactly one HTTP2-Settings field, and
+	// it must actually be a SETTINGS payload.
+	settings := req.Header.Values("HTTP2-Settings")
+	if len(settings) != 1 || !validHTTP2SettingsPayload(settings[0]) {
+		writeBadRequest(nc, "Upgrade requires exactly one valid HTTP2-Settings header field")
+		return
+	}
+
+	// A body would have to be drained in full before the HTTP/2 preface, or its
+	// remaining octets would be parsed as frames. Decline instead.
+	if req.ContentLength != 0 || len(req.TransferEncoding) > 0 {
+		writeBadRequest(nc, "Upgrade request must not carry content")
+		return
+	}
+
+	// Send 101 Switching Protocols. RFC 9110 §7.8 requires the Upgrade field
+	// naming the protocol switched to, and the "Upgrade" connection option.
 	_, _ = fmt.Fprintf(nc,
 		"HTTP/1.1 101 Switching Protocols\r\n"+
 			"Connection: Upgrade\r\n"+
 			"Upgrade: h2c\r\n\r\n")
 
-	// Now the client should send the HTTP/2 preface.
-	s.serveConnReader(ctx, nc, br)
+	// The request owns stream 1 (RFC 7540 §3.2) — carry it into the connection.
+	s.serveConnReader(ctx, nc, br, &conn.UpgradedRequest{Headers: upgradeRequestFields(req)}, cfg)
 }
 
 // serveConnReader wraps serveConn but uses a buffered reader that may
-// have already consumed some bytes from the connection.
-func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Reader) {
+// have already consumed some bytes from the connection. upgraded is non-nil
+// only on the h2c Upgrade path.
+func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Reader, upgraded *conn.UpgradedRequest, cfg *tls.Config) {
 	// If the bufio reader has buffered data, we need to present a
 	// combined reader to NewServerConn. Wrap with bufioReaderConn.
 	rwc := &bufioConn{Conn: nc, Reader: br}
@@ -93,6 +272,7 @@ func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Rea
 	if opts.StreamEventBuffer <= 0 {
 		opts.StreamEventBuffer = 8
 	}
+	opts.UpgradedRequest = upgraded
 
 	sc, err := conn.NewServerConn(ctx, rwc, opts)
 	if err != nil {
@@ -104,7 +284,7 @@ func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Rea
 	s.trackConn(sc, true)
 	defer s.trackConn(sc, false)
 
-	s.acceptLoop(ctx, sc)
+	s.acceptLoop(ctx, sc, presentedLeaf(cfg, nc))
 }
 
 // bufioConn wraps a net.Conn with a bufio.Reader so that peeked bytes

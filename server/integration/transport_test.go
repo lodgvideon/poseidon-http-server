@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,7 +58,9 @@ func startRawTLSServer(t *testing.T, h server.Handler) (addr string, serverCert 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ctx, tlsLn) }()
+	// ServeTLSConfig, not Serve: the config is what lets the server enforce
+	// RFC 9110 §7.4 (421) — see conformance_misdirected_test.go.
+	go func() { serveErr <- srv.ServeTLSConfig(ctx, tlsLn, tlsCfg) }()
 	t.Cleanup(func() {
 		cancel()
 		_ = srv.Close()
@@ -227,7 +230,7 @@ func TestTransport_H2C_Upgrade_Fallback(t *testing.T) {
 
 	// Send the HTTP/1.1 Upgrade request.
 	if _, err := fmt.Fprintf(conn,
-		"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: h2c\r\n"+
+		"GET /upgraded HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: h2c\r\n"+
 			"HTTP2-Settings: \r\nConnection: Upgrade, HTTP2-Settings\r\n\r\n"); err != nil {
 		t.Fatalf("write upgrade: %v", err)
 	}
@@ -263,19 +266,9 @@ func TestTransport_H2C_Upgrade_Fallback(t *testing.T) {
 		t.Fatalf("h2 settings exchange: %v", err)
 	}
 
-	enc := hpack.NewEncoder()
-	block := enc.EncodeBlock(nil, []hpack.HeaderField{
-		{Name: []byte(":method"), Value: []byte("GET")},
-		{Name: []byte(":scheme"), Value: []byte("http")},
-		{Name: []byte(":authority"), Value: []byte("127.0.0.1")},
-		{Name: []byte(":path"), Value: []byte("/upgraded")},
-	})
-	if err := fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID: 1, BlockFragment: block, EndHeaders: true, EndStream: true,
-	}); err != nil {
-		t.Fatalf("WriteHeaders: %v", err)
-	}
-
+	// No stream is opened here: RFC 7540 §3.2 assigns the upgrading request
+	// stream 1 and the response arrives on it unprompted, so a conformant
+	// client just reads.
 	status, body, err := readH2Response(fr)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
@@ -491,9 +484,25 @@ func rawH2SettingsExchange(fr *frame.Framer) error {
 
 // readH2Response reads frames until END_STREAM, returning the :status value
 // and the accumulated DATA payload.
+// testDecoders keeps one HPACK decoder per connection, keyed by its Framer.
+//
+// The dynamic table is connection-scoped state shared with the server's
+// encoder, so a decoder created fresh per response cannot resolve an indexed
+// reference the server inserted on an earlier response over the same
+// connection. This only became observable once a response field the encoder
+// indexes (Date, RFC 9110 §6.6.1) started being sent.
+var testDecoders sync.Map // *frame.Framer -> *hpack.Decoder
+
+func decoderFor(fr *frame.Framer) *hpack.Decoder {
+	if d, ok := testDecoders.Load(fr); ok {
+		return d.(*hpack.Decoder)
+	}
+	actual, _ := testDecoders.LoadOrStore(fr, hpack.NewDecoder())
+	return actual.(*hpack.Decoder)
+}
+
 func readH2Response(fr *frame.Framer) (status string, body []byte, err error) {
-	dec := hpack.NewDecoder()
-	h := &responseHandler{dec: dec}
+	h := &responseHandler{dec: decoderFor(fr)}
 	for {
 		fh, rerr := fr.ReadFrame(context.Background(), h)
 		if rerr != nil {

@@ -16,9 +16,10 @@ func TestPprofHandler_Index(t *testing.T) {
 
 	w, sw := newTestWriter()
 	req := &Request{
-		Method: "GET",
-		Path:   "/debug/pprof/",
-		Scheme: "http",
+		Method:    "GET",
+		Path:      "/debug/pprof/",
+		Scheme:    "http",
+		Authority: "example.com",
 	}
 
 	if err := h.ServeHTTP(context.Background(), req, w); err != nil {
@@ -45,9 +46,10 @@ func TestPprofHandler_Heap(t *testing.T) {
 
 	w, sw := newTestWriter()
 	req := &Request{
-		Method: "GET",
-		Path:   "/debug/pprof/heap?debug=1",
-		Scheme: "http",
+		Method:    "GET",
+		Path:      "/debug/pprof/heap?debug=1",
+		Scheme:    "http",
+		Authority: "example.com",
 	}
 
 	if err := h.ServeHTTP(context.Background(), req, w); err != nil {
@@ -65,9 +67,10 @@ func TestPprofHandler_Cmdline(t *testing.T) {
 
 	w, _ := newTestWriter()
 	req := &Request{
-		Method: "GET",
-		Path:   "/debug/pprof/cmdline",
-		Scheme: "http",
+		Method:    "GET",
+		Path:      "/debug/pprof/cmdline",
+		Scheme:    "http",
+		Authority: "example.com",
 	}
 
 	if err := h.ServeHTTP(context.Background(), req, w); err != nil {

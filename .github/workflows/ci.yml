@@ -71,6 +71,24 @@ jobs:
           go test -count=1 -timeout 120s -coverprofile=coverage.out ./...
           bash scripts/coverage-gate.sh 80 coverage.out
 
+  conformance-gate:
+    name: RFC Conformance Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26'
+
+      # Guards docs/RFC_COVERAGE.md: every required RFC tag must still have a
+      # passing conformance suite, and no suite may exist untagged (an untagged
+      # suite is silently deletable). See docs/rfc-analysis/.
+      - name: RFC coverage gate
+        run: |
+          go test -count=1 -v -timeout 120s -run '^TestConformance_' ./... > conformance.out || true
+          bash scripts/rfc-coverage-gate.sh conformance.out
+
   bench:
     name: Benchmarks (smoke)
     runs-on: ubuntu-latest

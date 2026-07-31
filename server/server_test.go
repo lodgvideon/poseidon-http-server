@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -328,7 +329,7 @@ func performClientHandshake(c net.Conn, cliFr *frame.Framer) error {
 
 // readResponseHeaders reads frames until a HEADERS frame is captured.
 func readResponseHeaders(cliFr *frame.Framer) ([]hpack.HeaderField, error) {
-	h := &headerCapture{}
+	h := &headerCapture{dec: decoderFor(cliFr)}
 	if _, err := cliFr.ReadFrame(context.Background(), h); err != nil {
 		return nil, err
 	}
@@ -364,14 +365,36 @@ func (h *noopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error
 func (h *noopHandler) OnOrigin(frame.FrameHeader, []string) error { return nil }
 func (h *noopHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
+// testDecoders keeps one HPACK decoder per connection, keyed by its Framer.
+//
+// The dynamic table is connection-scoped state shared between the peer's
+// encoder and this decoder, so a decoder created fresh per response cannot
+// resolve an indexed reference the server inserted on an earlier one. Decoding
+// each response with a new decoder happened to work only while every response
+// field came from the static table; the first dynamically-indexed response
+// field (Date, RFC 9110 §6.6.1) broke it with "invalid table index".
+var testDecoders sync.Map // *frame.Framer -> *hpack.Decoder
+
+func decoderFor(fr *frame.Framer) *hpack.Decoder {
+	if d, ok := testDecoders.Load(fr); ok {
+		return d.(*hpack.Decoder)
+	}
+	actual, _ := testDecoders.LoadOrStore(fr, hpack.NewDecoder())
+	return actual.(*hpack.Decoder)
+}
+
 // headerCapture captures HEADERS frames and decodes them.
 type headerCapture struct {
 	headers []hpack.HeaderField
+	dec     *hpack.Decoder
 }
 
 func (h *headerCapture) OnData(frame.FrameHeader, []byte, uint8) error                                { return nil }
 func (h *headerCapture) OnHeaders(_ frame.FrameHeader, hb frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
-	dec := hpack.NewDecoder()
+	dec := h.dec
+	if dec == nil {
+		dec = hpack.NewDecoder()
+	}
 	var result []hpack.HeaderField
 	err := dec.DecodeBlock(hb, hpack.FieldVisitor(func(f hpack.HeaderField) error {
 		cp := hpack.HeaderField{

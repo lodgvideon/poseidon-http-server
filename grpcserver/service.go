@@ -356,10 +356,21 @@ func writeGRPCError(w server.ResponseWriter, st RPCStatus) error {
 }
 
 // statusToHPack converts an RPCStatus to HPACK trailer fields.
+//
+// The message is percent-encoded (see percent.go): it is built from
+// attacker-controlled input, and the gRPC grammar admits only
+// %x20-%x24 / %x26-%x7E unencoded. An empty message omits the field entirely,
+// because Percent-Encoded is 1*(...) and Status-Message is optional.
 func statusToHPack(st RPCStatus) []hpack.HeaderField {
+	msg := percentEncodeMessage(st.Message)
+	if len(msg) == 0 {
+		return []hpack.HeaderField{
+			{Name: sGRPCStatus, Value: []byte(uint32ToString(uint32(st.Code)))},
+		}
+	}
 	return []hpack.HeaderField{
 		{Name: sGRPCStatus, Value: []byte(uint32ToString(uint32(st.Code)))},
-		{Name: sGRPCMessage, Value: []byte(st.Message)},
+		{Name: sGRPCMessage, Value: msg},
 	}
 }
 

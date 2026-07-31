@@ -12,11 +12,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -251,14 +254,45 @@ func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	// Pre-computed :status value for common codes.
 	statusVal := statusBytes(status)
 
-	fields := make([]hpack.HeaderField, 0, 1+len(headers))
+	fields := make([]hpack.HeaderField, 0, 2+len(headers))
 	fields = append(fields, hpack.HeaderField{
 		Name:  sColonStatus,
 		Value: statusVal,
 	})
+	// RFC 9110 §6.6.1 — a Date is mandatory on 2xx/3xx/4xx. A handler that set
+	// one deliberately keeps it; emitting a second would violate the field
+	// grammar as well as discard the handler's intent.
+	if dateRequired(status) && !hasField(headers, sFieldDate) {
+		fields = append(fields, hpack.HeaderField{Name: sFieldDate, Value: httpDate(time.Now())})
+	}
 	fields = append(fields, headers...)
 
 	return w.sw.sendHeaders(w.reqCtx(), fields, false)
+}
+
+// hasField reports whether name is already present, so a generated field never
+// duplicates one the handler supplied. Case-insensitive: HTTP/2 field names are
+// lowercase (RFC 9113 §8.2), but a native-path caller could pass anything.
+func hasField(fields []hpack.HeaderField, name []byte) bool {
+	for i := range fields {
+		if bytes.EqualFold(fields[i].Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// suppressContent reports whether this response must carry no content.
+//
+// RFC 9110 §9.3.2 (rfc9110.txt:3987): "The HEAD method is identical to GET
+// except that the server MUST NOT send content in the response." Only the DATA
+// frames are dropped — the header section is left exactly as a GET would have
+// produced it (:3993), and RFC 9113 §8.1.1 (rfc9113.txt:2457) explicitly allows
+// the resulting non-zero content-length with no DATA behind it.
+//
+// Hot path: a nil check and a string comparison, no allocation.
+func (w *responseWriter) suppressContent() bool {
+	return w.req != nil && w.req.Method == http.MethodHead
 }
 
 // WriteData sends response body data. If headers have not been sent yet it
@@ -268,6 +302,9 @@ func (w *responseWriter) WriteData(p []byte) error {
 		if err := w.WriteHeaders(http.StatusOK, nil); err != nil {
 			return err
 		}
+	}
+	if w.suppressContent() {
+		return nil
 	}
 	return w.sw.sendData(w.reqCtx(), p, false)
 }
@@ -295,6 +332,13 @@ func (w *responseWriter) Write(p []byte) (int, error) {
 	if !w.written {
 		w.WriteHeader(http.StatusOK)
 	}
+	// A HEAD response carries no content (RFC 9110 §9.3.2). Report a complete
+	// write anyway: io.Writer treats a short write as an error, so returning
+	// less would make io.Copy in an ordinary stdlib handler fail or spin. This
+	// mirrors what net/http does for HEAD.
+	if w.suppressContent() {
+		return len(p), nil
+	}
 	if err := w.sw.sendData(w.reqCtx(), p, false); err != nil {
 		return 0, err
 	}
@@ -317,11 +361,16 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 		hdr = make(http.Header)
 	}
 	statusVal := statusBytes(statusCode)
-	fields := make([]hpack.HeaderField, 0, 1+len(hdr))
+	fields := make([]hpack.HeaderField, 0, 2+len(hdr))
 	fields = append(fields, hpack.HeaderField{
 		Name:  sColonStatus,
 		Value: statusVal,
 	})
+	// RFC 9110 §6.6.1, as on the native path above. http.Header canonicalises
+	// to "Date", so Get finds a handler-set value whatever case it used.
+	if dateRequired(statusCode) && hdr.Get("Date") == "" {
+		fields = append(fields, hpack.HeaderField{Name: sFieldDate, Value: httpDate(time.Now())})
+	}
 	for k, vv := range hdr {
 		lower := strings.ToLower(k)
 		for _, v := range vv {
@@ -360,7 +409,10 @@ func FromHTTPHandler(h http.Handler) Handler {
 	return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 		httpReq, err := NewHTTPRequest(req)
 		if err != nil {
-			return err
+			// The request cannot be turned into a valid target URI — a client
+			// error, so 400 rather than the 500 a returned handler error would
+			// produce (RFC 9110 §15.5.1).
+			return w.WriteHeaders(400, nil)
 		}
 		httpReq = httpReq.WithContext(ctx)
 		h.ServeHTTP(w, httpReq)
@@ -407,6 +459,18 @@ func ToHTTPHandler(h Handler) http.Handler {
 		if len(buf.body) > 0 {
 			_, _ = w.Write(buf.body)
 		}
+		// Forward the trailer section as trailers. RFC 9110 §6.5.1 notes that
+		// "in most cases, the trailers are simply discarded" (rfc9110.txt:2244),
+		// which would also satisfy the MUST above, but dropping grpc-status
+		// would lose the outcome of the call. http.TrailerPrefix is net/http's
+		// mechanism for trailers whose names are not known before WriteHeader.
+		for _, f := range buf.trailers {
+			name := string(f.Name)
+			if name == "" || name[0] == ':' {
+				continue
+			}
+			w.Header().Set(http.TrailerPrefix+name, string(f.Value))
+		}
 	})
 }
 
@@ -415,13 +479,25 @@ func ToHTTPHandler(h Handler) http.Handler {
 // http.ResponseWriter. It is not concurrency-safe; one is used per request.
 type bufferStreamWriter struct {
 	headerFields []hpack.HeaderField
+	trailers     []hpack.HeaderField
 	body         []byte
 }
 
-func (b *bufferStreamWriter) sendHeaders(_ context.Context, headers []hpack.HeaderField, _ bool) error {
-	// Capture the first (response) HEADERS frame's fields. Trailers (endStream)
-	// also arrive here; appending them is harmless since the status comes from
-	// responseWriter.Status() and pseudo-headers are filtered on replay.
+func (b *bufferStreamWriter) sendHeaders(_ context.Context, headers []hpack.HeaderField, endStream bool) error {
+	// The response header section and the trailer section both arrive here; the
+	// endStream flag is what tells them apart, because responseWriter sends the
+	// header section with endStream=false (WriteHeaders) and the trailer section
+	// with endStream=true (WriteTrailers).
+	//
+	// They must not be pooled. RFC 9110 §6.5.1 (rfc9110.txt:2245): "A recipient
+	// MUST NOT merge a trailer field into a header section unless the recipient
+	// understands the corresponding header field definition and that definition
+	// explicitly permits and defines how trailer field values can be safely
+	// merged." Merging surfaced a handler's grpc-status in the response headers.
+	if endStream {
+		b.trailers = append(b.trailers, headers...)
+		return nil
+	}
 	b.headerFields = append(b.headerFields, headers...)
 	return nil
 }
@@ -437,6 +513,19 @@ func (*bufferStreamWriter) streamID() uint32 { return 0 }
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
+// ErrNoAuthority is returned by [NewHTTPRequest] when the request carries
+// neither an ":authority" pseudo-header nor a Host field, so the target URI for
+// an "http" or "https" scheme would have an empty host.
+//
+// RFC 9110 §4.2.1 (rfc9110.txt:1106) and §4.2.2 (:1135): "A sender MUST NOT
+// generate an "http" URI with an empty host identifier. A recipient that
+// processes such a URI reference MUST reject it as invalid."
+//
+// This previously substituted the literal "localhost", which invented an
+// authority the client never sent and left a handler unable to tell a hostless
+// request from a legitimate one.
+var ErrNoAuthority = errors.New("poseidon: request has no :authority or Host; target URI would have an empty host")
+
 // NewHTTPRequest builds a standard [http.Request] from a Poseidon [Request].
 func NewHTTPRequest(req *Request) (*http.Request, error) {
 	scheme := req.Scheme
@@ -444,8 +533,8 @@ func NewHTTPRequest(req *Request) (*http.Request, error) {
 		scheme = schemeHTTP
 	}
 	host := req.Authority
-	if host == "" {
-		host = "localhost"
+	if host == "" && (scheme == schemeHTTP || scheme == schemeHTTPS) {
+		return nil, ErrNoAuthority
 	}
 	urlStr := scheme + "://" + host + req.Path
 	httpReq, err := http.NewRequest(req.Method, urlStr, http.NoBody)

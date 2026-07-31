@@ -1,4 +1,4 @@
-.PHONY: build lint test test-race bench bench-gate coverage coverage-gate tidy loadtest
+.PHONY: build lint test test-race bench bench-gate coverage coverage-gate conformance-gate tidy loadtest
 
 COVERAGE_MIN ?= 80
 GO ?= go
@@ -33,6 +33,12 @@ coverage:
 coverage-gate:
 	$(GO) test -race -count=1 -coverprofile=cover.out ./...
 	./scripts/coverage-gate.sh $(COVERAGE_MIN)
+
+# conformance-gate — run only the RFC conformance suites and check the coverage
+# matrix has not silently lost a tag. See docs/RFC_COVERAGE.md.
+conformance-gate:
+	$(GO) test -count=1 -v -run '^TestConformance_' ./... > conformance.out || true
+	./scripts/rfc-coverage-gate.sh conformance.out
 
 bench:
 	$(GO) test -bench=. -benchmem -benchtime=2s -count=10 -run=^$$ ./...
