@@ -13,6 +13,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -360,7 +361,10 @@ func FromHTTPHandler(h http.Handler) Handler {
 	return HandlerFunc(func(ctx context.Context, req *Request, w ResponseWriter) error {
 		httpReq, err := NewHTTPRequest(req)
 		if err != nil {
-			return err
+			// The request cannot be turned into a valid target URI — a client
+			// error, so 400 rather than the 500 a returned handler error would
+			// produce (RFC 9110 §15.5.1).
+			return w.WriteHeaders(400, nil)
 		}
 		httpReq = httpReq.WithContext(ctx)
 		h.ServeHTTP(w, httpReq)
@@ -437,6 +441,19 @@ func (*bufferStreamWriter) streamID() uint32 { return 0 }
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
+// ErrNoAuthority is returned by [NewHTTPRequest] when the request carries
+// neither an ":authority" pseudo-header nor a Host field, so the target URI for
+// an "http" or "https" scheme would have an empty host.
+//
+// RFC 9110 §4.2.1 (rfc9110.txt:1106) and §4.2.2 (:1135): "A sender MUST NOT
+// generate an "http" URI with an empty host identifier. A recipient that
+// processes such a URI reference MUST reject it as invalid."
+//
+// This previously substituted the literal "localhost", which invented an
+// authority the client never sent and left a handler unable to tell a hostless
+// request from a legitimate one.
+var ErrNoAuthority = errors.New("poseidon: request has no :authority or Host; target URI would have an empty host")
+
 // NewHTTPRequest builds a standard [http.Request] from a Poseidon [Request].
 func NewHTTPRequest(req *Request) (*http.Request, error) {
 	scheme := req.Scheme
@@ -444,8 +461,8 @@ func NewHTTPRequest(req *Request) (*http.Request, error) {
 		scheme = schemeHTTP
 	}
 	host := req.Authority
-	if host == "" {
-		host = "localhost"
+	if host == "" && (scheme == schemeHTTP || scheme == schemeHTTPS) {
+		return nil, ErrNoAuthority
 	}
 	urlStr := scheme + "://" + host + req.Path
 	httpReq, err := http.NewRequest(req.Method, urlStr, http.NoBody)

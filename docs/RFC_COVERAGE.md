@@ -36,6 +36,10 @@ that mechanism.
 | §5.5 (`rfc9110.txt:1611`) | Conformance | `TestConformance_RFC9110_Sec55_CleanFieldValueAccepted` |
 | §2.2 (`rfc9110.txt:572`) | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessagePercentEncoded` |
 | §2.2 (`rfc9110.txt:572`) | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessageOmittedWhenEmpty` |
+| §4.2.1, §4.2.2 (`rfc9110.txt:1106`, `:1135`) | Conformance | `TestConformance_RFC9110_Sec42_EmptyHostRejected` |
+| §4.2 boundary (`rfc9113.txt:2643`) | Conformance | `TestConformance_RFC9110_Sec42_NonHTTPSchemeUnaffected` |
+| §7.2 (`rfc9110.txt:2426`) | Conformance | `TestConformance_RFC9110_Sec72_HostSuppliesAuthority` |
+| §7.2 / RFC 9113 §8.3.1 (`rfc9113.txt:2649`) | Conformance | `TestConformance_RFC9110_Sec72_AuthorityWinsOverHost` |
 
 RFC 9110 §2.2 — *"A sender MUST NOT generate protocol elements that do not
 match the grammar defined by the corresponding ABNF rules"* — is the hook by
@@ -75,8 +79,7 @@ stream on the connection decodes corrupt headers.
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-gaps — inbound request validation (target-URI validation, empty `:authority`),
-response correctness (HEAD body suppression,
+gaps — response correctness (HEAD body suppression,
 `Date`, trailer/header separation, gzip `Content-Encoding`) and server push
 (`:authority` on PUSH_PROMISE) — are listed with per-item evidence in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).

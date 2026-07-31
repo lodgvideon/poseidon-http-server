@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -470,7 +471,18 @@ func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream
 
 func (s *Server) buildRequest(headers []hpack.HeaderField, streamID uint32) *Request {
 	req := &Request{Headers: headers, streamID: streamID}
+	// hostField is the fallback source for the target URI's authority. RFC 9110
+	// §7.2 (rfc9110.txt:2426): "A user agent MUST generate a Host header field
+	// in a request unless it sends that information as an ":authority"
+	// pseudo-header field" — so a request carrying only Host is legal and its
+	// authority must come from there. RFC 9113 §8.3.1 (rfc9113.txt:2649) fixes
+	// the precedence: "The recipient of an HTTP/2 request MUST NOT use the Host
+	// header field to determine the target URI if ":authority" is present."
+	var hostField string
 	for _, h := range headers {
+		if req.Authority == "" && len(h.Name) > 0 && h.Name[0] != ':' && strings.EqualFold(string(h.Name), "host") {
+			hostField = string(h.Value)
+		}
 		switch string(h.Name) {
 		case ":method":
 			req.Method = string(h.Value)
@@ -488,6 +500,9 @@ func (s *Server) buildRequest(headers []hpack.HeaderField, streamID uint32) *Req
 		case ":authority":
 			req.Authority = string(h.Value)
 		}
+	}
+	if req.Authority == "" {
+		req.Authority = hostField
 	}
 	return req
 }

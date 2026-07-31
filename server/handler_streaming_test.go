@@ -16,6 +16,7 @@ func TestNewHTTPRequest_StreamingBodyReader(t *testing.T) {
 	req := &Request{
 		Method:     "POST",
 		Path:       "/upload",
+		Authority:  "example.com",
 		BodyReader: io.NopCloser(bytes.NewReader(data)), // Body is nil in streaming mode
 	}
 
@@ -41,7 +42,7 @@ func TestNewHTTPRequest_StreamingBodyReader(t *testing.T) {
 // The buffered ([]byte) and empty paths must keep working: Body is never nil,
 // buffered bodies report their length, and an absent body reads as zero bytes.
 func TestNewHTTPRequest_BufferedAndEmptyBody(t *testing.T) {
-	buffered := &Request{Method: "POST", Path: "/", Body: []byte("buffered")}
+	buffered := &Request{Method: "POST", Path: "/", Authority: "example.com", Body: []byte("buffered")}
 	r, err := NewHTTPRequest(buffered)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +55,7 @@ func TestNewHTTPRequest_BufferedAndEmptyBody(t *testing.T) {
 		t.Errorf("buffered ContentLength = %d, want %d", r.ContentLength, len("buffered"))
 	}
 
-	empty := &Request{Method: "GET", Path: "/"}
+	empty := &Request{Method: "GET", Path: "/", Authority: "example.com"}
 	r2, err := NewHTTPRequest(empty)
 	if err != nil {
 		t.Fatal(err)
