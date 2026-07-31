@@ -308,3 +308,113 @@ func TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected(t *testing.T) {
 		t.Errorf("whitespace before a field-name colon: got %q, want 400 (RFC 9112 §5.1)", line)
 	}
 }
+
+// TestH2CProbe_HeadIsBounded covers the resource bounds on the h2c probe.
+//
+// Not a conformance rule but the reason one is reachable: http.ReadRequest
+// accumulates the whole field section in memory with no limit of its own, and
+// the probe's only previous deadline was derived from the context — which Serve
+// is normally given without one, so it never fired. An unbounded probe is a
+// memory-exhaustion vector and a trickled one is Slowloris.
+func TestH2CProbe_HeadIsBounded(t *testing.T) {
+	c := upgradeConn(t)
+
+	// A well-formed request line and Host, then field lines forever. A probe
+	// that reads to the cap and gives up closes; one that does not would grow
+	// until the process does.
+	_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: localhost\r\n")
+	filler := "x-pad: " + strings.Repeat("A", 1024) + "\r\n"
+	deadline := time.Now().Add(15 * time.Second)
+	var written int
+	for time.Now().Before(deadline) {
+		n, err := c.Write([]byte(filler))
+		written += n
+		if err != nil {
+			// The server bounded us: it stopped reading and closed.
+			return
+		}
+		if written > 4<<20 {
+			t.Fatalf("wrote %d bytes of header fields and the server was still reading; "+
+				"the probe head is unbounded", written)
+		}
+	}
+	t.Fatalf("wrote %d bytes without the server closing", written)
+}
+
+// TestH2CProbe_ReleasedAfterUpgrade guards the other direction: the bound must
+// not leak into the HTTP/2 connection. A response body larger than the probe
+// cap has to come back intact.
+func TestH2CProbe_ReleasedAfterUpgrade(t *testing.T) {
+	big := make([]byte, maxProbeHeadBytes*2)
+	for i := range big {
+		big[i] = byte('a' + i%26)
+	}
+
+	srv, err := NewServer(Options{
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
+			if err := w.WriteHeaders(200, nil); err != nil {
+				return err
+			}
+			return w.WriteData(big)
+		}),
+		H2C: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Serve(ctx, ln) }()
+
+	c, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+
+	_, _ = fmt.Fprintf(c, "GET /big HTTP/1.1\r\n"+
+		"Host: localhost\r\n"+
+		"Upgrade: h2c\r\n"+
+		"Connection: Upgrade, HTTP2-Settings\r\n"+
+		"HTTP2-Settings: %s\r\n\r\n", validHTTP2Settings)
+
+	br := bufio.NewReader(c)
+	if line := readStatusLine(t, br); !strings.Contains(line, "101") {
+		t.Fatalf("expected 101, got %q", line)
+	}
+	for {
+		hdr, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatalf("draining 101 headers: %v", rerr)
+		}
+		if strings.TrimSpace(hdr) == "" {
+			break
+		}
+	}
+
+	rwc := &bufioConn{Conn: c, Reader: br}
+	fr := frame.NewFramer(rwc, rwc)
+	if _, werr := rwc.Write(clientPreface); werr != nil {
+		t.Fatal(werr)
+	}
+	if herr := performClientHandshakeAfterPreface(fr); herr != nil {
+		t.Fatal(herr)
+	}
+
+	cap := &streamHeaderCapture{}
+	for len(cap.headers) == 0 {
+		if _, rerr := fr.ReadFrame(context.Background(), cap); rerr != nil {
+			t.Fatalf("reading the response after upgrade: %v — the probe bound leaked "+
+				"into the HTTP/2 connection", rerr)
+		}
+	}
+	if got := statusValue(cap.headers); got != "200" {
+		t.Errorf(":status = %q, want 200", got)
+	}
+}

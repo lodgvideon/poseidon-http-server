@@ -63,3 +63,30 @@ what a gRPC client expects for an early failure.
 - **Negative — 4 MiB default cap** may be too small for some payloads; it is a
   constant today rather than a per-service option, so larger messages require a
   code change to `maxRecvMessageSize` or use of `DecodeLPWithLimit` directly.
+- **Negative — deliberate deviation from RFC 9110 §6.5.1.** That section closes
+  with: *"Because of the potential for trailer fields to be discarded in
+  transit, a server SHOULD NOT generate trailer fields that it believes are
+  necessary for the user agent to receive"* (`rfc9110.txt:2260`). `grpc-status`
+  is exactly such a field — it carries the outcome of the call, and every
+  terminal path in `grpcserver/service.go` ends by emitting it as a trailer.
+  This is not incidental; it is what the gRPC protocol specifies, so the
+  deviation is accepted rather than fixed.
+
+  The SHOULD NOT states its own rationale — trailers may be *discarded in
+  transit* — and RFC 9110 §6.5.1 also supplies the condition that removes it:
+  *"The presence of the keyword "trailers" in the TE header field … indicates
+  that the client is willing to accept trailer fields, on behalf of itself and
+  any downstream clients … only that the trailer section(s) will not be dropped
+  by any of the clients"* (`rfc9110.txt:2250`). The gRPC-over-HTTP/2 spec
+  requires clients to send `te: trailers`, so in a conformant gRPC exchange the
+  hazard the rule guards against does not arise.
+
+  **Residual risk, named rather than waved away:** this server does not verify
+  that `te` was sent. `HeaderTE` is declared in `grpcserver/status.go` and has
+  no production reader. A client that omits `te: trailers` and sits behind an
+  intermediary that drops trailer sections would lose the call outcome silently.
+  Enforcing it — rejecting a `te`-less request — was considered and declined:
+  it would break hand-rolled and some proxied clients that work today, for a
+  gain that is on paper only, since the check would fold into the existing
+  content-type pass in `grpcserver/service.go` and cost nothing to add later if
+  that trade ever changes.
