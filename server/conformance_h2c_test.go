@@ -276,3 +276,35 @@ func TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1(t *testin
 		t.Errorf(":status = %q, want 200", got)
 	}
 }
+
+// TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected pins
+// rfc9112.txt:716
+//
+//	"No whitespace is allowed between the field name and colon. In the past,
+//	 differences in the handling of such whitespace have led to security
+//	 vulnerabilities in request routing and response handling. A server MUST
+//	 reject, with a response status code of 400 (Bad Request), any received
+//	 request message that contains whitespace between a header field name and
+//	 colon."
+//
+// Go's net/textproto deliberately accepts a SP there (go.dev/issue/34540) and
+// hands back the field under a key with a trailing space, so this cannot be
+// left to http.ReadRequest. A HTAB in the same position it does reject, which
+// this repository's 400 path already covered; the SP is the one that leaked.
+//
+// The request below is otherwise a perfectly conformant upgrade, so nothing but
+// the malformed field name can be responsible for the rejection.
+func TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected(t *testing.T) {
+	c := upgradeConn(t)
+	_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\n"+
+		"Host: localhost\r\n"+
+		"Upgrade: h2c\r\n"+
+		"Connection: Upgrade, HTTP2-Settings\r\n"+
+		"HTTP2-Settings: %s\r\n"+
+		"X-Foo : bar\r\n\r\n", validHTTP2Settings)
+
+	line := readStatusLine(t, bufio.NewReader(c))
+	if !strings.Contains(line, "400") {
+		t.Errorf("whitespace before a field-name colon: got %q, want 400 (RFC 9112 §5.1)", line)
+	}
+}

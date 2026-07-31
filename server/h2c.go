@@ -95,6 +95,46 @@ func validHTTP2SettingsPayload(v string) bool {
 	return len(raw)%6 == 0
 }
 
+// tokenChar reports whether c is a tchar (RFC 9110 §5.6.2, rfc9110.txt:1735):
+//
+//	tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+//	        "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+func tokenChar(c byte) bool {
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+		return true
+	}
+	switch c {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
+}
+
+// validFieldName reports whether name matches field-name = token
+// (RFC 9110 §5.1).
+//
+// This exists because of RFC 9112 §5.1 (rfc9112.txt:716): "A server MUST
+// reject, with a response status code of 400 (Bad Request), any received
+// request message that contains whitespace between a header field name and
+// colon." Go's net/textproto deliberately accepts a SP there
+// (go.dev/issue/34540) and returns the field under a key carrying the trailing
+// space, so the check cannot be delegated to http.ReadRequest. A HTAB in the
+// same position textproto does reject outright.
+//
+// Validating the whole name as a token rather than just hunting for a trailing
+// space costs the same and covers every other way a name can be malformed.
+func validFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		if !tokenChar(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // connectionSpecificFields are dropped when translating the HTTP/1.1 upgrade
 // request into HTTP/2 request fields. RFC 9113 §8.2.2 forbids them in HTTP/2,
 // and "HTTP2-Settings" is meaningful only to the upgrade itself.
@@ -164,6 +204,15 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 		// Includes the duplicate-Host case, which net/http rejects for us.
 		writeBadRequest(nc, "Malformed request")
 		return
+	}
+
+	// RFC 9112 §5.1 — a field name that is not a token means whitespace crept
+	// in before the colon, which net/textproto passes through.
+	for name := range req.Header {
+		if !validFieldName(name) {
+			writeBadRequest(nc, "Malformed field name")
+			return
+		}
 	}
 
 	switch {

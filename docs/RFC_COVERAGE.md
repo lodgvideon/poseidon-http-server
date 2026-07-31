@@ -69,6 +69,7 @@ serve HTTP/1.1.
 | Section | Type | Test |
 |---------|------|------|
 | §2.2 (`rfc9112.txt:445`) | Conformance | `TestConformance_RFC9112_Sec22_RejectRequestWithoutHost` |
+| §5.1 (`rfc9112.txt:716`) | Conformance | `TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected` |
 
 ## RFC 9113 — HTTP/2
 
@@ -96,7 +97,10 @@ decodes corrupt headers.
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-gaps — `Expect: 100-continue`, the missing 421 path, and whitespace before a
-field-name colon — are listed with per-item evidence in
+gaps are `Expect: 100-continue` (911010-15) and the missing 421 path
+(91107-13). Both need a decision rather than a patch: the first is not
+expressible through the current ResponseWriter, which turns into a no-op once
+headers are written, and the second turns on which identity :authority is
+compared against. Per-item evidence is in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).
 Each should arrive as a new row here plus the test that proves it.
