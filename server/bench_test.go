@@ -89,3 +89,25 @@ func BenchmarkHTTPDate(b *testing.B) {
 }
 
 var benchSink []byte
+
+// BenchmarkHasExpectContinue covers the per-request scan added for RFC 9110
+// §10.1.1. It runs on every request that carries content, so it must not
+// allocate — the list scan uses sub-slices throughout.
+func BenchmarkHasExpectContinue(b *testing.B) {
+	headers := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("POST")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":path"), Value: []byte("/upload")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte("content-type"), Value: []byte("application/octet-stream")},
+		{Name: []byte("expect"), Value: []byte("100-continue")},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		if !hasExpectContinue(headers) {
+			b.Fatal("expected a 100-continue expectation")
+		}
+	}
+}

@@ -52,6 +52,9 @@ that mechanism.
 | §6.5.1 (`rfc9110.txt:2245`) | Conformance | `TestConformance_RFC9110_Sec651_TrailersNotMergedIntoHeaders` |
 | §6.5.1 (`rfc9110.txt:2244`) | Conformance | `TestConformance_RFC9110_Sec651_TrailersForwardedAsTrailers` |
 | §6.5.1 boundary | Conformance | `TestConformance_RFC9110_Sec651_HeaderOnlyResponseUnaffected` |
+| §10.1.1 | Conformance | `TestConformance_RFC9110_Sec1011_ImmediateContinue` |
+| §10.1.1 (no expectation) | Conformance | `TestConformance_RFC9110_Sec1011_NoExpectNoContinue` |
+| §10.1.1 (no content) | Conformance | `TestConformance_RFC9110_Sec1011_NoContentNoContinue` |
 
 RFC 9110 §2.2 — *"A sender MUST NOT generate protocol elements that do not
 match the grammar defined by the corresponding ABNF rules"* — is the hook by
@@ -97,10 +100,7 @@ decodes corrupt headers.
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-gaps are `Expect: 100-continue` (911010-15) and the missing 421 path
-(91107-13). Both need a decision rather than a patch: the first is not
-expressible through the current ResponseWriter, which turns into a no-op once
-headers are written, and the second turns on which identity :authority is
-compared against. Per-item evidence is in
+gap is the missing 421 path (91107-13): `:authority` is never compared against
+the identity the connection was authenticated for. Per-item evidence is in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).
 Each should arrive as a new row here plus the test that proves it.

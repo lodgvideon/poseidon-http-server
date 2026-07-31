@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -363,8 +364,27 @@ func (s *Server) serveStream(stream *conn.ServerStream) {
 
 	req = s.buildRequest(ev.Headers, stream.ID())
 	if ev.EndStream {
+		// RFC 9110 §10.1.1 also allows the interim response to be omitted when
+		// "the framing indicates that there is no content" — END_STREAM here.
 		s.dispatchAndClose(ctx, stream, req)
 		return
+	}
+
+	// RFC 9110 §10.1.1: a request carrying a 100-continue expectation, whose
+	// framing indicates content will follow, MUST get either an immediate final
+	// status "if that status can be determined by examining just the method,
+	// target URI, and header fields" or "an immediate 100 (Continue) response".
+	// Only the handler could determine the former, so the interim response is
+	// the applicable branch.
+	//
+	// This is not cosmetic: in buffered mode the server waits for the whole body
+	// before dispatching, while a client honouring its own expectation waits for
+	// the 100 — both sides waiting on each other until something times out.
+	if hasExpectContinue(ev.Headers) {
+		if err := stream.SendHeaders(ctx, continue100Headers, false); err != nil {
+			_ = stream.Close()
+			return
+		}
 	}
 
 	// Streaming mode: attach io.ReadCloser and dispatch immediately.
@@ -726,4 +746,47 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// --- 100-continue expectation (RFC 9110 §10.1.1) -----------------------------
+
+var (
+	sFieldExpect       = []byte("expect")
+	sExpect100Continue = []byte("100-continue")
+
+	// continue100Headers is the interim response's field section. RFC 9113
+	// §8.3.2 (rfc9113.txt:2723) requires :status "in all responses, including
+	// interim responses". Package-level and reused, never re-minted (ADR-0001);
+	// nothing writes to it.
+	continue100Headers = []hpack.HeaderField{
+		{Name: []byte(":status"), Value: []byte("100")},
+	}
+)
+
+// hasExpectContinue reports whether the field section carries a 100-continue
+// expectation.
+//
+// Expect is a list — "Expect = #expectation" (RFC 9110 §10.1.1) — so the value
+// is scanned member by member rather than compared whole. The scan allocates
+// nothing: IndexByte and TrimSpace both return sub-slices. The field value is
+// case-insensitive, as the same section states.
+func hasExpectContinue(headers []hpack.HeaderField) bool {
+	for i := range headers {
+		if !bytes.EqualFold(headers[i].Name, sFieldExpect) {
+			continue
+		}
+		v := headers[i].Value
+		for len(v) > 0 {
+			member := v
+			if j := bytes.IndexByte(v, ','); j >= 0 {
+				member, v = v[:j], v[j+1:]
+			} else {
+				v = nil
+			}
+			if bytes.EqualFold(bytes.TrimSpace(member), sExpect100Continue) {
+				return true
+			}
+		}
+	}
+	return false
 }
