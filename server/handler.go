@@ -262,6 +262,19 @@ func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	return w.sw.sendHeaders(w.reqCtx(), fields, false)
 }
 
+// suppressContent reports whether this response must carry no content.
+//
+// RFC 9110 §9.3.2 (rfc9110.txt:3987): "The HEAD method is identical to GET
+// except that the server MUST NOT send content in the response." Only the DATA
+// frames are dropped — the header section is left exactly as a GET would have
+// produced it (:3993), and RFC 9113 §8.1.1 (rfc9113.txt:2457) explicitly allows
+// the resulting non-zero content-length with no DATA behind it.
+//
+// Hot path: a nil check and a string comparison, no allocation.
+func (w *responseWriter) suppressContent() bool {
+	return w.req != nil && w.req.Method == http.MethodHead
+}
+
 // WriteData sends response body data. If headers have not been sent yet it
 // auto-sends a 200 response before writing data.
 func (w *responseWriter) WriteData(p []byte) error {
@@ -269,6 +282,9 @@ func (w *responseWriter) WriteData(p []byte) error {
 		if err := w.WriteHeaders(http.StatusOK, nil); err != nil {
 			return err
 		}
+	}
+	if w.suppressContent() {
+		return nil
 	}
 	return w.sw.sendData(w.reqCtx(), p, false)
 }
@@ -295,6 +311,13 @@ func (w *responseWriter) Header() http.Header {
 func (w *responseWriter) Write(p []byte) (int, error) {
 	if !w.written {
 		w.WriteHeader(http.StatusOK)
+	}
+	// A HEAD response carries no content (RFC 9110 §9.3.2). Report a complete
+	// write anyway: io.Writer treats a short write as an error, so returning
+	// less would make io.Copy in an ordinary stdlib handler fail or spin. This
+	// mirrors what net/http does for HEAD.
+	if w.suppressContent() {
+		return len(p), nil
 	}
 	if err := w.sw.sendData(w.reqCtx(), p, false); err != nil {
 		return 0, err
