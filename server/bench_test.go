@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -56,3 +57,35 @@ func BenchmarkResponseWriter_WriteData_HEAD(b *testing.B) {
 		_ = w.WriteData(payload)
 	}
 }
+
+// BenchmarkResponseWriter_WriteHeaders measures the native header path, which
+// gained the RFC 9110 §6.6.1 Date field. The field list was already built with
+// a single make(), so adding Date must not add an allocation — only widen the
+// one that was already there.
+func BenchmarkResponseWriter_WriteHeaders(b *testing.B) {
+	hdrs := []hpack.HeaderField{
+		{Name: []byte("content-type"), Value: []byte("application/json")},
+		{Name: []byte("content-length"), Value: []byte("1024")},
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		w := newResponseWriterWithSW(benchDiscardWriter{})
+		_ = w.WriteHeaders(200, hdrs)
+	}
+}
+
+// BenchmarkHTTPDate isolates the per-second Date cache: every call inside the
+// same second must be a load-and-compare with no formatting and no allocation.
+func BenchmarkHTTPDate(b *testing.B) {
+	now := time.Now()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		benchSink = httpDate(now)
+	}
+}
+
+var benchSink []byte

@@ -12,12 +12,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -252,14 +254,32 @@ func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	// Pre-computed :status value for common codes.
 	statusVal := statusBytes(status)
 
-	fields := make([]hpack.HeaderField, 0, 1+len(headers))
+	fields := make([]hpack.HeaderField, 0, 2+len(headers))
 	fields = append(fields, hpack.HeaderField{
 		Name:  sColonStatus,
 		Value: statusVal,
 	})
+	// RFC 9110 §6.6.1 — a Date is mandatory on 2xx/3xx/4xx. A handler that set
+	// one deliberately keeps it; emitting a second would violate the field
+	// grammar as well as discard the handler's intent.
+	if dateRequired(status) && !hasField(headers, sFieldDate) {
+		fields = append(fields, hpack.HeaderField{Name: sFieldDate, Value: httpDate(time.Now())})
+	}
 	fields = append(fields, headers...)
 
 	return w.sw.sendHeaders(w.reqCtx(), fields, false)
+}
+
+// hasField reports whether name is already present, so a generated field never
+// duplicates one the handler supplied. Case-insensitive: HTTP/2 field names are
+// lowercase (RFC 9113 §8.2), but a native-path caller could pass anything.
+func hasField(fields []hpack.HeaderField, name []byte) bool {
+	for i := range fields {
+		if bytes.EqualFold(fields[i].Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // suppressContent reports whether this response must carry no content.
@@ -341,11 +361,16 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 		hdr = make(http.Header)
 	}
 	statusVal := statusBytes(statusCode)
-	fields := make([]hpack.HeaderField, 0, 1+len(hdr))
+	fields := make([]hpack.HeaderField, 0, 2+len(hdr))
 	fields = append(fields, hpack.HeaderField{
 		Name:  sColonStatus,
 		Value: statusVal,
 	})
+	// RFC 9110 §6.6.1, as on the native path above. http.Header canonicalises
+	// to "Date", so Get finds a handler-set value whatever case it used.
+	if dateRequired(statusCode) && hdr.Get("Date") == "" {
+		fields = append(fields, hpack.HeaderField{Name: sFieldDate, Value: httpDate(time.Now())})
+	}
 	for k, vv := range hdr {
 		lower := strings.ToLower(k)
 		for _, v := range vv {
