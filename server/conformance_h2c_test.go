@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -190,16 +191,16 @@ func (h *streamHeaderCapture) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlo
 	}))
 }
 
-func (h *streamHeaderCapture) OnData(frame.FrameHeader, []byte, uint8) error           { return nil }
-func (h *streamHeaderCapture) OnPriority(frame.FrameHeader, frame.Priority) error      { return nil }
-func (h *streamHeaderCapture) OnRSTStream(frame.FrameHeader, frame.ErrCode) error      { return nil }
+func (h *streamHeaderCapture) OnData(frame.FrameHeader, []byte, uint8) error      { return nil }
+func (h *streamHeaderCapture) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+func (h *streamHeaderCapture) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
 func (h *streamHeaderCapture) OnSettings(frame.FrameHeader, frame.SettingsParams) error {
 	return nil
 }
 func (h *streamHeaderCapture) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
 }
-func (h *streamHeaderCapture) OnPing(frame.FrameHeader, [8]byte) error                       { return nil }
+func (h *streamHeaderCapture) OnPing(frame.FrameHeader, [8]byte) error { return nil }
 func (h *streamHeaderCapture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
 	return nil
 }
@@ -306,5 +307,258 @@ func TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected(t *testing.T) {
 	line := readStatusLine(t, bufio.NewReader(c))
 	if !strings.Contains(line, "400") {
 		t.Errorf("whitespace before a field-name colon: got %q, want 400 (RFC 9112 §5.1)", line)
+	}
+}
+
+// TestH2CProbe_HeadIsBounded covers the resource bounds on the h2c probe.
+//
+// Not a conformance rule but the reason one is reachable: http.ReadRequest
+// accumulates the whole field section in memory with no limit of its own, and
+// the probe's only previous deadline was derived from the context — which Serve
+// is normally given without one, so it never fired. An unbounded probe is a
+// memory-exhaustion vector and a trickled one is Slowloris.
+func TestH2CProbe_HeadIsBounded(t *testing.T) {
+	c := upgradeConn(t)
+
+	// A well-formed request line and Host, then field lines forever. A probe
+	// that reads to the cap and gives up closes; one that does not would grow
+	// until the process does.
+	_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: localhost\r\n")
+	filler := "x-pad: " + strings.Repeat("A", 1024) + "\r\n"
+	deadline := time.Now().Add(15 * time.Second)
+	var written int
+	for time.Now().Before(deadline) {
+		n, err := c.Write([]byte(filler))
+		written += n
+		if err != nil {
+			// The server bounded us: it stopped reading and closed.
+			return
+		}
+		if written > 4<<20 {
+			t.Fatalf("wrote %d bytes of header fields and the server was still reading; "+
+				"the probe head is unbounded", written)
+		}
+	}
+	t.Fatalf("wrote %d bytes without the server closing", written)
+}
+
+// TestH2CProbe_ReleasedAfterUpgrade guards the other direction: the bound must
+// not leak into the HTTP/2 connection. A response body larger than the probe
+// cap has to come back intact.
+func TestH2CProbe_ReleasedAfterUpgrade(t *testing.T) {
+	big := make([]byte, maxProbeHeadBytes*2)
+	for i := range big {
+		big[i] = byte('a' + i%26)
+	}
+
+	srv, err := NewServer(Options{
+		Handler: HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
+			if err := w.WriteHeaders(200, nil); err != nil {
+				return err
+			}
+			return w.WriteData(big)
+		}),
+		H2C: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Serve(ctx, ln) }()
+
+	c, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+
+	_, _ = fmt.Fprintf(c, "GET /big HTTP/1.1\r\n"+
+		"Host: localhost\r\n"+
+		"Upgrade: h2c\r\n"+
+		"Connection: Upgrade, HTTP2-Settings\r\n"+
+		"HTTP2-Settings: %s\r\n\r\n", validHTTP2Settings)
+
+	br := bufio.NewReader(c)
+	if line := readStatusLine(t, br); !strings.Contains(line, "101") {
+		t.Fatalf("expected 101, got %q", line)
+	}
+	for {
+		hdr, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatalf("draining 101 headers: %v", rerr)
+		}
+		if strings.TrimSpace(hdr) == "" {
+			break
+		}
+	}
+
+	rwc := &bufioConn{Conn: c, Reader: br}
+	fr := frame.NewFramer(rwc, rwc)
+	if _, werr := rwc.Write(clientPreface); werr != nil {
+		t.Fatal(werr)
+	}
+	if herr := performClientHandshakeAfterPreface(fr); herr != nil {
+		t.Fatal(herr)
+	}
+
+	cap := &streamHeaderCapture{}
+	for len(cap.headers) == 0 {
+		if _, rerr := fr.ReadFrame(context.Background(), cap); rerr != nil {
+			t.Fatalf("reading the response after upgrade: %v — the probe bound leaked "+
+				"into the HTTP/2 connection", rerr)
+		}
+	}
+	if got := statusValue(cap.headers); got != "200" {
+		t.Errorf(":status = %q, want 200", got)
+	}
+}
+
+// TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade pins rfc9112.txt:1521
+//
+//	"A server that receives a "close" connection option MUST initiate closure of
+//	 the connection (see below) after it sends the final response to the request
+//	 that contained the "close" connection option. The server SHOULD send a
+//	 "close" connection option in its final response on that connection. The
+//	 server MUST NOT process any further requests received on that connection."
+//
+// Upgrading such a request is the one thing that cannot satisfy this: the
+// server would then serve an unbounded number of HTTP/2 streams on a connection
+// the client declared finished. Declining is expressly allowed — RFC 7540 §3.2
+// lets a server "respond to the request as though the Upgrade header field were
+// absent" — and the 400 path already sends "Connection: close" and closes.
+//
+// The token is looked for across every Connection field line, not via
+// req.Close: net/http's shouldClose consults only the first one, so a second
+// line carrying "close" would slip past.
+func TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		connection string
+	}{
+		{"close_first", "close, Upgrade, HTTP2-Settings"},
+		{"close_last", "Upgrade, HTTP2-Settings, close"},
+		{"close_uppercase", "Upgrade, HTTP2-Settings, CLOSE"},
+		{"close_htab_separated", "Upgrade,\tHTTP2-Settings,\tclose"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := upgradeConn(t)
+			_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\n"+
+				"Host: localhost\r\n"+
+				"Upgrade: h2c\r\n"+
+				"Connection: %s\r\n"+
+				"HTTP2-Settings: %s\r\n\r\n", tc.connection, validHTTP2Settings)
+
+			line := readStatusLine(t, bufio.NewReader(c))
+			if !strings.Contains(line, "400") {
+				t.Errorf("Connection: %q — got %q, want 400; upgrading would process further "+
+					"requests on a connection the client declared finished", tc.connection, line)
+			}
+		})
+	}
+}
+
+// TestConformance_RFC9112_Sec96_SecondCloseFieldLineCounts is the specific case
+// req.Close misses.
+func TestConformance_RFC9112_Sec96_SecondCloseFieldLineCounts(t *testing.T) {
+	c := upgradeConn(t)
+	_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\n"+
+		"Host: localhost\r\n"+
+		"Upgrade: h2c\r\n"+
+		"Connection: Upgrade, HTTP2-Settings\r\n"+
+		"Connection: close\r\n"+
+		"HTTP2-Settings: %s\r\n\r\n", validHTTP2Settings)
+
+	line := readStatusLine(t, bufio.NewReader(c))
+	if !strings.Contains(line, "400") {
+		t.Errorf("got %q, want 400 — the \"close\" option arrived on a second Connection "+
+			"field line, which net/http's shouldClose does not inspect", line)
+	}
+}
+
+// stagedConn records the order of tear-down calls so the staging RFC 9112 §9.6
+// prescribes can be asserted without depending on TCP timing.
+type stagedConn struct {
+	net.Conn
+	pending []byte
+	calls   []string
+	read    int
+}
+
+func (c *stagedConn) CloseWrite() error {
+	c.calls = append(c.calls, "CloseWrite")
+	return nil
+}
+
+func (c *stagedConn) Close() error {
+	c.calls = append(c.calls, "Close")
+	return nil
+}
+
+func (c *stagedConn) Read(p []byte) (int, error) {
+	if len(c.pending) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.pending)
+	c.pending = c.pending[n:]
+	c.read += n
+	c.calls = append(c.calls, "Read")
+	return n, nil
+}
+
+func (c *stagedConn) Write(p []byte) (int, error)     { return len(p), nil }
+func (c *stagedConn) SetReadDeadline(time.Time) error { return nil }
+
+// TestH2CProbe_TearDownIsStaged pins the tear-down RFC 9112 §9.6 prescribes
+// (rfc9112.txt:1548): "servers typically close a connection in stages. First,
+// the server performs a half-close by closing only the write side ... The
+// server then continues to read from the connection until it receives a
+// corresponding close by the client ... Finally, the server fully closes."
+//
+// The hazard is stated just above (:1539): unread client data on a fully closed
+// connection makes the TCP stack send a reset, and "the reset packet might
+// erase the client's unacknowledged input buffers before they can be read and
+// interpreted by the client's HTTP parser" — losing the response just written.
+//
+// Asserted structurally rather than over a socket: an end-to-end version of
+// this passed with a bare Close() too, because whether the reset actually
+// erases the response depends on buffer sizes and scheduling. A test that
+// cannot fail is worse than no test.
+func TestH2CProbe_TearDownIsStaged(t *testing.T) {
+	c := &stagedConn{pending: []byte("unread request body")}
+	closeStaged(c)
+
+	if len(c.calls) == 0 || c.calls[0] != "CloseWrite" {
+		t.Fatalf("tear-down began with %v, want a half-close first", c.calls)
+	}
+	if c.calls[len(c.calls)-1] != "Close" {
+		t.Errorf("tear-down ended with %v, want the full close last", c.calls)
+	}
+	if c.read != len("unread request body") {
+		t.Errorf("drained %d of %d pending octets; unread data on a fully closed "+
+			"connection is what provokes the reset", c.read, len("unread request body"))
+	}
+}
+
+// TestH2CProbe_BadRequestTearsDownStaged closes the loop the test above leaves
+// open: closeStaged can be correct while the 400 path bypasses it. Every
+// rejection this file exercises goes out through writeBadRequest, so that is
+// where the staging has to be observed.
+func TestH2CProbe_BadRequestTearsDownStaged(t *testing.T) {
+	c := &stagedConn{pending: []byte("unread request body")}
+	writeBadRequest(c, "Only h2c supported")
+
+	if len(c.calls) == 0 || c.calls[0] != "CloseWrite" {
+		t.Fatalf("writeBadRequest tore down with %v; it must half-close first, or an "+
+			"unread body provokes a reset that can erase the 400 (RFC 9112 §9.6)", c.calls)
+	}
+	if c.read != len("unread request body") {
+		t.Errorf("drained %d of %d pending octets", c.read, len("unread request body"))
 	}
 }

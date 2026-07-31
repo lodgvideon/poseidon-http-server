@@ -41,6 +41,27 @@ type serverConnOps interface {
 // without bound until the process is OOM-killed.
 const defaultMaxHeaderBytes = 1 << 20 // 1 MiB
 
+// status431Fields is the response to a request whose field section is larger
+// than the server is prepared to process. Package-level and reused, never
+// re-minted (ADR-0001).
+//
+// RFC 9110 §5.4: "A server that receives a request header field line, field
+// value, or set of fields larger than it wishes to process MUST respond with an
+// appropriate 4xx (Client Error) status code. Ignoring such header fields would
+// increase the server's vulnerability to request smuggling attacks." 431
+// (Request Header Fields Too Large) is RFC 6585 §5; RFC 9110 itself asks only
+// for "an appropriate 4xx".
+var status431Fields = []hpack.HeaderField{
+	{Name: []byte(":status"), Value: []byte("431")},
+}
+
+// fieldEntryOverhead is the per-field constant of the HPACK entry-size formula
+// (RFC 7541 §4.1), which is what SETTINGS_MAX_HEADER_LIST_SIZE is measured in:
+// RFC 9113 §6.5.2 sizes the list "based on the uncompressed size of field
+// lines, including the length of the name and value in octets plus an overhead
+// of 32 octets for each field line".
+const fieldEntryOverhead = 32
+
 // serverConnHandler bridges frame.Handler into per-ServerStream events.
 type serverConnHandler struct {
 	streams serverConnOps
@@ -79,6 +100,17 @@ func newServerConnHandler(streams serverConnOps, dec *hpack.Decoder, maxHeaderBy
 		recvWindowSeed: recvWindowSeed,
 		scratch:        make([]hpack.HeaderField, 0, 16),
 	}
+}
+
+// respondFieldsTooLarge answers one stream with 431 and releases it, leaving
+// the connection and its sibling streams alone. Best-effort: a write failure
+// here means the connection is already going away.
+func (h *serverConnHandler) respondFieldsTooLarge(s *ServerStream) {
+	if s == nil {
+		return
+	}
+	_ = s.SendHeaders(s.Context(), status431Fields, true)
+	h.streams.markStreamDone(s.id)
 }
 
 // guardHeaderBlock enforces RFC 9113 §6.10: once a HEADERS frame without
@@ -161,7 +193,12 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 
 	if !endHeaders {
 		if len(hb) > h.maxHeaderBytes {
-			return connError{code: frame.ErrCodeProtocolError, msg: "header block exceeds max size"}
+			// The client is owed a status before the connection goes (RFC 9110
+			// §5.4). ENHANCE_YOUR_CALM, not PROTOCOL_ERROR: an oversized but
+			// well-formed field block is not a protocol violation, it is a
+			// client sending more than this server will process.
+			h.respondFieldsTooLarge(s)
+			return connError{code: frame.ErrCodeEnhanceYourCalm, msg: "header block exceeds max size"}
 		}
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
@@ -211,7 +248,8 @@ func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.Header
 	}
 	// Bound the accumulated compressed header block (CVE-2024-27316 defense).
 	if len(h.pendingBuf)+len(hb) > h.maxHeaderBytes {
-		return connError{code: frame.ErrCodeProtocolError, msg: "header block exceeds max size"}
+		h.respondFieldsTooLarge(h.streams.lookupStream(fh.StreamID))
+		return connError{code: frame.ErrCodeEnhanceYourCalm, msg: "header block exceeds max size"}
 	}
 	h.pendingBuf = append(h.pendingBuf, hb...)
 	if fh.Flags&frame.FlagContinuationEndHeaders == 0 {
@@ -247,16 +285,35 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// the shared HPACK dynamic table desyncs from the client's encoder and every
 	// later stream on this connection is corrupted.
 	malformed := false
+	// SETTINGS_MAX_HEADER_LIST_SIZE is measured over the UNCOMPRESSED list
+	// (RFC 9113 §6.5.2), so it cannot be checked on the encoded block — a small
+	// block can decode into an arbitrarily large field list. Accounting here
+	// costs one integer add per field inside a callback that already runs, and
+	// allocates nothing. Like the character check it only flags: the whole block
+	// must still decode or the shared HPACK dynamic table desyncs.
+	listSize, oversized := 0, false
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
 		if !malformed && hasProhibitedFieldChar(f.Value) {
 			malformed = true
 		}
-		h.scratch = append(h.scratch, f)
+		listSize += len(f.Name) + len(f.Value) + fieldEntryOverhead
+		if listSize > h.maxHeaderBytes {
+			oversized = true
+			return nil // keep decoding, stop collecting
+		}
+		if !oversized {
+			h.scratch = append(h.scratch, f)
+		}
 		return nil
 	})
 	if err != nil {
 		_ = s.Close()
 		return err
+	}
+	if oversized {
+		// RFC 9110 §5.4 — answer this stream, leave the connection alone.
+		h.respondFieldsTooLarge(s)
+		return nil
 	}
 	// RFC 9113 §8.3 — request pseudo-headers must be present, unique, defined,
 	// and ahead of every regular field. Only a request header block carries

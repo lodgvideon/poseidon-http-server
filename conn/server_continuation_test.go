@@ -94,9 +94,16 @@ func TestServerConn_Continuation_Interleaving_EmitsProtocolError(t *testing.T) {
 
 // TestServerConn_Continuation_OversizedBlock_EmitsProtocolError verifies the
 // CONTINUATION-flood (CVE-2024-27316) defense: a header block whose accumulated
-// compressed size exceeds the cap is rejected with a connection PROTOCOL_ERROR
-// instead of growing memory without bound.
-func TestServerConn_Continuation_OversizedBlock_EmitsProtocolError(t *testing.T) {
+// compressed size exceeds the cap tears the connection down instead of growing
+// memory without bound.
+//
+// The code is ENHANCE_YOUR_CALM, not PROTOCOL_ERROR. This test asserted
+// PROTOCOL_ERROR until the RFC 9110 §5.4 work: a field block that is merely
+// larger than this server will process is not malformed — the client broke no
+// syntax rule — so PROTOCOL_ERROR misreported the cause. The stream is also
+// answered with 431 before the connection goes; see
+// TestConformance_RFC9110_Sec54_ContinuationFloodAnswers431.
+func TestServerConn_Continuation_OversizedBlock_TearsDownConnection(t *testing.T) {
 	enc := hpack.NewEncoder()
 	first := enc.EncodeBlock(nil, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
@@ -119,7 +126,8 @@ func TestServerConn_Continuation_OversizedBlock_EmitsProtocolError(t *testing.T)
 		// Still no END_HEADERS — the flood pattern. The cap trips here.
 		_ = cliFr.WriteContinuation(1, false, junk)
 	})
-	if code != frame.ErrCodeProtocolError {
-		t.Fatalf("GOAWAY code = %v, want PROTOCOL_ERROR (0x1) for oversized header block", code)
+	if code != frame.ErrCodeEnhanceYourCalm {
+		t.Fatalf("GOAWAY code = %v, want ENHANCE_YOUR_CALM for an oversized header block: "+
+			"too large is not malformed", code)
 	}
 }

@@ -6,10 +6,13 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 
@@ -37,7 +40,14 @@ var h2cPreface = []byte("PRI * HTTP/2.0")
 // RFC 9110 §7.4 check would be silently off for a TLS listener served with
 // H2C enabled.
 func (s *Server) detectAndServe(ctx context.Context, nc net.Conn, cfg *tls.Config) {
-	br := bufio.NewReaderSize(nc, 1024)
+	// Bound the probe in both octets and time before a single byte is parsed.
+	// http.ReadRequest accumulates the whole field section in memory with no
+	// limit of its own, so an unbounded probe is a memory-exhaustion vector, and
+	// a trickled one is Slowloris. The limiter is released once the protocol
+	// decision is made — the HTTP/2 frames that follow must not be capped.
+	lim := &probeLimitReader{r: nc, remaining: maxProbeHeadBytes}
+	br := bufio.NewReaderSize(lim, 1024)
+	_ = nc.SetReadDeadline(time.Now().Add(probeTimeout))
 
 	// Peek first bytes to determine protocol.
 	head, err := br.Peek(len(h2cPreface))
@@ -48,13 +58,58 @@ func (s *Server) detectAndServe(ctx context.Context, nc net.Conn, cfg *tls.Confi
 	}
 
 	if bytes.Equal(head, h2cPreface) {
-		// Prior knowledge h2c — client speaks HTTP/2 directly.
+		// Prior knowledge h2c — client speaks HTTP/2 directly; no HTTP/1.1 head
+		// to bound, and conn.NewServerConn applies its own handshake timeout.
+		lim.release()
+		_ = nc.SetReadDeadline(time.Time{})
 		s.serveConnReader(ctx, nc, br, nil, cfg)
 		return
 	}
 
 	// Could be HTTP/1.1 with Upgrade: h2c, or plain HTTP/1.1.
-	s.handleHTTP1Upgrade(ctx, nc, br, cfg)
+	s.handleHTTP1Upgrade(ctx, nc, br, lim, cfg)
+}
+
+// maxProbeHeadBytes bounds the HTTP/1.1 request head the h2c probe will read.
+// Generous next to any real upgrade request, small next to what an attacker
+// would need to matter. net/http's own server defaults to the same 1 MiB for
+// MaxHeaderBytes; this is deliberately tighter, since the only request this
+// path ever accepts is a bodyless upgrade.
+const maxProbeHeadBytes = 64 << 10
+
+// probeTimeout bounds how long the probe may take. Unlike the previous
+// ctx-derived deadline it always applies: Serve is normally driven by a
+// context with no deadline, so that one never fired.
+const probeTimeout = 10 * time.Second
+
+// errProbeHeadTooLarge is returned to http.ReadRequest once the cap is hit, so
+// it fails rather than reading on.
+var errProbeHeadTooLarge = errors.New("poseidon: h2c probe request head too large")
+
+// probeLimitReader caps reads until release is called. It wraps the connection
+// rather than the bufio.Reader so that releasing it cannot lose bytes already
+// buffered above.
+type probeLimitReader struct {
+	r         io.Reader
+	remaining int
+	released  bool
+}
+
+func (l *probeLimitReader) release() { l.released = true }
+
+func (l *probeLimitReader) Read(p []byte) (int, error) {
+	if l.released {
+		return l.r.Read(p)
+	}
+	if l.remaining <= 0 {
+		return 0, errProbeHeadTooLarge
+	}
+	if len(p) > l.remaining {
+		p = p[:l.remaining]
+	}
+	n, err := l.r.Read(p)
+	l.remaining -= n
+	return n, err
 }
 
 // writeBadRequest writes a minimal HTTP/1.1 400 response and closes. This
@@ -66,27 +121,65 @@ func writeBadRequest(nc net.Conn, reason string) {
 		"Content-Type: text/plain\r\n"+
 		"Connection: close\r\n"+
 		"Content-Length: %d\r\n\r\n%s", len(body), body)
+	closeStaged(nc)
+}
+
+// drainTimeout and drainLimit bound the staged tear-down: how long to keep
+// reading, and how much to discard, before closing outright.
+const (
+	drainTimeout = 500 * time.Millisecond
+	drainLimit   = 64 << 10
+)
+
+// closeStaged tears the connection down the way RFC 9112 §9.6 prescribes
+// (rfc9112.txt:1548): "servers typically close a connection in stages. First,
+// the server performs a half-close by closing only the write side of the
+// read/write connection. The server then continues to read from the connection
+// until it receives a corresponding close by the client ... Finally, the server
+// fully closes the connection."
+//
+// The hazard is stated just above it (:1539): unread client data arriving on a
+// fully closed connection makes the TCP stack send a reset, and "the reset
+// packet might erase the client's unacknowledged input buffers before they can
+// be read and interpreted by the client's HTTP parser" — losing the very
+// response just written. Both stages are bounded so a client that neither
+// closes nor stops sending cannot pin the goroutine.
+func closeStaged(nc net.Conn) {
+	if cw, ok := nc.(interface{ CloseWrite() error }); ok && cw.CloseWrite() == nil {
+		_ = nc.SetReadDeadline(time.Now().Add(drainTimeout))
+		_, _ = io.Copy(io.Discard, io.LimitReader(nc, drainLimit))
+	}
 	_ = nc.Close()
 }
 
+// hasListToken reports whether want appears as an element of a comma-separated
+// field, across every field line of that name.
+//
+// Scanning all lines matters: net/http joins repeated field lines in
+// Header.Values but its own shouldClose consults only the first, so a "close"
+// option on a second Connection line would otherwise slip past. Empty elements
+// simply do not match, and TrimSpace covers OWS — which RFC 9110 §5.6.3
+// (rfc9110.txt:1774) defines as "*( SP / HTAB )".
+func hasListToken(values []string, want string) bool {
+	for _, v := range values {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasUpgradeToken reports whether the Upgrade header field offers the exact
-// token "h2c". The field is a comma-separated list, so it is split rather than
-// compared whole.
+// token "h2c".
 //
 // RFC 7540 §3.2 (rfc7540.txt:464): "A server MUST ignore an "h2" token in an
 // Upgrade header field." Ignoring means behaving as though it were absent, so
 // "h2" is simply never matched here — including in a list such as "h2, h2c",
 // where the "h2c" element still counts.
 func hasUpgradeToken(values []string) bool {
-	for _, v := range values {
-		for _, tok := range strings.Split(v, ",") {
-			// A protocol element may carry a version: "name/version".
-			if strings.EqualFold(strings.TrimSpace(tok), "h2c") {
-				return true
-			}
-		}
-	}
-	return false
+	return hasListToken(values, "h2c")
 }
 
 // validHTTP2SettingsPayload reports whether v is a well-formed HTTP2-Settings
@@ -199,11 +292,7 @@ func upgradeRequestFields(req *http.Request) []hpack.HeaderField {
 //     field were absent") and it keeps unread
 //     HTTP/1.1 octets from being re-read as
 //     HTTP/2 frames.
-func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.Reader, cfg *tls.Config) {
-	// Set a deadline to avoid hanging on malformed input.
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = nc.SetReadDeadline(deadline)
-	}
+func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.Reader, lim *probeLimitReader, cfg *tls.Config) {
 
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -233,6 +322,21 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 	case !hasUpgradeToken(req.Header.Values("Upgrade")):
 		writeBadRequest(nc, "Only h2c supported")
 		return
+	case hasListToken(req.Header.Values("Connection"), "close"):
+		// RFC 9112 §9.6 (rfc9112.txt:1521): "A server that receives a "close"
+		// connection option MUST initiate closure of the connection ... after it
+		// sends the final response ... The server MUST NOT process any further
+		// requests received on that connection."
+		//
+		// Upgrading is the one response that cannot satisfy that: the server
+		// would go on to serve an unbounded number of HTTP/2 streams on a
+		// connection the client declared finished. Declining is expressly
+		// allowed — RFC 7540 §3.2 lets a server "respond to the request as
+		// though the Upgrade header field were absent" — and writeBadRequest
+		// sends "Connection: close" and closes, which is exactly what the rule
+		// asks for.
+		writeBadRequest(nc, "Upgrade request must not request connection close")
+		return
 	}
 
 	// RFC 7540 §3.2.1 (rfc7540.txt:511): exactly one HTTP2-Settings field, and
@@ -256,6 +360,10 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 		"HTTP/1.1 101 Switching Protocols\r\n"+
 			"Connection: Upgrade\r\n"+
 			"Upgrade: h2c\r\n\r\n")
+
+	// Decision made: release the probe bounds before the HTTP/2 frames start.
+	lim.release()
+	_ = nc.SetReadDeadline(time.Time{})
 
 	// The request owns stream 1 (RFC 7540 §3.2) — carry it into the connection.
 	s.serveConnReader(ctx, nc, br, &conn.UpgradedRequest{Headers: upgradeRequestFields(req)}, cfg)

@@ -81,7 +81,7 @@ func Gzip(cfg GzipConfig) server.Middleware {
 				return next.ServeHTTP(ctx, req, w)
 			}
 
-			gw := &gzipResponseWriter{ResponseWriter: w, cfg: cfg}
+			gw := &gzipResponseWriter{ResponseWriter: w, cfg: cfg, head: req.Method == http.MethodHead}
 			// Flush fires as ServeHTTP unwinds — before the server's
 			// post-handler finalization (auto-200 + WriteTrailers) runs
 			// on the original writer.
@@ -102,11 +102,22 @@ func acceptsGzip(headers []hpack.HeaderField) bool {
 	return false
 }
 
+// isOWS reports whether c is optional whitespace.
+//
+// RFC 9110 §5.6.3 (rfc9110.txt:1774): "OWS = *( SP / HTAB )". HTAB counts, and
+// treating only SP as whitespace hid a token behind a tab-separated list.
+func isOWS(c byte) bool { return c == ' ' || c == '	' }
+
 // containsToken checks if a comma-separated header value contains a token.
+//
+// Recipient side of the list construct, RFC 9110 §5.6.1.2 (rfc9110.txt:1695):
+// "A recipient MUST parse and ignore a reasonable number of empty list
+// elements ... a recipient MUST accept lists that satisfy the following syntax:
+// #element => [ element ] *( OWS "," OWS [ element ] )".
 func containsToken(val, token string) bool {
 	for i := 0; i < len(val); i++ {
-		// Skip leading whitespace/commas.
-		for i < len(val) && (val[i] == ' ' || val[i] == ',') {
+		// Skip leading OWS and empty list elements.
+		for i < len(val) && (isOWS(val[i]) || val[i] == ',') {
 			i++
 		}
 		// Match token.
@@ -116,8 +127,9 @@ func containsToken(val, token string) bool {
 			j++
 		}
 		if j == len(token) {
-			// Ensure word boundary.
-			if i >= len(val) || val[i] == ',' || val[i] == ';' || val[i] == ' ' {
+			// Ensure word boundary: end of value, the list separator, a
+			// parameter separator, or OWS.
+			if i >= len(val) || val[i] == ',' || val[i] == ';' || isOWS(val[i]) {
 				return true
 			}
 		}
@@ -147,6 +159,10 @@ type gzipResponseWriter struct {
 	nativeHeaders []hpack.HeaderField // captured from WriteHeaders (native path)
 	usedHTTP      bool                // stdlib WriteHeader/Write path was used
 	flushed       bool
+	// head marks a response to a HEAD request. The handler writes no body, so
+	// this wrapper has nothing to measure: it cannot compress, and it cannot
+	// vouch for a Content-Length the handler set. See flush.
+	head bool
 }
 
 // WriteHeaders captures the native-path status and fields, deferring the send.
@@ -221,7 +237,9 @@ func (g *gzipResponseWriter) flush() error {
 
 	body := g.buf.Bytes()
 	out := body
-	compress := len(body) >= g.cfg.MinSize && !g.alreadyEncoded()
+	// A HEAD response carries no content (RFC 9110 §9.3.2), so there is nothing
+	// to compress and no way to know what a GET would have produced.
+	compress := !g.head && len(body) >= g.cfg.MinSize && !g.alreadyEncoded()
 	if compress {
 		if c, err := gzipCompress(body, g.cfg.Level); err == nil {
 			out = c
@@ -269,8 +287,11 @@ func (g *gzipResponseWriter) alreadyEncoded() bool {
 // flushNative emits via the native WriteHeaders/WriteData path.
 func (g *gzipResponseWriter) flushNative(status int, out []byte, compress bool) error {
 	headers := g.nativeHeaders
-	if compress {
+	switch {
+	case compress:
 		headers = withGzipEncoding(headers)
+	case g.head:
+		headers = withoutContentLength(headers)
 	}
 	if err := g.ResponseWriter.WriteHeaders(status, headers); err != nil {
 		return err
@@ -284,10 +305,13 @@ func (g *gzipResponseWriter) flushNative(status int, out []byte, compress bool) 
 // flushHTTP emits via the stdlib WriteHeader/Write path, mutating the wrapped
 // writer's Header() map to carry the encoding.
 func (g *gzipResponseWriter) flushHTTP(status int, out []byte, compress bool) error {
-	if compress {
+	switch {
+	case compress:
 		h := g.Header() // Header() is not overridden — same as the wrapped writer's
 		h.Del("Content-Length")
 		h.Set("Content-Encoding", "gzip")
+	case g.head:
+		g.Header().Del("Content-Length")
 	}
 	g.ResponseWriter.WriteHeader(status)
 	if len(out) > 0 {
@@ -312,6 +336,31 @@ func (g *gzipResponseWriter) Flush() {
 	if f, ok := server.FlusherOf(g.ResponseWriter); ok {
 		f.Flush()
 	}
+}
+
+// withoutContentLength drops content-length from a field list.
+//
+// RFC 9110 §8.6 (rfc9110.txt:3226): "A server MAY send a Content-Length header
+// field in a response to a HEAD request (Section 9.3.2); a server MUST NOT send
+// Content-Length in such a response unless its field value equals the decimal
+// number of octets that would have been sent in the content of a response if
+// the same request had used the GET method."
+//
+// With this middleware in the chain, a GET would have been gzipped, so the
+// handler's Content-Length — which describes the uncompressed representation —
+// is not that number. The wrapper never sees the body on a HEAD request, so it
+// cannot compute the right one either. Omitting the field is what §9.3.2
+// (rfc9110.txt:3995) permits: "a server MAY omit header fields for which a
+// value is determined only while generating the content".
+func withoutContentLength(headers []hpack.HeaderField) []hpack.HeaderField {
+	out := make([]hpack.HeaderField, 0, len(headers))
+	for _, h := range headers {
+		if bytes.EqualFold(h.Name, hdrContentLength) {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // withGzipEncoding returns headers with Content-Length removed (the compressed
