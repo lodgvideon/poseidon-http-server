@@ -34,6 +34,16 @@ that mechanism.
 | §7.8, §15.2 (`rfc9110.txt:2880`) | Conformance | `TestConformance_RFC9110_Sec78_IgnoreUpgradeInHTTP10Request` |
 | §5.5 (`rfc9110.txt:1606`) | Conformance | `TestConformance_RFC9110_Sec55_FieldValueCRLFNUL_StreamError` |
 | §5.5 (`rfc9110.txt:1611`) | Conformance | `TestConformance_RFC9110_Sec55_CleanFieldValueAccepted` |
+| §2.2 (`rfc9110.txt:572`) | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessagePercentEncoded` |
+| §2.2 (`rfc9110.txt:572`) | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessageOmittedWhenEmpty` |
+
+RFC 9110 §2.2 — *"A sender MUST NOT generate protocol elements that do not
+match the grammar defined by the corresponding ABNF rules"* — is the hook by
+which non-RFC grammars become gate-enforceable here. The `grpc-message` ABNF
+comes from the gRPC-over-HTTP/2 spec (`doc/PROTOCOL-HTTP2.md`), which has no
+RFC number of its own; naming the tests after the RFC that makes the grammar
+binding keeps them visible to `scripts/rfc-coverage-gate.sh`, whose self-check
+only recognises `TestConformance_RFC<digits>_*`.
 
 ## RFC 9112 — HTTP/1.1 Message Syntax
 
@@ -55,8 +65,8 @@ appears without the tag being added.
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-gaps — inbound request validation (target-URI validation, empty `:authority`,
-raw `:path` in `grpc-message`), response correctness (HEAD body suppression,
+gaps — inbound request validation (target-URI validation, empty `:authority`),
+response correctness (HEAD body suppression,
 `Date`, trailer/header separation, gzip `Content-Encoding`) and server push
 (`:authority` on PUSH_PROMISE) — are listed with per-item evidence in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).

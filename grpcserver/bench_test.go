@@ -72,6 +72,37 @@ func BenchmarkStatusToHPack(b *testing.B) {
 	}
 }
 
+// benchSink defeats dead-code elimination. Without it the compiler proves the
+// result of an allocation-only call is unused and deletes the call outright,
+// which is why BenchmarkStatusToHPack above reports 1.2 ns/op and 0 allocs/op
+// for a function that demonstrably allocates.
+var benchSink []byte
+
+// BenchmarkPercentEncodeMessage_Clean covers the common case: a message that
+// needs no encoding must cost the same single []byte conversion as before the
+// grammar fix.
+func BenchmarkPercentEncodeMessage_Clean(b *testing.B) {
+	msg := "resource not found"
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		benchSink = percentEncodeMessage(msg)
+	}
+}
+
+// BenchmarkPercentEncodeMessage_Encoded covers the pathological case: an
+// attacker-shaped message where every other octet must be escaped.
+func BenchmarkPercentEncodeMessage_Encoded(b *testing.B) {
+	msg := "unknown method /x\r\ngrpc-status: 0\x00café"
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		benchSink = percentEncodeMessage(msg)
+	}
+}
+
 func BenchmarkGRPCResponseHeaders(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
