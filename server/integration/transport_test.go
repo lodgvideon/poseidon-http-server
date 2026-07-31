@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -481,9 +482,25 @@ func rawH2SettingsExchange(fr *frame.Framer) error {
 
 // readH2Response reads frames until END_STREAM, returning the :status value
 // and the accumulated DATA payload.
+// testDecoders keeps one HPACK decoder per connection, keyed by its Framer.
+//
+// The dynamic table is connection-scoped state shared with the server's
+// encoder, so a decoder created fresh per response cannot resolve an indexed
+// reference the server inserted on an earlier response over the same
+// connection. This only became observable once a response field the encoder
+// indexes (Date, RFC 9110 §6.6.1) started being sent.
+var testDecoders sync.Map // *frame.Framer -> *hpack.Decoder
+
+func decoderFor(fr *frame.Framer) *hpack.Decoder {
+	if d, ok := testDecoders.Load(fr); ok {
+		return d.(*hpack.Decoder)
+	}
+	actual, _ := testDecoders.LoadOrStore(fr, hpack.NewDecoder())
+	return actual.(*hpack.Decoder)
+}
+
 func readH2Response(fr *frame.Framer) (status string, body []byte, err error) {
-	dec := hpack.NewDecoder()
-	h := &responseHandler{dec: dec}
+	h := &responseHandler{dec: decoderFor(fr)}
 	for {
 		fh, rerr := fr.ReadFrame(context.Background(), h)
 		if rerr != nil {
