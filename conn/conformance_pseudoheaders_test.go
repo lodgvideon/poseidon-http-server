@@ -157,3 +157,49 @@ func TestConformance_RFC9113_Sec83_ValidRequestsAccepted(t *testing.T) {
 		})
 	}
 }
+
+// TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive pins RFC 9110 §4.2.3
+// (rfc9110.txt:1179): "The scheme and host are case-insensitive and normally
+// provided in lowercase; all other components are compared in a case-sensitive
+// manner."
+//
+// So "HTTPS" is the same scheme as "https", not a different one. The scheme
+// comparison decides whether the http/https-specific rules of §8.3 apply — the
+// non-empty :path rule (rfc9113.txt:2699) and the userinfo prohibition
+// (:2690) — so a case-sensitive comparison lets a client opt out of both by
+// uppercasing a single header value.
+func TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers []hpack.HeaderField
+		why     string
+	}{
+		{
+			"uppercase_scheme_empty_path",
+			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "HTTPS"), hf(":path", "")},
+			"an empty :path is malformed for https however the scheme is spelled",
+		},
+		{
+			"mixed_case_scheme_empty_path",
+			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "HtTp"), hf(":path", "")},
+			"same for http",
+		},
+		{
+			"uppercase_scheme_userinfo",
+			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "HTTPS"), hf(":path", "/"), hf(":authority", "user@example.com")},
+			"userinfo is forbidden for https however the scheme is spelled",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rc := runRSTProbe(t, func(cliFr *frame.Framer) {
+				sendReq(t, cliFr, 1, tc.headers, true)
+			})
+			if !rc.sawRST {
+				t.Fatalf("no RST_STREAM: %s (goaway=%v)", tc.why, rc.sawGoAway)
+			}
+			if rc.rstCode != frame.ErrCodeProtocolError {
+				t.Errorf("RST_STREAM code = %v, want PROTOCOL_ERROR", rc.rstCode)
+			}
+		})
+	}
+}

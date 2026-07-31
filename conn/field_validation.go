@@ -134,14 +134,18 @@ func validRequestPseudoHeaders(fields []hpack.HeaderField) bool {
 	if ph.method == nil {
 		return false
 	}
-	httpScheme := bytes.Equal(ph.scheme, schemeHTTP) || bytes.Equal(ph.scheme, schemeHTTPS)
+	// EqualFold, not Equal: RFC 9110 §4.2.3 (rfc9110.txt:1179) — "The scheme and
+	// host are case-insensitive and normally provided in lowercase". "HTTPS" is
+	// the same scheme as "https", so a case-sensitive comparison would let a
+	// client opt out of every rule below by uppercasing one header value.
+	httpScheme := bytes.EqualFold(ph.scheme, schemeHTTP) || bytes.EqualFold(ph.scheme, schemeHTTPS)
 	// :2690 — userinfo is forbidden in :authority for http/https URIs.
 	if httpScheme && bytes.IndexByte(ph.authority, '@') >= 0 {
 		return false
 	}
 	// :2710 — the mandatory-:scheme/:path rule exempts CONNECT, which omits
 	// both (§8.5).
-	if bytes.Equal(ph.method, methodCONNECT) {
+	if bytes.Equal(ph.method, methodCONNECT) { // methods ARE case-sensitive (§9.1)
 		return true
 	}
 	if ph.scheme == nil || !ph.seenPath {
