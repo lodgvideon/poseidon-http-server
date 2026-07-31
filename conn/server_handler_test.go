@@ -121,6 +121,9 @@ type mockConnOps struct {
 	pingAckCalled     bool
 	rapidResetCount   int
 	rapidResetBudget  int // 0 => unlimited (never trips)
+	rstStreamID       uint32
+	rstCode           frame.ErrCode
+	rstCalled         bool
 }
 
 func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
@@ -133,6 +136,11 @@ func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool {
 	return true
 }
 func (m *mockConnOps) markStreamDone(id uint32)                            { delete(m.streams, id) }
+func (m *mockConnOps) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
+	m.rstStreamID, m.rstCode, m.rstCalled = ss.id, code, true
+	m.markStreamDone(ss.id)
+	return nil
+}
 func (m *mockConnOps) writeSettingsAck() error                             { m.settingsAckCalled = true; return nil }
 func (m *mockConnOps) writePingAck(_ [8]byte) error                      { m.pingAckCalled = true; return nil }
 func (m *mockConnOps) deliverPingAck(_ [8]byte)                          {}

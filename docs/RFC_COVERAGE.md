@@ -32,6 +32,8 @@ that mechanism.
 | Section | Type | Test |
 |---------|------|------|
 | §7.8, §15.2 (`rfc9110.txt:2880`) | Conformance | `TestConformance_RFC9110_Sec78_IgnoreUpgradeInHTTP10Request` |
+| §5.5 (`rfc9110.txt:1606`) | Conformance | `TestConformance_RFC9110_Sec55_FieldValueCRLFNUL_StreamError` |
+| §5.5 (`rfc9110.txt:1611`) | Conformance | `TestConformance_RFC9110_Sec55_CleanFieldValueAccepted` |
 
 ## RFC 9112 — HTTP/1.1 Message Syntax
 
@@ -51,11 +53,11 @@ appears without the tag being added.
 
 ## Known gaps
 
-The HTTP/1.1 audit confirmed 24 MUST-level failures. The six rows above close
-the h2c Upgrade cluster. The remaining confirmed gaps — inbound request
-validation (CR/LF/NUL in field values, target-URI validation, empty
-`:authority`), response correctness (HEAD body suppression, `Date`,
-trailer/header separation, gzip `Content-Encoding`) and server push
+The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
+h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
+gaps — inbound request validation (target-URI validation, empty `:authority`,
+raw `:path` in `grpc-message`), response correctness (HEAD body suppression,
+`Date`, trailer/header separation, gzip `Content-Encoding`) and server push
 (`:authority` on PUSH_PROMISE) — are listed with per-item evidence in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).
 Each should arrive as a new row here plus the test that proves it.
