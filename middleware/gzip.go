@@ -102,11 +102,22 @@ func acceptsGzip(headers []hpack.HeaderField) bool {
 	return false
 }
 
+// isOWS reports whether c is optional whitespace.
+//
+// RFC 9110 §5.6.3 (rfc9110.txt:1774): "OWS = *( SP / HTAB )". HTAB counts, and
+// treating only SP as whitespace hid a token behind a tab-separated list.
+func isOWS(c byte) bool { return c == ' ' || c == '	' }
+
 // containsToken checks if a comma-separated header value contains a token.
+//
+// Recipient side of the list construct, RFC 9110 §5.6.1.2 (rfc9110.txt:1695):
+// "A recipient MUST parse and ignore a reasonable number of empty list
+// elements ... a recipient MUST accept lists that satisfy the following syntax:
+// #element => [ element ] *( OWS "," OWS [ element ] )".
 func containsToken(val, token string) bool {
 	for i := 0; i < len(val); i++ {
-		// Skip leading whitespace/commas.
-		for i < len(val) && (val[i] == ' ' || val[i] == ',') {
+		// Skip leading OWS and empty list elements.
+		for i < len(val) && (isOWS(val[i]) || val[i] == ',') {
 			i++
 		}
 		// Match token.
@@ -116,8 +127,9 @@ func containsToken(val, token string) bool {
 			j++
 		}
 		if j == len(token) {
-			// Ensure word boundary.
-			if i >= len(val) || val[i] == ',' || val[i] == ';' || val[i] == ' ' {
+			// Ensure word boundary: end of value, the list separator, a
+			// parameter separator, or OWS.
+			if i >= len(val) || val[i] == ',' || val[i] == ';' || isOWS(val[i]) {
 				return true
 			}
 		}

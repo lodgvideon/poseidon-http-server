@@ -121,27 +121,65 @@ func writeBadRequest(nc net.Conn, reason string) {
 		"Content-Type: text/plain\r\n"+
 		"Connection: close\r\n"+
 		"Content-Length: %d\r\n\r\n%s", len(body), body)
+	closeStaged(nc)
+}
+
+// drainTimeout and drainLimit bound the staged tear-down: how long to keep
+// reading, and how much to discard, before closing outright.
+const (
+	drainTimeout = 500 * time.Millisecond
+	drainLimit   = 64 << 10
+)
+
+// closeStaged tears the connection down the way RFC 9112 §9.6 prescribes
+// (rfc9112.txt:1548): "servers typically close a connection in stages. First,
+// the server performs a half-close by closing only the write side of the
+// read/write connection. The server then continues to read from the connection
+// until it receives a corresponding close by the client ... Finally, the server
+// fully closes the connection."
+//
+// The hazard is stated just above it (:1539): unread client data arriving on a
+// fully closed connection makes the TCP stack send a reset, and "the reset
+// packet might erase the client's unacknowledged input buffers before they can
+// be read and interpreted by the client's HTTP parser" — losing the very
+// response just written. Both stages are bounded so a client that neither
+// closes nor stops sending cannot pin the goroutine.
+func closeStaged(nc net.Conn) {
+	if cw, ok := nc.(interface{ CloseWrite() error }); ok && cw.CloseWrite() == nil {
+		_ = nc.SetReadDeadline(time.Now().Add(drainTimeout))
+		_, _ = io.Copy(io.Discard, io.LimitReader(nc, drainLimit))
+	}
 	_ = nc.Close()
 }
 
+// hasListToken reports whether want appears as an element of a comma-separated
+// field, across every field line of that name.
+//
+// Scanning all lines matters: net/http joins repeated field lines in
+// Header.Values but its own shouldClose consults only the first, so a "close"
+// option on a second Connection line would otherwise slip past. Empty elements
+// simply do not match, and TrimSpace covers OWS — which RFC 9110 §5.6.3
+// (rfc9110.txt:1774) defines as "*( SP / HTAB )".
+func hasListToken(values []string, want string) bool {
+	for _, v := range values {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasUpgradeToken reports whether the Upgrade header field offers the exact
-// token "h2c". The field is a comma-separated list, so it is split rather than
-// compared whole.
+// token "h2c".
 //
 // RFC 7540 §3.2 (rfc7540.txt:464): "A server MUST ignore an "h2" token in an
 // Upgrade header field." Ignoring means behaving as though it were absent, so
 // "h2" is simply never matched here — including in a list such as "h2, h2c",
 // where the "h2c" element still counts.
 func hasUpgradeToken(values []string) bool {
-	for _, v := range values {
-		for _, tok := range strings.Split(v, ",") {
-			// A protocol element may carry a version: "name/version".
-			if strings.EqualFold(strings.TrimSpace(tok), "h2c") {
-				return true
-			}
-		}
-	}
-	return false
+	return hasListToken(values, "h2c")
 }
 
 // validHTTP2SettingsPayload reports whether v is a well-formed HTTP2-Settings
@@ -283,6 +321,21 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 		return
 	case !hasUpgradeToken(req.Header.Values("Upgrade")):
 		writeBadRequest(nc, "Only h2c supported")
+		return
+	case hasListToken(req.Header.Values("Connection"), "close"):
+		// RFC 9112 §9.6 (rfc9112.txt:1521): "A server that receives a "close"
+		// connection option MUST initiate closure of the connection ... after it
+		// sends the final response ... The server MUST NOT process any further
+		// requests received on that connection."
+		//
+		// Upgrading is the one response that cannot satisfy that: the server
+		// would go on to serve an unbounded number of HTTP/2 streams on a
+		// connection the client declared finished. Declining is expressly
+		// allowed — RFC 7540 §3.2 lets a server "respond to the request as
+		// though the Upgrade header field were absent" — and writeBadRequest
+		// sends "Connection: close" and closes, which is exactly what the rule
+		// asks for.
+		writeBadRequest(nc, "Upgrade request must not request connection close")
 		return
 	}
 

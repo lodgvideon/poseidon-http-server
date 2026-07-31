@@ -204,3 +204,44 @@ func TestConformance_RFC9110_Sec86_HeadContentLengthNotStale(t *testing.T) {
 		}
 	})
 }
+
+// TestConformance_RFC9110_Sec561_ListGrammar pins the recipient half of the
+// list construct, which containsToken implements by hand.
+//
+//	rfc9110.txt:1774 — "OWS = *( SP / HTAB )"
+//	rfc9110.txt:1695 — "A recipient MUST parse and ignore a reasonable number of
+//	 empty list elements ... a recipient MUST accept lists that satisfy the
+//	 following syntax:  #element => [ element ] *( OWS "," OWS [ element ] )"
+//
+// The scanner treated only SP as whitespace, so a value separated with HTAB —
+// legal OWS — hid the token and silently disabled compression.
+func TestConformance_RFC9110_Sec561_ListGrammar(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		val   string
+		token string
+		want  bool
+		why   string
+	}{
+		{"deflate,\tgzip", "gzip", true, "HTAB is OWS (rfc9110.txt:1774)"},
+		{"deflate,\t gzip", "gzip", true, "OWS is any run of SP and HTAB"},
+		{"gzip\t;q=1.0", "gzip", true, "HTAB before a parameter still ends the token"},
+		{",,gzip", "gzip", true, "leading empty elements are ignored (rfc9110.txt:1695)"},
+		{"gzip,,", "gzip", true, "trailing empty elements are ignored"},
+		{"deflate,,gzip", "gzip", true, "interior empty elements are ignored"},
+		{"\t,\tgzip\t", "gzip", true, "OWS around empty elements and the token"},
+		// The other direction: an empty list, and a token that only appears as a
+		// substring, must not match.
+		{",", "gzip", false, "an empty list contains no element"},
+		{",,,", "gzip", false, "only empty elements"},
+		{"", "gzip", false, "no value at all"},
+		{"gzipper", "gzip", false, "a longer token is not a match"},
+		{"x-gzip", "gzip", false, "a different token; see 91108-26 for the SHOULD on x-gzip"},
+	} {
+		t.Run(tc.val+"/"+tc.token, func(t *testing.T) {
+			if got := containsToken(tc.val, tc.token); got != tc.want {
+				t.Errorf("containsToken(%q, %q) = %v, want %v — %s", tc.val, tc.token, got, tc.want, tc.why)
+			}
+		})
+	}
+}
