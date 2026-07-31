@@ -145,6 +145,13 @@ type ServerConnOptions struct {
 	//   ≤ 64 KiB (incl. 0) => protocol default; no enlargement
 	//   > 64 KiB           => enlarge to this value (clamped to 2^31-1)
 	ConnRecvWindow int32
+
+	// UpgradedRequest, when non-nil, means this connection was established via
+	// the HTTP/1.1 h2c Upgrade mechanism (RFC 7540 §3.2) rather than prior
+	// knowledge. The request that triggered the upgrade is seeded onto stream 1
+	// in the half-closed (remote) state, so the response to it is delivered on
+	// stream 1 as the RFC requires. nil for every other start mode.
+	UpgradedRequest *UpgradedRequest
 }
 
 // defaultHandshakeTimeout is the secure-by-default bound on completing the
@@ -344,6 +351,14 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		if dl, ok := nc.(interface{ SetReadDeadline(time.Time) error }); ok {
 			_ = dl.SetReadDeadline(time.Time{})
 		}
+	}
+
+	// h2c Upgrade (RFC 7540 §3.2): the HTTP/1.1 request that triggered the
+	// upgrade owns stream 1 and is half-closed from the client. Seed it before
+	// the reader starts, so the response goes out on stream 1 and the client's
+	// next stream is 3.
+	if opts.UpgradedRequest != nil {
+		sc.seedUpgradedStream(opts.UpgradedRequest)
 	}
 
 	go sc.readerLoop()

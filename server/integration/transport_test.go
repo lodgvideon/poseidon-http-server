@@ -227,7 +227,7 @@ func TestTransport_H2C_Upgrade_Fallback(t *testing.T) {
 
 	// Send the HTTP/1.1 Upgrade request.
 	if _, err := fmt.Fprintf(conn,
-		"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: h2c\r\n"+
+		"GET /upgraded HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: h2c\r\n"+
 			"HTTP2-Settings: \r\nConnection: Upgrade, HTTP2-Settings\r\n\r\n"); err != nil {
 		t.Fatalf("write upgrade: %v", err)
 	}
@@ -263,19 +263,9 @@ func TestTransport_H2C_Upgrade_Fallback(t *testing.T) {
 		t.Fatalf("h2 settings exchange: %v", err)
 	}
 
-	enc := hpack.NewEncoder()
-	block := enc.EncodeBlock(nil, []hpack.HeaderField{
-		{Name: []byte(":method"), Value: []byte("GET")},
-		{Name: []byte(":scheme"), Value: []byte("http")},
-		{Name: []byte(":authority"), Value: []byte("127.0.0.1")},
-		{Name: []byte(":path"), Value: []byte("/upgraded")},
-	})
-	if err := fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID: 1, BlockFragment: block, EndHeaders: true, EndStream: true,
-	}); err != nil {
-		t.Fatalf("WriteHeaders: %v", err)
-	}
-
+	// No stream is opened here: RFC 7540 §3.2 assigns the upgrading request
+	// stream 1 and the response arrives on it unprompted, so a conformant
+	// client just reads.
 	status, body, err := readH2Response(fr)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
