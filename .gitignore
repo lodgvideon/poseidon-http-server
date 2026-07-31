@@ -26,3 +26,6 @@ http-server
 
 # codesearch local index
 .codesearch.db/
+
+# Claude Code local settings (per-machine, not shared)
+.claude/settings.local.json
