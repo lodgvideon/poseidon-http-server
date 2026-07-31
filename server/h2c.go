@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -30,7 +31,12 @@ var h2cPreface = []byte("PRI * HTTP/2.0")
 // If the client sends HTTP/1.1 Upgrade: h2c, we respond with 101 Switching.
 // If the client sends the preface directly (prior knowledge), we pass through.
 // Otherwise we respond with 400 Bad Request.
-func (s *Server) detectAndServe(ctx context.Context, nc net.Conn) {
+// cfg is the TLS config that produced the listener, or nil. H2C and TLS are not
+// mutually exclusive — Options.H2C only decides whether the first bytes are
+// sniffed — so the config has to reach conn.NewServerConn here too, or the
+// RFC 9110 §7.4 check would be silently off for a TLS listener served with
+// H2C enabled.
+func (s *Server) detectAndServe(ctx context.Context, nc net.Conn, cfg *tls.Config) {
 	br := bufio.NewReaderSize(nc, 1024)
 
 	// Peek first bytes to determine protocol.
@@ -43,12 +49,12 @@ func (s *Server) detectAndServe(ctx context.Context, nc net.Conn) {
 
 	if bytes.Equal(head, h2cPreface) {
 		// Prior knowledge h2c — client speaks HTTP/2 directly.
-		s.serveConnReader(ctx, nc, br, nil)
+		s.serveConnReader(ctx, nc, br, nil, cfg)
 		return
 	}
 
 	// Could be HTTP/1.1 with Upgrade: h2c, or plain HTTP/1.1.
-	s.handleHTTP1Upgrade(ctx, nc, br)
+	s.handleHTTP1Upgrade(ctx, nc, br, cfg)
 }
 
 // writeBadRequest writes a minimal HTTP/1.1 400 response and closes. This
@@ -193,7 +199,7 @@ func upgradeRequestFields(req *http.Request) []hpack.HeaderField {
 //     field were absent") and it keeps unread
 //     HTTP/1.1 octets from being re-read as
 //     HTTP/2 frames.
-func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.Reader) {
+func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.Reader, cfg *tls.Config) {
 	// Set a deadline to avoid hanging on malformed input.
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = nc.SetReadDeadline(deadline)
@@ -252,13 +258,13 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 			"Upgrade: h2c\r\n\r\n")
 
 	// The request owns stream 1 (RFC 7540 §3.2) — carry it into the connection.
-	s.serveConnReader(ctx, nc, br, &conn.UpgradedRequest{Headers: upgradeRequestFields(req)})
+	s.serveConnReader(ctx, nc, br, &conn.UpgradedRequest{Headers: upgradeRequestFields(req)}, cfg)
 }
 
 // serveConnReader wraps serveConn but uses a buffered reader that may
 // have already consumed some bytes from the connection. upgraded is non-nil
 // only on the h2c Upgrade path.
-func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Reader, upgraded *conn.UpgradedRequest) {
+func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Reader, upgraded *conn.UpgradedRequest, cfg *tls.Config) {
 	// If the bufio reader has buffered data, we need to present a
 	// combined reader to NewServerConn. Wrap with bufioReaderConn.
 	rwc := &bufioConn{Conn: nc, Reader: br}
@@ -278,7 +284,7 @@ func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Rea
 	s.trackConn(sc, true)
 	defer s.trackConn(sc, false)
 
-	s.acceptLoop(ctx, sc)
+	s.acceptLoop(ctx, sc, presentedLeaf(cfg, nc))
 }
 
 // bufioConn wraps a net.Conn with a bufio.Reader so that peeked bytes

@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"log"
 	"net"
@@ -211,6 +213,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 // Serve accepts connections from ln until ctx is cancelled or Close is called,
 // returning ErrServerClosed on clean shutdown. It takes ownership of ln.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	// No TLS config: a listener the caller wrapped itself cannot be checked
+	// against its own certificate. See ServeTLSConfig.
+	return s.serve(ctx, ln, nil)
+}
+
+// serve is Serve with the TLS config that produced ln, when the caller supplied
+// one. cfg is nil for cleartext listeners and for a TLS listener handed to the
+// bare Serve.
+func (s *Server) serve(ctx context.Context, ln net.Listener, cfg *tls.Config) error {
 	s.mu.Lock()
 	if s.closed {
 		// Already closed before Serve started; don't accept anything.
@@ -261,15 +272,15 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 		go func() {
 			if s.opts.H2C {
-				s.detectAndServe(ctx, nc)
+				s.detectAndServe(ctx, nc, cfg)
 			} else {
-				s.serveConn(ctx, nc)
+				s.serveConn(ctx, nc, cfg)
 			}
 		}()
 	}
 }
 
-func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
+func (s *Server) serveConn(ctx context.Context, nc net.Conn, cfg *tls.Config) {
 	opts := s.connOpts
 	if opts.StreamEventBuffer <= 0 {
 		opts.StreamEventBuffer = 8
@@ -282,11 +293,13 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 	}
 	s.trackConn(sc, true)
 	defer s.trackConn(sc, false)
-	s.acceptLoop(ctx, sc)
+	// Resolve, once per connection, the certificate this server presented. Every
+	// stream on the connection is judged against it (RFC 9110 §7.4).
+	s.acceptLoop(ctx, sc, presentedLeaf(cfg, nc))
 }
 
 // acceptLoop reads streams from a ServerConn with optional idle timeout.
-func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
+func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn, leaf *x509.Certificate) {
 	if idle := s.idleTimeout(); idle > 0 {
 		for {
 			acceptCtx, cancel := context.WithTimeout(ctx, idle)
@@ -295,7 +308,7 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
 			if err != nil {
 				return
 			}
-			if !s.spawnStream(stream) {
+			if !s.spawnStream(stream, leaf) {
 				return
 			}
 		}
@@ -305,7 +318,7 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
 		if err != nil {
 			return
 		}
-		if !s.spawnStream(stream) {
+		if !s.spawnStream(stream, leaf) {
 			return
 		}
 	}
@@ -317,7 +330,7 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn) {
 // Add can never race a returning inFlight.Wait(), the documented WaitGroup
 // misuse. Returns false when the server is draining, signalling the accept loop
 // to stop; the just-accepted stream is reset so the client can retry elsewhere.
-func (s *Server) spawnStream(stream *conn.ServerStream) bool {
+func (s *Server) spawnStream(stream *conn.ServerStream, leaf *x509.Certificate) bool {
 	s.mu.Lock()
 	if s.shutdown || s.closed {
 		s.mu.Unlock()
@@ -326,11 +339,11 @@ func (s *Server) spawnStream(stream *conn.ServerStream) bool {
 	}
 	s.inFlight.Add(1)
 	s.mu.Unlock()
-	go s.serveStream(stream)
+	go s.serveStream(stream, leaf)
 	return true
 }
 
-func (s *Server) serveStream(stream *conn.ServerStream) {
+func (s *Server) serveStream(stream *conn.ServerStream, leaf *x509.Certificate) {
 	defer s.inFlight.Done()
 
 	// Backstop panic isolation: a panic anywhere in the request lifecycle
@@ -363,6 +376,17 @@ func (s *Server) serveStream(stream *conn.ServerStream) {
 	}
 
 	req = s.buildRequest(ev.Headers, stream.ID())
+
+	// RFC 9110 §7.4 — reject a request this connection was not authenticated to
+	// serve, before the handler ever sees it.
+	if misdirectedRequest(req, leaf) {
+		w := newConnResponseWriter(stream, req)
+		_ = w.WriteHeaders(421, nil)
+		_ = w.WriteTrailers(nil)
+		_ = stream.Close()
+		return
+	}
+
 	if ev.EndStream {
 		// RFC 9110 §10.1.1 also allows the interim response to be omitted when
 		// "the framing indicates that there is no content" — END_STREAM here.
@@ -789,4 +813,109 @@ func hasExpectContinue(headers []hpack.HeaderField) bool {
 		}
 	}
 	return false
+}
+
+// --- 421 Misdirected Request (RFC 9110 §7.4) ---------------------------------
+
+// presentedLeaf returns the leaf certificate this server presented on nc, or
+// nil when there is nothing to judge against — a cleartext connection, or a TLS
+// listener the caller wrapped itself and passed to the bare Serve.
+//
+// crypto/tls does not expose the server's own certificate through
+// ConnectionState (it carries the SNI and the *peer's* certificates), so the
+// config that selected it has to be threaded down from the entry point. That is
+// why ServeTLSConfig exists.
+func presentedLeaf(cfg *tls.Config, nc net.Conn) *x509.Certificate {
+	if cfg == nil {
+		return nil
+	}
+	if _, ok := nc.(*tls.Conn); !ok {
+		return nil
+	}
+	return selectLeaf(cfg)
+}
+
+// selectLeaf returns the leaf certificate the handshake presented, but only
+// when that is knowable without guessing.
+//
+// crypto/tls selects a certificate through GetConfigForClient, then
+// GetCertificate (consulted only when Certificates is empty or SNI is
+// non-empty), then Certificates with its own SNI matching, and a (nil, nil)
+// return from GetCertificate means "fall back to Certificates". Re-running that
+// from outside the handshake gets it wrong in ways that matter: an adversarial
+// review of an earlier version of this function found it would judge a request
+// against a certificate the peer never saw — producing FALSE 421s on
+// legitimate traffic — and that a GetCertificate written with the
+// crypto/tls-documented hello.SupportsCertificate idiom would error against a
+// synthetic ClientHelloInfo and silently switch the check off server-wide.
+//
+// Rejecting a legitimate request is worse than not enforcing the rule, so this
+// enforces only the one arrangement with a single possible answer: exactly one
+// static certificate and no callbacks. Anything else returns nil and the check
+// stands down. Serving several certificates from one listener therefore opts
+// out; that is a deliberate, documented limitation rather than a guess.
+func selectLeaf(cfg *tls.Config) *x509.Certificate {
+	if cfg.GetConfigForClient != nil || cfg.GetCertificate != nil {
+		return nil
+	}
+	if len(cfg.Certificates) != 1 {
+		return nil
+	}
+	cert := &cfg.Certificates[0]
+	if cert.Leaf != nil {
+		return cert.Leaf
+	}
+	if len(cert.Certificate) == 0 {
+		return nil
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return nil
+	}
+	return leaf
+}
+
+// misdirectedRequest reports whether the request must be answered with 421.
+//
+// RFC 9110 §7.4 (rfc9110.txt:2510): "Unless the connection is from a trusted
+// gateway, an origin server MUST reject a request if any scheme-specific
+// requirements for the target URI are not met. In particular, a request for an
+// "https" resource MUST be rejected unless it has been received over a
+// connection that has been secured via a certificate valid for that target
+// URI's origin, as defined by Section 4.2.2."
+//
+// Three exclusions come straight from that sentence:
+//
+//   - It binds "a request for an "https" resource", so another :scheme is out
+//     of scope.
+//   - With no certificate in hand there is nothing to verify against. For a
+//     cleartext connection that is h2c, whose documented deployment is behind a
+//     TLS-terminating proxy (ADR-0005) — the "connection is from a trusted
+//     gateway" case the same sentence exempts.
+//   - A hostless target URI cannot be judged: there is no origin to compare.
+//     The stdlib-compat path rejects it earlier (NewHTTPRequest returns
+//     ErrNoAuthority); a native handler receives it, which is pre-existing
+//     behaviour this check does not change either way.
+//
+// The comparison is against the certificate rather than the SNI deliberately: a
+// client may coalesce connections and reuse one for any origin the certificate
+// covers, which SNI-matching would wrongly reject.
+func misdirectedRequest(req *Request, leaf *x509.Certificate) bool {
+	// EqualFold: RFC 9110 §4.2.3 (rfc9110.txt:1179) — "The scheme and host are
+	// case-insensitive". A byte comparison here would let a client disable the
+	// whole check by sending ":scheme: HTTPS", which net/url then lowercases
+	// downstream so the handler sees an ordinary https request.
+	if leaf == nil || !strings.EqualFold(req.Scheme, schemeHTTPS) {
+		return false
+	}
+	host := req.Authority
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		// A port is not part of the identity a certificate attests to.
+		host = h
+	}
+	if host == "" {
+		// Nothing to compare against; see the note above.
+		return false
+	}
+	return leaf.VerifyHostname(host) != nil
 }

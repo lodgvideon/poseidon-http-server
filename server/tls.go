@@ -48,10 +48,29 @@ func (s *Server) ListenAndServeTLSConfig(ctx context.Context, cfg *tls.Config) e
 		return err
 	}
 	s.logger.Printf("poseidon: TLS listening on %s", ln.Addr())
-	return s.Serve(ctx, ln)
+	return s.serve(ctx, ln, cfg)
 }
 
 // ServeTLS serves on an existing TLS listener.
+//
+// Deprecated for new code in favour of [Server.ServeTLSConfig]: without the
+// *tls.Config that produced ln, the server cannot tell which certificate it
+// presented, so it cannot enforce RFC 9110 §7.4 (421 Misdirected Request) on
+// this listener.
 func (s *Server) ServeTLS(ctx context.Context, ln net.Listener) error {
-	return s.Serve(ctx, ln)
+	return s.serve(ctx, ln, nil)
+}
+
+// ServeTLSConfig serves on an existing TLS listener, given the *tls.Config that
+// produced it.
+//
+// The config is what lets the server answer 421 (Misdirected Request) for an
+// ":authority" its certificate is not valid for, as RFC 9110 §7.4 requires:
+// crypto/tls does not expose the server's own certificate through
+// ConnectionState, so it has to be reached through the config that selected it.
+//
+// Prefer this over [Server.ServeTLS] whenever the config is available. Passing
+// a listener to the bare [Server.Serve] remains supported and skips the check.
+func (s *Server) ServeTLSConfig(ctx context.Context, ln net.Listener, cfg *tls.Config) error {
+	return s.serve(ctx, ln, cfg)
 }

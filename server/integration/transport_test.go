@@ -58,7 +58,9 @@ func startRawTLSServer(t *testing.T, h server.Handler) (addr string, serverCert 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ctx, tlsLn) }()
+	// ServeTLSConfig, not Serve: the config is what lets the server enforce
+	// RFC 9110 §7.4 (421) — see conformance_misdirected_test.go.
+	go func() { serveErr <- srv.ServeTLSConfig(ctx, tlsLn, tlsCfg) }()
 	t.Cleanup(func() {
 		cancel()
 		_ = srv.Close()

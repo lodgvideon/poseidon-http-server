@@ -55,6 +55,8 @@ that mechanism.
 | §10.1.1 | Conformance | `TestConformance_RFC9110_Sec1011_ImmediateContinue` |
 | §10.1.1 (no expectation) | Conformance | `TestConformance_RFC9110_Sec1011_NoExpectNoContinue` |
 | §10.1.1 (no content) | Conformance | `TestConformance_RFC9110_Sec1011_NoContentNoContinue` |
+| §7.4 (`rfc9110.txt:2510`) | Conformance | `TestConformance_RFC9110_Sec74_MisdirectedAuthorityRejected` |
+| §7.4 control | Conformance | `TestConformance_RFC9110_Sec74_AuthorityInCertAccepted` |
 
 RFC 9110 §2.2 — *"A sender MUST NOT generate protocol elements that do not
 match the grammar defined by the corresponding ABNF rules"* — is the hook by
@@ -84,6 +86,7 @@ at all and landed on §8.3 as the HTTP/2-native way to state the rule.
 |---------|------|------|
 | §8.3 (`rfc9113.txt:2614`, `:2619`, `:2624`, `:2690`, `:2699`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError` |
 | §8.3 (`rfc9113.txt:2643`, `:2703`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_ValidRequestsAccepted` |
+| §8.3 / RFC 9110 §4.2.3 (`rfc9110.txt:1179`) | Conformance | `TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive` |
 | §8.1.1 (`rfc9113.txt:2463`) | Regression | `TestServerConnHandler_MalformedStream_KeepsHPACKDecoderSynced` |
 | §8.4 (`rfc9113.txt:2811`) | Conformance | `TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority` |
 | §8.4 / §8.3 (`rfc9113.txt:2624`) | Conformance | `TestConformance_RFC9113_Sec84_PushPromiseCallerAuthorityWins` |
@@ -100,7 +103,14 @@ decodes corrupt headers.
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-gap is the missing 421 path (91107-13): `:authority` is never compared against
-the identity the connection was authenticated for. Per-item evidence is in
+MUST-level gaps are closed. What remains from the audit is the 13 **split
+verdicts** — findings where the two adversarial verifiers disagreed, so they
+were never resolved either way. Each needs a human ruling; they are listed in
 [rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).
-Each should arrive as a new row here plus the test that proves it.
+
+The 421 check (RFC 9110 §7.4) enforces only where the presented certificate is
+knowable without guessing: a TLS listener served through
+`ListenAndServeTLS`/`ListenAndServeTLSConfig`/`ServeTLSConfig`, with exactly one
+static certificate and no `GetCertificate`/`GetConfigForClient` callback. Every
+other arrangement stands the check down rather than risk rejecting legitimate
+traffic — see the rationale on `selectLeaf`.
