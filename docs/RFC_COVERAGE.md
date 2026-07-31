@@ -43,6 +43,11 @@ that mechanism.
 | §9.3.2 (`rfc9110.txt:3987`) | Conformance | `TestConformance_RFC9110_Sec932_HeadSendsNoContent` |
 | §9.3.2 (`rfc9110.txt:3993`, `rfc9113.txt:2457`) | Conformance | `TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields` |
 | §9.3.2 control | Conformance | `TestConformance_RFC9110_Sec932_GetStillSendsContent` |
+| §5.4 | Conformance | `TestConformance_RFC9110_Sec54_OversizedFieldsGet431` |
+| §5.4 control | Conformance | `TestConformance_RFC9110_Sec54_WithinLimitUnaffected` |
+| §5.4 / CVE-2024-27316 | Conformance | `TestConformance_RFC9110_Sec54_ContinuationFloodAnswers431` |
+| §5.6.3, §5.6.1.2 (`rfc9110.txt:1774`, `:1695`) | Conformance | `TestConformance_RFC9110_Sec561_ListGrammar` |
+| §8.6 (`rfc9110.txt:3226`) | Conformance | `TestConformance_RFC9110_Sec86_HeadContentLengthNotStale` |
 | §6.6.1 (`rfc9110.txt:2313`) | Conformance | `TestConformance_RFC9110_Sec661_DateOnMustStatuses` |
 | §6.6.1 (`rfc9110.txt:2313`) | Conformance | `TestConformance_RFC9110_Sec661_DateOnStdlibPath` |
 | §6.6.1 (`rfc9110.txt:2313`) | Conformance | `TestConformance_RFC9110_Sec661_HandlerDateWins` |
@@ -75,6 +80,9 @@ serve HTTP/1.1.
 |---------|------|------|
 | §2.2 (`rfc9112.txt:445`) | Conformance | `TestConformance_RFC9112_Sec22_RejectRequestWithoutHost` |
 | §5.1 (`rfc9112.txt:716`) | Conformance | `TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected` |
+| §9.6 (`rfc9112.txt:1521`) | Conformance | `TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade` |
+| §9.6 (`rfc9112.txt:1521`) | Conformance | `TestConformance_RFC9112_Sec96_SecondCloseFieldLineCounts` |
+| §9.6 (`rfc9112.txt:1548`) | Regression | `TestH2CProbe_TearDownIsStaged`, `TestH2CProbe_BadRequestTearsDownStaged` |
 
 ## RFC 9113 — HTTP/2
 
@@ -87,6 +95,7 @@ at all and landed on §8.3 as the HTTP/2-native way to state the rule.
 | §8.3 (`rfc9113.txt:2614`, `:2619`, `:2624`, `:2690`, `:2699`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError` |
 | §8.3 (`rfc9113.txt:2643`, `:2703`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_ValidRequestsAccepted` |
 | §8.3 / RFC 9110 §4.2.3 (`rfc9110.txt:1179`) | Conformance | `TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive` |
+| §6.5.2 (uncompressed list size) | Regression | `TestServerConn_Continuation_OversizedBlock_TearsDownConnection` |
 | §8.1.1 (`rfc9113.txt:2463`) | Regression | `TestServerConnHandler_MalformedStream_KeepsHPACKDecoderSynced` |
 | §8.4 (`rfc9113.txt:2811`) | Conformance | `TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority` |
 | §8.4 / §8.3 (`rfc9113.txt:2624`) | Conformance | `TestConformance_RFC9113_Sec84_PushPromiseCallerAuthorityWins` |
@@ -103,10 +112,14 @@ decodes corrupt headers.
 
 The HTTP/1.1 audit confirmed 24 MUST-level failures. The rows above close the
 h2c Upgrade cluster and the field-value injection gap. The remaining confirmed
-MUST-level gaps are closed. What remains from the audit is the 13 **split
-verdicts** — findings where the two adversarial verifiers disagreed, so they
-were never resolved either way. Each needs a human ruling; they are listed in
-[rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md](rfc-analysis/HTTP1_SERVER_RECONCILIATION_TABLES.md).
+MUST-level gaps are closed, and so are the audit's 13 **split verdicts** —
+findings where the two adversarial verifiers disagreed. Each was re-judged
+against the post-fix code and then challenged from the opposite position: six
+had been made moot by the merged fixes, five were real and are fixed, one
+(gRPC status in trailers, RFC 9110 §6.5.1) is a deliberate deviation now
+recorded in [ADR-0004](adr/0004-grpc-framing-and-status-trailers.md), and one
+flipped — the reviewer was right that a bug existed but wrong about the rule;
+the binding one turned out to be §8.6, not §9.3.2.
 
 The 421 check (RFC 9110 §7.4) enforces only where the presented certificate is
 knowable without guessing: a TLS listener served through
