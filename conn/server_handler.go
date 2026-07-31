@@ -258,6 +258,12 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		_ = s.Close()
 		return err
 	}
+	// RFC 9113 §8.3 — request pseudo-headers must be present, unique, defined,
+	// and ahead of every regular field. Only a request header block carries
+	// them; a trailer section is judged by the character rules alone.
+	if !isTrailer && !validRequestPseudoHeaders(h.scratch) {
+		malformed = true
+	}
 	if malformed {
 		// RFC 9110 §5.5 — reject a message whose field value carries CR, LF or
 		// NUL; RFC 9113 §8.1.1 — as a STREAM error of type PROTOCOL_ERROR, so

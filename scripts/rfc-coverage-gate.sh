@@ -21,11 +21,10 @@ fail=0
 # 9113 marks it obsolete (rfc9113.txt:3613). If that path is ever removed, drop
 # the tag in the same commit that deletes the tests.
 #
-# RFC9113 is deliberately absent: the HTTP/2 conformance audit has not been run
-# yet, so there are no TestConformance_RFC9113_* suites to require. Add the tag
-# in the same commit that adds the first one -- the self-check below will
-# otherwise flag it for you.
-TAGS="RFC7540 RFC9110 RFC9112"
+# RFC9113 arrived with the RFC 9113 section 8.3 pseudo-header suites, which the
+# HTTP/1.1 audit produced: the target URI was being reconstructed with no
+# validation, and section 8.3 is the HTTP/2-native place to say so.
+TAGS="RFC7540 RFC9110 RFC9112 RFC9113"
 
 for tag in $TAGS; do
   if ! grep -E "^--- PASS: TestConformance_${tag}" "$RFC" >/dev/null; then

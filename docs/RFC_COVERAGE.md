@@ -56,10 +56,20 @@ serve HTTP/1.1.
 
 ## RFC 9113 — HTTP/2
 
-No `TestConformance_RFC9113_*` suites yet: the HTTP/2 conformance audit has not
-been run. `scripts/rfc-coverage-gate.sh` deliberately omits the `RFC9113` tag
-until the first one lands — and its self-check will fail the build if a suite
-appears without the tag being added.
+The HTTP/2 conformance audit has not been run yet; these rows arrived via the
+HTTP/1.1 audit, which found the target URI was reconstructed with no validation
+at all and landed on §8.3 as the HTTP/2-native way to state the rule.
+
+| Section | Type | Test |
+|---------|------|------|
+| §8.3 (`rfc9113.txt:2614`, `:2619`, `:2624`, `:2690`, `:2699`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError` |
+| §8.3 (`rfc9113.txt:2643`, `:2703`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_ValidRequestsAccepted` |
+| §8.1.1 (`rfc9113.txt:2463`) | Regression | `TestServerConnHandler_MalformedStream_KeepsHPACKDecoderSynced` |
+
+The last row is not a conformance test but guards the trap that makes the other
+two safe to implement: a rejected block must still be fed to the shared HPACK
+decoder, or its dynamic table desyncs from the client's encoder and every later
+stream on the connection decodes corrupt headers.
 
 ## Known gaps
 
