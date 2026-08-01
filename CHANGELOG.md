@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.5.0...v0.6.0) (2026-08-01)
+
+
+### Features
+
+* close 24 MUST-level RFC conformance failures, and gate them in CI ([#56](https://github.com/lodgvideon/poseidon-http-server/issues/56)) ([d90f74b](https://github.com/lodgvideon/poseidon-http-server/commit/d90f74bd03f50116ffd0e99c88889360cb2f5ff8))
+
+
+### Bug Fixes
+
+* resolve the 13 split verdicts left by the HTTP/1.1 conformance audit ([#57](https://github.com/lodgvideon/poseidon-http-server/issues/57)) ([27c1918](https://github.com/lodgvideon/poseidon-http-server/commit/27c19182c8644fbfe4b5e976b8969360a57f80b7))
+
 ## [0.5.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.4.3...v0.5.0) (2026-07-14)
 
 
