@@ -237,7 +237,15 @@ func TestConformance_RFC9113_Sec42_AdvertisedMaxFrameSizeIsAccepted(t *testing.T
 // The load-bearing half of this test is the third assertion: §5.4.2 scoping is
 // only meaningful if the rest of the multiplexed connection survives.
 func TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError(t *testing.T) {
-	rc := runRawProbe(t, ServerConnOptions{}, func(cli net.Conn, _ *frame.Framer) {
+	rc := runRawProbe(t, ServerConnOptions{}, func(cli net.Conn, cliFr *frame.Framer) {
+		// Stream 1 must exist first. §6.4 (rfc9113.txt:1596) forbids sending
+		// RST_STREAM for an idle stream outright, so the stream-error scoping of
+		// §6.3 can only apply to a stream that has been opened.
+		sendReq(t, cliFr, 1, []hpack.HeaderField{
+			{Name: []byte(":method"), Value: []byte("POST")},
+			{Name: []byte(":scheme"), Value: []byte("https")},
+			{Name: []byte(":path"), Value: []byte("/")},
+		}, false)
 		_, _ = cli.Write(rawFrame(frame.FramePriority, 0, 1, []byte{0, 0, 0, 0}))
 	})
 	if !rc.sawRST {
@@ -264,7 +272,14 @@ func TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit(t *testing.T) {
 	zero := rawFrame(frame.FrameWindowUpdate, 0, 1, []byte{0, 0, 0, 0})
 
 	t.Run("on_a_stream_is_a_stream_error", func(t *testing.T) {
-		rc := runRawProbe(t, ServerConnOptions{}, func(cli net.Conn, _ *frame.Framer) {
+		rc := runRawProbe(t, ServerConnOptions{}, func(cli net.Conn, cliFr *frame.Framer) {
+			// Open stream 1: on an IDLE stream §5.1 makes any WINDOW_UPDATE a
+			// connection error, which would mask the scoping this sub-case measures.
+			sendReq(t, cliFr, 1, []hpack.HeaderField{
+				{Name: []byte(":method"), Value: []byte("POST")},
+				{Name: []byte(":scheme"), Value: []byte("https")},
+				{Name: []byte(":path"), Value: []byte("/")},
+			}, false)
 			_, _ = cli.Write(zero)
 		})
 		if !rc.sawRST {

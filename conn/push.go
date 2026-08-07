@@ -132,6 +132,13 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := sc.enc.EncodeBlock(*buf, fields)
+	if len(block) > sc.peerMaxFrameSize() {
+		// Same reason as writeServerHeaders: the Framer's cap describes what this
+		// endpoint accepts, not what the peer does (RFC 9113 §4.2).
+		*buf = block[:0]
+		encBufPool.Put(buf)
+		return nil, ErrHeaderBlockTooLarge
+	}
 
 	// Write PUSH_PROMISE on the parent stream.
 	err := sc.fr.WritePushPromise(parent.id, promisedID, block, true, 0)
@@ -142,12 +149,20 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 		return nil, err
 	}
 
-	// Create the promised stream.
+	// Create the promised stream, already half-closed (remote). RFC 9113 §5.1
+	// (rfc9113.txt:1032): a stream the server reserves goes to "half-closed
+	// (remote)" the moment it starts sending — the client never sends anything on
+	// it. Recording that is what lets markLocalEnd complete the stream when the
+	// pushed response ends; without it markLocalEnd always saw remoteEnded=false,
+	// markStreamDone was never reached, and every pushed stream stayed in the
+	// registry for the life of the connection. Harmless until §5.1.2 counting
+	// arrived, at which point it permanently exhausted the peer's push allowance.
 	pushStream := &ServerStream{
-		id:    promisedID,
-		sc:    sc,
+		id:     promisedID,
+		sc:     sc,
 		events: make(chan StreamEvent, 4),
 	}
+	pushStream.remoteEnded = true
 
 	// Seed push stream send window from peer's INITIAL_WINDOW_SIZE.
 	sc.psMu.RLock()

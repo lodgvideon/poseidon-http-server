@@ -336,19 +336,7 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn, leaf *x509
 			stream, err := sc.AcceptStream(acceptCtx)
 			cancel()
 			if err != nil {
-				// The idle deadline is the only exit that means "this connection
-				// went quiet", and Options.IdleTimeout documents that such a
-				// connection is closed. It was not: the loop simply returned, the
-				// reader goroutine kept running, and the socket survived until the
-				// peer or Shutdown intervened. sc.Close sends GOAWAY(NO_ERROR) with
-				// the real last-stream-id and then closes the transport.
-				//
-				// The errors.Is guard is load-bearing: a drain exit and a cancelled
-				// parent context both arrive here too, and closing on those would
-				// cut in-flight responses short during a graceful Shutdown.
-				if errors.Is(err, context.DeadlineExceeded) {
-					_ = sc.Close()
-				}
+				s.closeIfFinished(sc, err)
 				return
 			}
 			if !s.spawnStream(stream, leaf) {
@@ -359,11 +347,41 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn, leaf *x509
 	for {
 		stream, err := sc.AcceptStream(ctx)
 		if err != nil {
+			s.closeIfFinished(sc, err)
 			return
 		}
 		if !s.spawnStream(stream, leaf) {
 			return
 		}
+	}
+}
+
+// closeIfFinished tears the connection down on the two exits from the accept
+// loop that mean it is over, and leaves it alone on the one that does not.
+//
+// The transport is nobody else's to close once this loop returns: serveConn
+// untracks the connection immediately afterwards, so a connection left open
+// here is invisible to Shutdown and survives as a leaked descriptor for the
+// life of the process.
+//
+//   - ErrConnClosed means the reader goroutine has already exited, whatever the
+//     cause. Nothing more will ever be read; Close reclaims the socket and the
+//     framer's buffer.
+//   - A deadline means no NEW stream arrived within IdleTimeout, which is not
+//     the same as an idle connection. A single slow request — a gRPC
+//     server-streaming call, an SSE feed, a large download — occupies the
+//     connection for minutes without opening another stream, and closing it
+//     would cancel every in-flight handler's context and cut the response in
+//     half. Only a connection with no live streams is actually idle.
+//   - Anything else (a cancelled parent context from Shutdown, a drain exit) is
+//     someone else's teardown already in progress; touching the connection here
+//     would truncate responses that are being drained on purpose.
+func (s *Server) closeIfFinished(sc *conn.ServerConn, err error) {
+	switch {
+	case errors.Is(err, conn.ErrConnClosed):
+		_ = sc.Close()
+	case errors.Is(err, context.DeadlineExceeded) && sc.ActiveStreams() == 0:
+		_ = sc.Close()
 	}
 }
 

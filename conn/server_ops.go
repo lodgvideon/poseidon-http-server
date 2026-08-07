@@ -371,6 +371,18 @@ func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fi
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := sc.enc.EncodeBlock(*buf, fields)
+	if len(block) > sc.peerMaxFrameSize() {
+		*buf = block[:0]
+		encBufPool.Put(buf)
+		// The Framer's own size check is keyed to what THIS endpoint advertised,
+		// which says nothing about what the peer will accept: RFC 9113 §4.2
+		// (rfc9113.txt:513) makes an oversized frame a connection error at the
+		// RECEIVER. writeServerData already computes min(peerMax, ourMax) for the
+		// same reason. A field section cannot be split here — that needs
+		// CONTINUATION chunking — so refuse rather than put a frame on the wire
+		// that a conformant peer must answer by killing the connection.
+		return ErrHeaderBlockTooLarge
+	}
 	err := sc.fr.WriteHeaders(frame.WriteHeadersParams{
 		StreamID:      ss.id,
 		BlockFragment: block,
@@ -451,6 +463,14 @@ func (sc *ServerConn) writeServerDataChunks(ctx context.Context, ss *ServerStrea
 		p = p[n:]
 	}
 	return nil
+}
+
+// peerMaxFrameSize is the largest frame payload the peer has said it will
+// accept (RFC 9113 §6.5.2 SETTINGS_MAX_FRAME_SIZE, initial value 2^14).
+func (sc *ServerConn) peerMaxFrameSize() int {
+	sc.psMu.RLock()
+	defer sc.psMu.RUnlock()
+	return int(settingValue(sc.peerSettings, frame.SettingMaxFrameSize, 16384))
 }
 
 // writeServerRSTStream sends RST_STREAM for a server stream.

@@ -425,6 +425,19 @@ func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 	if sc.closed.Load() {
 		return nil, ErrConnClosed
 	}
+	// Drain what is already queued before considering the connection over. Both
+	// channels can be ready at once — acceptCh is buffered and the reader
+	// registers a stream before it exits — and select would then pick uniformly
+	// at random, silently discarding requests that were already accepted and
+	// counted. Same reason ServerStream.Recv checks its buffer first.
+	select {
+	case ss, ok := <-sc.acceptCh:
+		if !ok {
+			return nil, ErrConnClosed
+		}
+		return ss, nil
+	default:
+	}
 	select {
 	case ss, ok := <-sc.acceptCh:
 		if !ok {
@@ -560,6 +573,16 @@ func (sc *ServerConn) validateClientStreamID(id uint32) error {
 		return connError{code: frame.ErrCodeProtocolError, msg: "client stream ID must exceed all previous client streams"}
 	}
 	return nil
+}
+
+// ActiveStreams reports how many streams are currently live on the connection:
+// open, half-closed, or reserved for a push whose response is still being
+// written. Zero means the connection is genuinely idle, which is not the same
+// question as "has a new stream arrived recently".
+func (sc *ServerConn) ActiveStreams() int {
+	sc.smu.Lock()
+	defer sc.smu.Unlock()
+	return len(sc.streams)
 }
 
 // isIdleStream reports whether the identifier names a stream that has never
@@ -809,7 +832,14 @@ func (sc *ServerConn) readerLoop() {
 		// malformed PRIORITY is rejected on length before guardHeaderBlock runs,
 		// so without this the peer would be told FRAME_SIZE_ERROR and never learn
 		// it had broken the far more important rule.
-		if h.pendingStreamID != 0 && (fh.Type != frame.FrameContinuation || fh.StreamID != h.pendingStreamID) {
+		//
+		// Only for a frame that was actually read. ReadFrame returns the zero
+		// FrameHeader when it fails before parsing one — an EOF on the 9-byte
+		// header, a deadline, a socket closed under the reader — and that zero
+		// value has Type DATA and stream 0, which would read as a §6.10 violation
+		// and blame a peer that has simply gone away.
+		if h.pendingStreamID != 0 && !transportErr(err) &&
+			(fh.Type != frame.FrameContinuation || fh.StreamID != h.pendingStreamID) {
 			sc.sendGoAway(frame.ErrCodeProtocolError)
 			_ = sc.transport.Close()
 			sc.shutdownStreams(err)
@@ -823,7 +853,15 @@ func (sc *ServerConn) readerLoop() {
 		// frame-aligned. Never while a field block is open: §6.10 makes any
 		// non-CONTINUATION frame there a connection error whatever it was, and
 		// the codec rejects the malformed frame before guardHeaderBlock can run.
-		if h.pendingStreamID == 0 && fh.StreamID != 0 {
+		//
+		// Nor on an idle stream. §6.4 (rfc9113.txt:1596) is flatly the other way:
+		// "RST_STREAM frames MUST NOT be sent for a stream in the 'idle' state. If
+		// a RST_STREAM frame identifying an idle stream is received, the recipient
+		// MUST treat this as a connection error ... of type PROTOCOL_ERROR."
+		// Answering a malformed PRIORITY on an unopened stream with RST_STREAM
+		// would hand a conformant peer a mandatory reason to kill the connection
+		// the recovery exists to save.
+		if h.pendingStreamID == 0 && fh.StreamID != 0 && !sc.isIdleStream(fh.StreamID) {
 			switch {
 			case errors.Is(err, frame.ErrPriorityWrongLength):
 				_ = sc.writeRSTStreamID(fh.StreamID, frame.ErrCodeFrameSizeError)
@@ -1092,4 +1130,10 @@ var (
 	ErrConnClosed = errors.New("conn: connection closed")
 	// ErrStreamClosed is returned when operating on a closed stream.
 	ErrStreamClosed = errors.New("conn: stream already closed")
+	// ErrHeaderBlockTooLarge is returned when an encoded field section exceeds
+	// the peer's SETTINGS_MAX_FRAME_SIZE. A field section cannot be split without
+	// CONTINUATION chunking, which this server does not do, so the write is
+	// refused rather than emitted as a frame RFC 9113 §4.2 obliges the receiver
+	// to answer with a connection error.
+	ErrHeaderBlockTooLarge = errors.New("conn: encoded field section exceeds the peer's SETTINGS_MAX_FRAME_SIZE")
 )
