@@ -117,6 +117,18 @@ func (h *serverConnHandler) respondFieldsTooLarge(s *ServerStream) {
 // END_HEADERS opens a header block, the only frame permitted until END_HEADERS
 // is a CONTINUATION on the same stream. Any other frame is a connection error
 // of type PROTOCOL_ERROR. Invoked at the top of every non-CONTINUATION callback.
+// undispatchedFrameType reports whether ReadFrame delivers no Handler callback
+// at all for this frame type — the codec's "ignore and discard" branch for
+// types it does not recognise (RFC 9113 §5.5). guardHeaderBlock can never fire
+// for one, so the §6.10 check for these has to happen in the reader loop, where
+// the FrameHeader is available.
+//
+// The dispatched set is 0x0..0x9 plus ALTSVC (0x0a) and ORIGIN (0x0c); this is
+// exactly 0x0b and 0x0d..0xff.
+func undispatchedFrameType(t frame.FrameType) bool {
+	return t > frame.FrameContinuation && t != frame.FrameAltSvc && t != frame.FrameOrigin
+}
+
 func (h *serverConnHandler) guardHeaderBlock() error {
 	if h.pendingStreamID != 0 {
 		return connError{code: frame.ErrCodeProtocolError, msg: "expected CONTINUATION for open header block"}
@@ -234,7 +246,12 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 func (h *serverConnHandler) discardHeaderBlock(hb []byte) error {
 	h.pendingStreamID = 0
 	h.pendingDiscard = false
-	return h.dec.DecodeBlock(hb, func(hpack.HeaderField) error { return nil })
+	if err := h.dec.DecodeBlock(hb, func(hpack.HeaderField) error { return nil }); err != nil {
+		// Same rule as emitHeaderBlock: a block that will not decode has already
+		// desynced the connection's shared dynamic table (RFC 9113 §4.3).
+		return connError{code: frame.ErrCodeCompressionError, msg: "HPACK decoding error: " + err.Error()}
+	}
+	return nil
 }
 
 func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
@@ -307,8 +324,16 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		return nil
 	})
 	if err != nil {
-		_ = s.Close()
-		return err
+		// RFC 9113 §4.3 (rfc9113.txt:668): "A decoding error in a field block MUST
+		// be treated as a connection error (Section 5.4.1) of type
+		// COMPRESSION_ERROR." Not a stream error, and the reason is structural
+		// rather than a matter of severity: the dynamic table this block was being
+		// decoded against is shared by every stream on the connection, so once a
+		// block fails there is no correct way to decode anything that follows.
+		// Resetting only this stream would leave the peer believing the connection
+		// is still usable — and RST_STREAM(CANCEL), which this used to send, would
+		// additionally invite it to retry the request.
+		return connError{code: frame.ErrCodeCompressionError, msg: "HPACK decoding error: " + err.Error()}
 	}
 	if oversized {
 		// RFC 9110 §5.4 — answer this stream, leave the connection alone.

@@ -420,6 +420,27 @@ func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode)
 	return nil
 }
 
+// writeRSTStreamID resets a stream by identifier, for the two codec-detected
+// violations RFC 9113 scopes to a stream (§6.3 a wrong-length PRIORITY, §6.9.1 a
+// zero-increment WINDOW_UPDATE). Those arrive with nothing but a FrameHeader —
+// the stream may be idle, or may never exist — so writeServerRSTStream's
+// *ServerStream signature cannot serve them.
+//
+// Deliberately does not call markStreamDone: a malformed PRIORITY naming an idle
+// stream must not evict a live sibling's registry entry.
+func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	sc.wmu.Lock()
+	defer sc.wmu.Unlock()
+	if err := sc.fr.WriteRSTStream(id, code); err != nil {
+		return err
+	}
+	sc.bumpFramesSent()
+	return nil
+}
+
 // acquireSendCredits blocks until both per-stream and connection-level
 // outbound send windows have credit, then deducts up to `want` bytes.
 func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, want int) (int, error) {

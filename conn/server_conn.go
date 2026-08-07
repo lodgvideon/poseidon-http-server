@@ -293,6 +293,12 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		&countingWriter{w: nc, n: &sc.atomicBytesSent},
 		&countingReader{r: nc, n: &sc.atomicBytesReceived},
 	)
+	// The Framer's read cap defaults to 16,384 regardless of what this server
+	// advertises. Left unset, an operator raising AdvertisedSettings.MaxFrameSize
+	// makes the server reject — with FRAME_SIZE_ERROR — exactly the frames its own
+	// SETTINGS invited (RFC 9113 §4.2, rfc9113.txt:513). defaulted() has already
+	// clamped the value into the legal [2^14, 2^24-1].
+	sc.fr.SetMaxReadFrameSize(opts.AdvertisedSettings.MaxFrameSize)
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
 	// Connection-lifetime context: cancelled on Close or when the caller's ctx
 	// is cancelled. Per-stream contexts derive from this.
@@ -684,20 +690,75 @@ func (sc *ServerConn) readerLoop() {
 	// boundary keeps its pending CONTINUATION state instead of being lost.
 	h := sc.handler
 	for {
-		_, err := sc.fr.ReadFrame(context.Background(), h)
-		if err != nil {
-			// A connError from a handler callback (e.g. PROTOCOL_ERROR or
-			// the Rapid Reset ENHANCE_YOUR_CALM trip) is a connection-fatal
-			// error: emit GOAWAY with its code before tearing down so the
-			// peer learns why the connection is closing (RFC 7540 §6.8).
-			var ce connError
-			if errors.As(err, &ce) {
-				sc.sendGoAway(ce.code)
-			}
+		fh, err := sc.fr.ReadFrame(context.Background(), h)
+		// RFC 9113 §5.5 (rfc9113.txt:1230): "extension frames that appear in the
+		// middle of a field block (Section 4.3) are not permitted; these MUST be
+		// treated as a connection error (Section 5.4.1) of type PROTOCOL_ERROR."
+		// The codec correctly discards frame types it does not recognise before
+		// calling any Handler method, so guardHeaderBlock — which enforces §6.10
+		// for every dispatched type — can never see one. Here the FrameHeader is
+		// still in hand, which is all the check needs.
+		if err == nil && h.pendingStreamID != 0 && undispatchedFrameType(fh.Type) {
+			err = connError{code: frame.ErrCodeProtocolError, msg: "extension frame inside an open field block"}
+		}
+		if err == nil {
+			sc.atomicFramesReceived.Add(1)
+			continue
+		}
+
+		// §6.10 (rfc9113.txt:2263) outranks whatever the codec objected to: while
+		// a field block is open, "any other type of frame or a frame on a
+		// different stream" is a connection error of type PROTOCOL_ERROR. A
+		// malformed PRIORITY is rejected on length before guardHeaderBlock runs,
+		// so without this the peer would be told FRAME_SIZE_ERROR and never learn
+		// it had broken the far more important rule.
+		if h.pendingStreamID != 0 && (fh.Type != frame.FrameContinuation || fh.StreamID != h.pendingStreamID) {
+			sc.sendGoAway(frame.ErrCodeProtocolError)
+			_ = sc.transport.Close()
 			sc.shutdownStreams(err)
 			return
 		}
-		sc.atomicFramesReceived.Add(1)
+
+		// RFC 9113 §6.3 (rfc9113.txt:1519) and §6.9.1 (rfc9113.txt:2125) scope
+		// two of the codec's rejections to a single stream, not the connection.
+		// Recovering in place is safe because ReadFrame consumes the whole
+		// payload before rejecting either one, so the byte stream is still
+		// frame-aligned. Never while a field block is open: §6.10 makes any
+		// non-CONTINUATION frame there a connection error whatever it was, and
+		// the codec rejects the malformed frame before guardHeaderBlock can run.
+		if h.pendingStreamID == 0 && fh.StreamID != 0 {
+			switch {
+			case errors.Is(err, frame.ErrPriorityWrongLength):
+				_ = sc.writeRSTStreamID(fh.StreamID, frame.ErrCodeFrameSizeError)
+				continue
+			case errors.Is(err, frame.ErrZeroIncrement):
+				_ = sc.writeRSTStreamID(fh.StreamID, frame.ErrCodeProtocolError)
+				continue
+			}
+		}
+
+		// A connError from a handler callback (e.g. PROTOCOL_ERROR or the Rapid
+		// Reset ENHANCE_YOUR_CALM trip) carries its own code. Everything else
+		// that is a protocol violation arrives as a codec sentinel and is mapped
+		// by codecErrCode. Either way RFC 9113 §5.4 requires the error be
+		// reported, and §5.4.1 (rfc9113.txt:1173) requires the transport be
+		// closed afterwards: "After sending the GOAWAY frame for an error
+		// condition, the endpoint MUST close the TCP connection." Not sc.Close(),
+		// which waits on readerDone and would deadlock here.
+		var ce connError
+		var code frame.ErrCode
+		var mapped bool
+		if errors.As(err, &ce) {
+			code, mapped = ce.code, true
+		} else {
+			code, mapped = codecErrCode(err)
+		}
+		if mapped {
+			sc.sendGoAway(code)
+			_ = sc.transport.Close()
+		}
+		sc.shutdownStreams(err)
+		return
 	}
 }
 
@@ -789,8 +850,19 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 		// range window (and the int32 recv-window seed derived from it stays valid).
 		s.InitialWindowSize = 1<<31 - 1
 	}
-	if s.MaxFrameSize == 0 {
+	// RFC 9113 §6.5.2 (rfc9113.txt:1876): SETTINGS_MAX_FRAME_SIZE — "The initial
+	// value is 2^14 (16,384) octets. The value advertised by an endpoint MUST be
+	// between this initial value and the maximum allowed frame size (2^24-1 or
+	// 16,777,215 octets), inclusive." The clamp binds this server as a sender:
+	// an operator value outside the range would put an illegal SETTINGS frame on
+	// the wire. Clamping rather than erroring keeps a misconfiguration from
+	// refusing to serve, and the floor also guarantees the server still accepts
+	// the 16,384-octet frames §4.2 entitles every peer to send.
+	switch {
+	case s.MaxFrameSize < 16384:
 		s.MaxFrameSize = 16384
+	case s.MaxFrameSize > 16777215:
+		s.MaxFrameSize = 16777215
 	}
 	return s
 }
