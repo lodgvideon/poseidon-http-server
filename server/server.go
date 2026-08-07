@@ -14,7 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
 
@@ -290,11 +292,40 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn, cfg *tls.Config) {
 		_ = nc.Close()
 		return
 	}
+	if cs, ok := tlsAdmissible(nc); !ok {
+		s.logger.Printf("poseidon: rejecting %s: alpn=%q tls=%#04x", nc.RemoteAddr(), cs.NegotiatedProtocol, cs.Version)
+		_ = sc.GoAway(frame.ErrCodeInadequateSecurity)
+		_ = sc.Close()
+		return
+	}
 	s.trackConn(sc, true)
 	defer s.trackConn(sc, false)
 	// Resolve, once per connection, the certificate this server presented. Every
 	// stream on the connection is judged against it (RFC 9110 §7.4).
 	s.acceptLoop(ctx, sc, presentedLeaf(cfg, nc))
+}
+
+// tlsAdmissible reports whether a TLS connection actually satisfies the two
+// conditions RFC 9113 places on HTTP/2 over TLS. A cleartext connection is not
+// this function's business and is always admitted.
+//
+//	§3.3 (rfc9113.txt:437) — "HTTP/2 connections over TLS MUST use protocol
+//	negotiation in TLS [TLS-ALPN]."
+//	§9.2 (rfc9113.txt:3038) — "Implementations of HTTP/2 MUST use TLS version 1.2
+//	[TLS12] or higher for HTTP/2 over TLS."
+//
+// Both are checked against what was actually negotiated rather than against the
+// configuration, because a *tls.Config can be supplied by the caller
+// (ListenAndServeTLSConfig, ServeTLSConfig) or already be in force on a
+// connection handed to Serve. Called after conn.NewServerConn so the lazy TLS
+// handshake has completed and ConnectionState is populated.
+func tlsAdmissible(nc net.Conn) (tls.ConnectionState, bool) {
+	tc, ok := nc.(*tls.Conn)
+	if !ok {
+		return tls.ConnectionState{}, true
+	}
+	cs := tc.ConnectionState()
+	return cs, cs.NegotiatedProtocol == "h2" && cs.Version >= tls.VersionTLS12
 }
 
 // acceptLoop reads streams from a ServerConn with optional idle timeout.

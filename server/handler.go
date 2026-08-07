@@ -552,8 +552,29 @@ func NewHTTPRequest(req *Request) (*http.Request, error) {
 		httpReq.Body = req.BodyReader
 		httpReq.ContentLength = -1 // unknown length for a stream
 	}
+	// RFC 9113 §8.2.3 (rfc9113.txt:2585): "If there are multiple Cookie header
+	// fields after decompression, these MUST be concatenated into a single octet
+	// string using the two-octet delimiter of 0x3B, 0x20 (the ASCII string '; ')
+	// before being passed into a non-HTTP/2 context, such as an HTTP/1.1
+	// connection, or a generic HTTP server application."
+	//
+	// This function is that boundary. HTTP/2 encourages a client to split Cookie
+	// into one field per crumb so they compress independently, so a request that
+	// looked like `Cookie: a=1; b=2` on the wire arrives here as two fields — and
+	// http.Request.Cookies() reads only the first, silently losing the rest.
+	var cookie []byte
 	for _, h := range req.Headers {
+		if len(h.Name) == 6 && string(h.Name) == "cookie" {
+			if len(cookie) > 0 {
+				cookie = append(cookie, ';', ' ')
+			}
+			cookie = append(cookie, h.Value...)
+			continue
+		}
 		httpReq.Header.Add(string(h.Name), string(h.Value))
+	}
+	if len(cookie) > 0 {
+		httpReq.Header.Set("Cookie", string(cookie))
 	}
 	return httpReq, nil
 }
