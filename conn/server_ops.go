@@ -231,8 +231,16 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		sc.fcOutMu.Unlock()
 		return nil
 	}
+	// §5.1 (rfc9113.txt:1000): WINDOW_UPDATE is not one of the two frames an idle
+	// stream accepts.
+	if sc.isIdleStream(streamID) {
+		return connError{code: frame.ErrCodeProtocolError, msg: "WINDOW_UPDATE on an idle stream"}
+	}
 	s := sc.lookupStream(streamID)
 	if s == nil {
+		// §6.9 (rfc9113.txt:2093) carves this out explicitly: a WINDOW_UPDATE for a
+		// stream the receiver has already closed "MUST NOT be treated as an error"
+		// — the peer cannot have known in time.
 		return nil
 	}
 	s.mu.Lock()
@@ -258,23 +266,35 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 }
 
 // onDataReceived debits flow-control windows for an inbound DATA frame.
+//
+// s may be nil: the stream has been reset, refused or has already completed.
+// The connection-level half still runs, and must. RFC 9113 §6.9.1
+// (rfc9113.txt:2113) — "A receiver MUST count the padding and the entire size of
+// a frame ... against its connection-level flow-control window even if the
+// frame is in error"; §6.8 (:2044) says the same of frames on streams discarded
+// after a GOAWAY. The peer has already debited those octets from its own send
+// window, so a receiver that neither counts nor refunds them burns connection
+// credit permanently: repeat it and the peer's window drains to zero and every
+// stream on the connection wedges.
 func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 		debit := int32(length) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
 
-	s.mu.Lock()
-	s.recvWindow -= debit
-	if s.recvWindow < 0 {
-		s.mu.Unlock()
-		return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: flow control error", s.id)}
-	}
-	s.recvRefundPending += length
 	streamRefund := uint32(0)
-	if s.recvRefundPending >= recvWindowRefundThreshold {
-		streamRefund = s.recvRefundPending
-		s.recvRefundPending = 0
-				s.recvWindow += int32(streamRefund) //nolint:gosec // G115: refund ≤ initial
+	if s != nil {
+		s.mu.Lock()
+		s.recvWindow -= debit
+		if s.recvWindow < 0 {
+			s.mu.Unlock()
+			return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: flow control error", s.id)}
+		}
+		s.recvRefundPending += length
+		if s.recvRefundPending >= recvWindowRefundThreshold {
+			streamRefund = s.recvRefundPending
+			s.recvRefundPending = 0
+					s.recvWindow += int32(streamRefund) //nolint:gosec // G115: refund ≤ initial
+		}
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 
 	sc.fcMu.Lock()
 	sc.connRecvWindow -= debit

@@ -254,10 +254,14 @@ func TestDepth_MalformedFrame_WindowUpdateOverflow_StopsServing(t *testing.T) {
 	<-done
 }
 
-// TestDepth_StrayFrames_Tolerated verifies the server tolerates stray frames
-// that target non-existent / connection-control streams (DATA on stream 0,
-// RST_STREAM on an idle stream, PRIORITY) without crashing, and remains usable
-// for a subsequent legitimate request.
+// TestDepth_StrayFrames_Tolerated verifies the server tolerates the stray
+// frames RFC 9113 §5.1 permits on an idle stream — PRIORITY, and nothing else —
+// without crashing, and remains usable for a subsequent legitimate request.
+//
+// This test used to also send RST_STREAM on idle stream 7 and assert tolerance.
+// §6.4 (rfc9113.txt:1596) makes that a connection error of type PROTOCOL_ERROR,
+// so tolerating it was the bug, not the feature; that half now lives in
+// TestConformance_RFC9113_Sec51_IdleStream_NonHeadersFrame_ConnectionError.
 func TestDepth_StrayFrames_Tolerated(t *testing.T) {
 	cli, srv := net.Pipe()
 	defer cli.Close()
@@ -278,10 +282,7 @@ func TestDepth_StrayFrames_Tolerated(t *testing.T) {
 			}
 		}()
 		w := make(chan error, 1)
-		// Stray RST_STREAM on idle stream 7.
-		go func() { w <- fr.WriteRSTStream(7, frame.ErrCodeCancel) }()
-		<-w
-		// Stray PRIORITY on stream 9.
+		// Stray PRIORITY on idle stream 9 — expressly permitted (§5.1).
 		go func() { w <- fr.WritePriority(9, frame.Priority{Weight: 16}) }()
 		<-w
 		// Now a legitimate stream 1 — the connection must still be usable.

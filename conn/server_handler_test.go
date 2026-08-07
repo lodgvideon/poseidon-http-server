@@ -124,11 +124,27 @@ type mockConnOps struct {
 	rstStreamID       uint32
 	rstCode           frame.ErrCode
 	rstCalled         bool
+	// maxSeenID is the mock's stand-in for ServerConn.maxClientStreamID, so
+	// isIdleStream can tell an unopened identifier from a closed one.
+	maxSeenID uint32
 }
 
 func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
 func (m *mockConnOps) validateClientStreamID(uint32) error { return nil }
+
+// isIdleStream mirrors ServerConn's rule against maxSeenID, which the mock
+// advances the way registerStream does. Without it every unit test driving the
+// handler directly would look like a closed-stream reuse.
+func (m *mockConnOps) isIdleStream(id uint32) bool { return id > m.maxSeenID }
+
+func (m *mockConnOps) writeRSTStreamID(id uint32, code frame.ErrCode) error {
+	m.rstStreamID, m.rstCode, m.rstCalled = id, code, true
+	return nil
+}
 func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool {
+	if id > m.maxSeenID {
+		m.maxSeenID = id
+	}
 	if m.refuseAfter > 0 && len(m.streams) >= m.refuseAfter {
 		return false
 	}

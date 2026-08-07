@@ -557,6 +557,26 @@ func (sc *ServerConn) validateClientStreamID(id uint32) error {
 	return nil
 }
 
+// isIdleStream reports whether the identifier names a stream that has never
+// been opened — RFC 9113 §5.1's "idle" state.
+//
+// The streams map alone cannot answer this: it holds only live streams, so a
+// lookup miss means idle, closed, reset or refused indifferently, and those
+// states demand opposite reactions. A frame on an idle stream is a connection
+// error; the same frame on a closed one is at most a stream error, because a
+// peer cannot know a stream is gone until its RST_STREAM has arrived.
+//
+// Both counters already exist. maxClientStreamID is the highest client stream
+// ever registered; pushIDs holds the next unused even identifier.
+//
+// Called from the reader goroutine: two atomic loads, no lock, no allocation.
+func (sc *ServerConn) isIdleStream(id uint32) bool {
+	if id%2 == 1 {
+		return id > sc.maxClientStreamID.Load()
+	}
+	return id >= sc.pushIDs.v.Load()
+}
+
 func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
 	for i := range peer.N {
 		p := peer.Pairs[i]

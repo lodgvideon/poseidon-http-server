@@ -201,6 +201,16 @@ func (ss *ServerStream) Close() error {
 	return ss.sc.writeServerRSTStream(ss, frame.ErrCodeCancel)
 }
 
+// remoteHalfEnded reports whether the client has ended its half of the stream,
+// i.e. whether the stream is in RFC 9113 §5.1's "half-closed (remote)" state.
+// Read under ss.mu: the reader goroutine consults it while handler goroutines
+// may be writing localEnded through markLocalEnd.
+func (ss *ServerStream) remoteHalfEnded() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.remoteEnded
+}
+
 // markRemoteEnd marks the remote side as closed.
 // markRemoteEnd records that the client has ended its half of the stream
 // (END_STREAM received). It returns true if the stream is now fully closed

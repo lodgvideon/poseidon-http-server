@@ -6,11 +6,23 @@ import (
 )
 
 // serverConnOps is the contract server_handler.go needs from ServerConn.
+//
+//nolint:interfacebloat // one method per connection-level operation the frame
+// handler performs; the width tracks HTTP/2's own frame surface. Splitting it
+// into themed sub-interfaces would buy nothing — *ServerConn implements all of
+// it and the single mock in server_handler_test.go stubs all of it.
 type serverConnOps interface {
 	lookupStream(id uint32) *ServerStream
+	// isIdleStream reports whether the identifier names a stream that has never
+	// been opened (RFC 9113 §5.1). A lookupStream miss alone cannot tell idle
+	// from closed, and the two demand opposite reactions.
+	isIdleStream(id uint32) bool
 	// validateClientStreamID enforces RFC 9113 §5.1.1 (odd, strictly increasing)
 	// for a newly opened client stream, returning a connError on violation.
 	validateClientStreamID(id uint32) error
+	// writeRSTStreamID resets a stream by identifier, for the paths that hold no
+	// *ServerStream: a closed stream, or one that was never registered.
+	writeRSTStreamID(id uint32, code frame.ErrCode) error
 	// registerStream registers a new client stream, returning false if it was
 	// refused for exceeding SETTINGS_MAX_CONCURRENT_STREAMS (RST_STREAM already
 	// sent). The caller must not process a refused stream.
@@ -140,12 +152,42 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
-	s := h.streams.lookupStream(fh.StreamID)
-	if s == nil {
-		return nil
+	// A client may never send DATA on a server-initiated (even) stream: from its
+	// side a pushed stream is reserved, then half-closed (remote), and §5.1
+	// permits it only RST_STREAM, WINDOW_UPDATE and PRIORITY there.
+	if fh.StreamID%2 == 0 {
+		return connError{code: frame.ErrCodeProtocolError, msg: "client DATA on a server-initiated stream"}
 	}
+	// §5.1 (rfc9113.txt:1000): in the idle state "receiving any frame other than
+	// HEADERS or PRIORITY ... MUST be treated as a connection error of type
+	// PROTOCOL_ERROR". Checked before the debit: an idle stream ends the
+	// connection, so there is no window left to keep books for.
+	if h.streams.isIdleStream(fh.StreamID) {
+		return connError{code: frame.ErrCodeProtocolError, msg: "DATA on an idle stream"}
+	}
+	s := h.streams.lookupStream(fh.StreamID)
+	// Account before branching. The connection-level window is owed for every
+	// flow-controlled frame that arrives, including one for a stream that no
+	// longer exists — see onDataReceived. s == nil is tolerated there.
 	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
 		return err
+	}
+	if s == nil {
+		// Closed, reset or refused. §5.1 lets a receiver "treat frames that arrive
+		// on a closed stream after ... RST_STREAM as being in error", but the peer
+		// may simply not have learned yet, so the frame is counted and dropped
+		// rather than escalated.
+		return nil
+	}
+	// §5.1 (rfc9113.txt:1044): in half-closed (remote), "if an endpoint receives
+	// additional frames, other than WINDOW_UPDATE, PRIORITY, or RST_STREAM, for a
+	// stream that is in this state, it MUST respond with a stream error of type
+	// STREAM_CLOSED". Left unenforced, body bytes sent after END_STREAM reached
+	// the handler behind its own EOF.
+	if s.remoteHalfEnded() {
+		_ = h.streams.writeRSTStreamID(fh.StreamID, frame.ErrCodeStreamClosed)
+		h.streams.markStreamDone(fh.StreamID)
+		return nil
 	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
 	dataCopy := append([]byte(nil), p...)
@@ -186,8 +228,20 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	// subsequent stream on the connection.
 	refused := false
 	if isNew {
-		// RFC 9113 §5.1.1: reject an even or non-increasing client stream ID
-		// (a connection PROTOCOL_ERROR) before allocating anything for it.
+		// RFC 9113 §5.1.1 (rfc9113.txt:1113): "The identifier of a newly
+		// established stream MUST be numerically greater than all streams that the
+		// initiating endpoint has opened or reserved... An endpoint that receives
+		// an unexpected stream identifier MUST respond with a connection error
+		// (Section 5.4.1) of type PROTOCOL_ERROR."
+		//
+		// This deliberately also catches a field section arriving for a stream the
+		// server has already reset — the one-round-trip overlap where the client
+		// had trailers on the wire. §5.1's closed state would allow the softer
+		// stream error there, but only for a stream this endpoint reset, and once
+		// markStreamDone has removed it that is indistinguishable from genuine
+		// identifier reuse without per-stream-identifier memory. Trading §5.1.1's
+		// explicit MUST for a softer reaction to a case we cannot identify is the
+		// worse of the two errors; see docs/RFC_COVERAGE.md.
 		if err := h.streams.validateClientStreamID(fh.StreamID); err != nil {
 			return err
 		}
@@ -340,6 +394,20 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		h.respondFieldsTooLarge(s)
 		return nil
 	}
+	// §5.1 (rfc9113.txt:1044) — a field section arriving after the client already
+	// ended its half is a stream error of type STREAM_CLOSED. Without this the
+	// block was classified as trailers (headersReceived is already set) and
+	// delivered to the handler after its EOF: a second, unannounced field section
+	// on a request the application considers complete.
+	//
+	// Deliberately after the decode, never before. The block has to reach the
+	// shared HPACK decoder or the connection's dynamic table falls a step behind
+	// the client's encoder and every later stream decodes corruption.
+	if s.remoteHalfEnded() {
+		_ = h.streams.writeRSTStreamID(s.id, frame.ErrCodeStreamClosed)
+		h.streams.markStreamDone(s.id)
+		return nil
+	}
 	// RFC 9113 §8.3 — request pseudo-headers must be present, unique, defined,
 	// and ahead of every regular field. Only a request header block carries
 	// them; a trailer section is judged by the character rules alone.
@@ -412,11 +480,20 @@ func (h *serverConnHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
+	// §5.1 (rfc9113.txt:1000) — RST_STREAM is not one of the two frames an idle
+	// stream accepts, and §6.4 (:1596) restates it: "If a RST_STREAM frame
+	// identifying an idle stream is received, the recipient MUST treat this as a
+	// connection error of type PROTOCOL_ERROR." Checking it also stops these
+	// being charged as rapid resets, which made the CVE-2023-44487 budget
+	// answerable by frames that had never opened a stream at all.
+	if h.streams.isIdleStream(fh.StreamID) {
+		return connError{code: frame.ErrCodeProtocolError, msg: "RST_STREAM on an idle stream"}
+	}
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
-		// RST_STREAM for an unknown/already-finished stream. A flood of
-		// these (e.g. resetting streams the server already closed) is the
-		// classic Rapid Reset signature, so still account it as rapid.
+		// RST_STREAM for an already-finished stream. A flood of these (e.g.
+		// resetting streams the server already closed) is the classic Rapid Reset
+		// signature, so still account it as rapid.
 		return h.streams.onClientRSTStream(fh.StreamID, true)
 	}
 	// A reset is "rapid" (cheap-to-trigger, no useful work) when the

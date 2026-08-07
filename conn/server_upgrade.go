@@ -45,8 +45,11 @@ func (sc *ServerConn) seedUpgradedStream(up *UpgradedRequest) {
 		return
 	}
 	// The request headers have been received (as HTTP/1.1). Recording that keeps
-	// the stream's state truthful: a later HEADERS frame from the client on
-	// stream 1 is then classified as trailers rather than as a second request.
+	// the stream's state truthful, so a later HEADERS frame from the client on
+	// stream 1 is not mistaken for a second request. Combined with the
+	// half-closed (remote) transition below it draws RST_STREAM(STREAM_CLOSED),
+	// which is what RFC 9113 §5.1 requires of that state — a conformant client
+	// sends nothing more on stream 1 after upgrading.
 	s.headersReceived = true
 	s.push(StreamEvent{
 		Type:      EventHeaders,
