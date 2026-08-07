@@ -21,21 +21,129 @@ import (
 // stream error (Section 5.4.2) of type PROTOCOL_ERROR" — the offending stream
 // is reset and the connection survives.
 //
-// Deliberately narrow: RFC 9110 §5.5 goes on to say that field values
-// "containing other CTL characters are also invalid; however, recipients MAY
-// retain such characters" (rfc9110.txt:1611), so only the three dangerous
-// octets are rejected here. HTAB and obs-text stay legal.
+// RFC 9113 §8.2.1 (rfc9113.txt:2503) turns that into four checks a receiver
+// must perform, "a minimal set of validations":
+//
+//	:2508 "A field name MUST NOT contain characters in the ranges 0x00-0x20,
+//	       0x41-0x5a, or 0x7f-0xff (all ranges inclusive). This specifically
+//	       excludes all non-visible ASCII characters, ASCII SP (0x20), and
+//	       uppercase characters ('A' to 'Z', ASCII 0x41 to 0x5a)."
+//	:2513 "With the exception of pseudo-header fields (Section 8.3), which have
+//	       a name that starts with a single colon, field names MUST NOT include
+//	       a colon (ASCII COLON, 0x3a)."
+//	:2517 "A field value MUST NOT contain the zero value (ASCII NUL, 0x00), line
+//	       feed (ASCII LF, 0x0a), or carriage return (ASCII CR, 0x0d) at any
+//	       position."
+//	:2521 "A field value MUST NOT start or end with an ASCII whitespace
+//	       character (ASCII SP or HTAB, 0x20 or 0x09)."
+//
+// Interior HTAB and obs-text stay legal — RFC 9110 §5.5 (rfc9110.txt:1611) says
+// values "containing other CTL characters are also invalid; however, recipients
+// MAY retain such characters", so nothing beyond the four checks is rejected.
 
-// hasProhibitedFieldChar reports whether a field value contains CR, LF, or NUL.
+// hasProhibitedFieldChar reports whether a field value breaks either of the two
+// value rules: a CR, LF or NUL anywhere in it, or leading/trailing whitespace.
 //
 // Hot path: called once per decoded header field, one pass, no allocation.
 func hasProhibitedFieldChar(value []byte) bool {
+	if n := len(value); n > 0 {
+		if c := value[0]; c == ' ' || c == '\t' {
+			return true
+		}
+		if c := value[n-1]; c == ' ' || c == '\t' {
+			return true
+		}
+	}
 	for _, c := range value {
 		if c == '\r' || c == '\n' || c == 0x00 {
 			return true
 		}
 	}
 	return false
+}
+
+// hasProhibitedFieldName reports whether a field name breaks either of the two
+// name rules. An empty name is prohibited too: it can name nothing, and every
+// caller downstream assumes at least one octet.
+//
+// The i != 0 on the colon test is load-bearing rather than incidental: every
+// pseudo-header begins with one, so rejecting any colon at all would refuse the
+// first request on every connection. What it catches is the interior colon —
+// "x-forwarded-for:extra" survives HTTP/2 as one field and splits into two at
+// the next HTTP/1.1 hop.
+//
+// Hot path: one pass over the name, no allocation.
+func hasProhibitedFieldName(name []byte) bool {
+	if len(name) == 0 {
+		return true
+	}
+	for i, c := range name {
+		if c <= 0x20 || c >= 0x7f || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+		if c == ':' && i != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// teTrailers is the sole value RFC 9113 permits the TE field to carry.
+var teTrailers = []byte("trailers")
+
+// isConnectionSpecificName reports whether the field name is one HTTP/2 forbids
+// outright.
+//
+//	RFC 9113 §8.2.2 (rfc9113.txt:2547) — "An endpoint MUST NOT generate an
+//	HTTP/2 message containing connection-specific header fields. This includes
+//	the Connection header field and those listed as having connection-specific
+//	semantics in Section 7.6.1 of [HTTP] (that is, Proxy-Connection, Keep-Alive,
+//	Transfer-Encoding, and Upgrade). Any message containing connection-specific
+//	header fields MUST be treated as malformed."
+//
+// TE is the documented exception and is checked separately, by value: gRPC
+// clients send "te: trailers" on every request.
+//
+// Length-first switch, and string(n) == "lit" is the comparison the compiler
+// does not allocate for (ADR-0001).
+func isConnectionSpecificName(n []byte) bool {
+	switch len(n) {
+	case 7:
+		return string(n) == "upgrade"
+	case 10:
+		return string(n) == "connection" || string(n) == "keep-alive"
+	case 16:
+		return string(n) == "proxy-connection"
+	case 17:
+		return string(n) == "transfer-encoding"
+	}
+	return false
+}
+
+// isProhibitedField reports whether one decoded field makes the message
+// malformed, covering §8.2.1's four character checks and §8.2.2's
+// connection-specific ban. isTrailer selects the extra rule that applies only
+// to a trailer section.
+//
+// Hot path: called once per decoded field inside the decode callback that
+// already runs. No allocation.
+func isProhibitedField(name, value []byte, isTrailer bool) bool {
+	if hasProhibitedFieldName(name) || hasProhibitedFieldChar(value) {
+		return true
+	}
+	// RFC 9113 §8.1 (rfc9113.txt:2411) — "Trailers MUST NOT include pseudo-header
+	// fields". The name check above has already established the name is non-empty.
+	if isTrailer && name[0] == ':' {
+		return true
+	}
+	// §8.2.2 (:2559) — TE "MUST NOT contain any value other than 'trailers'".
+	// EqualFold because transfer codings are case-insensitive tokens (RFC 9110
+	// §10.1.4): a case-sensitive compare here would be the same opt-out-by-
+	// uppercasing bypass already closed for :scheme.
+	if len(name) == 2 && string(name) == "te" {
+		return !bytes.EqualFold(value, teTrailers)
+	}
+	return isConnectionSpecificName(name)
 }
 
 // Request pseudo-header validation (RFC 9113 §8.3), verbatim rules:

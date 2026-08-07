@@ -191,14 +191,14 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
 	dataCopy := append([]byte(nil), p...)
-	// Deliver the DATA (and its EOF) to the handler BEFORE releasing the stream:
-	// markStreamDone cancels the stream context, and Recv must not drop the final
-	// event in favour of cancellation.
+	// Record the transition before the push, release after it: the handler must
+	// never see EOF on a stream that still reports itself open, and it must
+	// observe the final event before markStreamDone cancels its context. Until
+	// the server has ended its half too, the stream stays registered
+	// (half-closed remote) so its WINDOW_UPDATE and RST_STREAM still reach it.
+	fullyClosed := end && s.markRemoteEnd()
 	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
-	if end && s.markRemoteEnd() {
-		// Release only once the server has also ended; until then the stream
-		// stays registered (half-closed remote) so its WINDOW_UPDATE and
-		// RST_STREAM still reach it (RFC 7540 §5.1).
+	if fullyClosed {
 		h.streams.markStreamDone(fh.StreamID)
 	}
 	return nil
@@ -364,7 +364,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// must still decode or the shared HPACK dynamic table desyncs.
 	listSize, oversized := 0, false
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
-		if !malformed && hasProhibitedFieldChar(f.Value) {
+		if !malformed && isProhibitedField(f.Name, f.Value, isTrailer) {
 			malformed = true
 		}
 		listSize += len(f.Name) + len(f.Value) + fieldEntryOverhead
@@ -414,6 +414,13 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	if !isTrailer && !validRequestPseudoHeaders(h.scratch) {
 		malformed = true
 	}
+	// RFC 9113 §8.1 (rfc9113.txt:2415) — a trailer section is the end of the
+	// message: "The last frame in the sequence bears an END_STREAM flag". A
+	// trailer HEADERS without it leaves the request open behind a field section
+	// that claimed to close it.
+	if isTrailer && !endStream {
+		malformed = true
+	}
 	if malformed {
 		// RFC 9110 §5.5 — reject a message whose field value carries CR, LF or
 		// NUL; RFC 9113 §8.1.1 — as a STREAM error of type PROTOCOL_ERROR, so
@@ -458,15 +465,18 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		}
 	}
 
+	// Record the state transition BEFORE handing the event over, so a stream that
+	// has told its handler "this is the end" never simultaneously reports itself
+	// as still open. Releasing it stays AFTER the push, so the handler observes
+	// the headers and EOF before its context is cancelled — a half-closed (remote)
+	// stream stays registered for its WINDOW_UPDATE and RST_STREAM (§5.1).
+	fullyClosed := endStream && s.markRemoteEnd()
 	s.push(StreamEvent{
 		Type:      evType,
 		Headers:   copied,
 		EndStream: endStream,
 	})
-	if endStream && s.markRemoteEnd() {
-		// Release once both halves have ended (a half-closed-remote stream stays
-		// registered for WINDOW_UPDATE/RST_STREAM, RFC 7540 §5.1). AFTER the push
-		// so the handler observes the headers/EOF before the context is cancelled.
+	if fullyClosed {
 		h.streams.markStreamDone(s.id)
 	}
 	return nil
