@@ -234,21 +234,39 @@ func (ss *ServerStream) markLocalEnd() bool {
 	return ss.remoteEnded
 }
 
-// markRemoteEndReset records a client RST_STREAM as ending the remote half and
-// reports whether the request was still open (END_STREAM not yet observed) at
-// that moment — computed atomically under ss.mu so the rapid-reset
-// classification (CVE-2023-44487) cannot race the flag write. RST is a hard
-// close, so the caller releases the stream unconditionally afterwards.
+// markRemoteEndReset records a client RST_STREAM and reports whether the
+// request was still open (END_STREAM not yet observed) at that moment —
+// computed atomically under ss.mu so the rapid-reset classification
+// (CVE-2023-44487) cannot race the flag write.
+//
+// A received RST_STREAM closes the stream in both directions, not merely the
+// remote half. Recording that is what stops the server answering a reset with a
+// reset: RFC 9113 §5.1 (rfc9113.txt:1082) — "An endpoint MUST NOT send frames
+// other than PRIORITY on a closed stream" — and §5.4.2 (:1197) — "To avoid
+// looping, an endpoint MUST NOT send a RST_STREAM in response to a RST_STREAM
+// frame." Called before the EventReset is pushed, so no handler can observe the
+// reset while the stream still reports itself writable.
 func (ss *ServerStream) markRemoteEndReset() (wasOpen bool) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	wasOpen = !ss.remoteEnded
 	ss.remoteEnded = true
+	ss.closed = true
 	return wasOpen
 }
 
-// push delivers an event from the reader goroutine. Non-blocking;
-// on overflow marks stream closed and sends RST.
+// push delivers an event from the reader goroutine. Non-blocking; on overflow
+// it drops the stream and resets it.
+//
+// INTERNAL_ERROR, not REFUSED_STREAM. RFC 9113 §8.7 (rfc9113.txt:2977) makes
+// REFUSED_STREAM a promise: "The REFUSED_STREAM error code can be included in a
+// RST_STREAM frame to indicate that the stream is being closed prior to any
+// processing having occurred. Any request that was sent on the reset stream can
+// be safely retried." By the time this buffer overflows the request has already
+// been dispatched — some of its events reached the application — so that promise
+// would be false, and a conformant client would replay a request this server had
+// begun to serve. The overflow is a server-side buffer failure and INTERNAL_ERROR
+// is what says so.
 func (ss *ServerStream) push(e StreamEvent) {
 	select {
 	case ss.events <- e:
@@ -263,10 +281,10 @@ func (ss *ServerStream) push(e StreamEvent) {
 		return
 	}
 	go func() {
-		_ = ss.sc.writeServerRSTStream(ss, frame.ErrCodeRefusedStream)
+		_ = ss.sc.writeServerRSTStream(ss, frame.ErrCodeInternalError)
 	}()
 	select {
-	case ss.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeRefusedStream, EndStream: true}:
+	case ss.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeInternalError, EndStream: true}:
 	default:
 	}
 }

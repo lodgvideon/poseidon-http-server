@@ -38,6 +38,9 @@ type serverConnOps interface {
 	applyPeerSettings(s frame.SettingsParams) error
 	onWindowUpdate(streamID, increment uint32) error
 	onDataReceived(s *ServerStream, length uint32) error
+	// notePeerGoAway records that the peer has sent GOAWAY, after which this
+	// endpoint must not open further streams on the connection (RFC 9113 §6.8).
+	notePeerGoAway()
 	// onClientRSTStream accounts a client-initiated RST_STREAM for Rapid
 	// Reset (CVE-2023-44487) detection. Returns a non-nil error when the
 	// per-connection budget is exceeded; the reader loop then sends
@@ -125,10 +128,6 @@ func (h *serverConnHandler) respondFieldsTooLarge(s *ServerStream) {
 	h.streams.markStreamDone(s.id)
 }
 
-// guardHeaderBlock enforces RFC 9113 §6.10: once a HEADERS frame without
-// END_HEADERS opens a header block, the only frame permitted until END_HEADERS
-// is a CONTINUATION on the same stream. Any other frame is a connection error
-// of type PROTOCOL_ERROR. Invoked at the top of every non-CONTINUATION callback.
 // undispatchedFrameType reports whether ReadFrame delivers no Handler callback
 // at all for this frame type — the codec's "ignore and discard" branch for
 // types it does not recognise (RFC 9113 §5.5). guardHeaderBlock can never fire
@@ -141,6 +140,10 @@ func undispatchedFrameType(t frame.FrameType) bool {
 	return t > frame.FrameContinuation && t != frame.FrameAltSvc && t != frame.FrameOrigin
 }
 
+// guardHeaderBlock enforces RFC 9113 §6.10: once a HEADERS frame without
+// END_HEADERS opens a header block, the only frame permitted until END_HEADERS
+// is a CONTINUATION on the same stream. Any other frame is a connection error
+// of type PROTOCOL_ERROR. Invoked at the top of every non-CONTINUATION callback.
 func (h *serverConnHandler) guardHeaderBlock() error {
 	if h.pendingStreamID != 0 {
 		return connError{code: frame.ErrCodeProtocolError, msg: "expected CONTINUATION for open header block"}
@@ -551,7 +554,17 @@ func (h *serverConnHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error 
 }
 
 func (h *serverConnHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
-	return h.guardHeaderBlock()
+	if err := h.guardHeaderBlock(); err != nil {
+		return err
+	}
+	// RFC 9113 §6.8 (rfc9113.txt:1990): "Once sent, the sender will ignore frames
+	// sent on streams initiated by the receiver if the stream has an identifier
+	// higher than the included last stream identifier. Receivers of a GOAWAY frame
+	// MUST NOT open additional streams on the connection". For a server the only
+	// way to open one is server push, so this is what stops a push racing a
+	// shutdown the client has already announced.
+	h.streams.notePeerGoAway()
+	return nil
 }
 
 func (h *serverConnHandler) OnWindowUpdate(fh frame.FrameHeader, increment uint32) error {

@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
@@ -306,6 +305,19 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn, leaf *x509
 			stream, err := sc.AcceptStream(acceptCtx)
 			cancel()
 			if err != nil {
+				// The idle deadline is the only exit that means "this connection
+				// went quiet", and Options.IdleTimeout documents that such a
+				// connection is closed. It was not: the loop simply returned, the
+				// reader goroutine kept running, and the socket survived until the
+				// peer or Shutdown intervened. sc.Close sends GOAWAY(NO_ERROR) with
+				// the real last-stream-id and then closes the transport.
+				//
+				// The errors.Is guard is load-bearing: a drain exit and a cancelled
+				// parent context both arrive here too, and closing on those would
+				// cut in-flight responses short during a graceful Shutdown.
+				if errors.Is(err, context.DeadlineExceeded) {
+					_ = sc.Close()
+				}
 				return
 			}
 			if !s.spawnStream(stream, leaf) {
@@ -738,7 +750,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Send GOAWAY to all connections so clients stop opening new streams.
 	for _, sc := range conns {
-		_ = sc.GoAway(frame.ErrCodeNoError)
+		_ = sc.GoAwayGraceful()
 	}
 
 	// Wait for in-flight streams to complete or context cancellation.

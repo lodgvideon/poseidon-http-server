@@ -44,9 +44,19 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	s.mu.Unlock()
 	s.sc = sc
 
+	// Count only client-initiated (odd) streams: the limit this server advertises
+	// governs what the CLIENT may open. Pushed streams are even and count against
+	// the peer's limit instead (see writePushPromise), so including them here
+	// would let the server's own pushes refuse the client's requests.
 	limit := int(sc.opts.AdvertisedSettings.MaxConcurrentStreams)
 	sc.smu.Lock()
-	if limit > 0 && len(sc.streams) >= limit {
+	clientOpen := 0
+	for sid := range sc.streams {
+		if sid%2 == 1 {
+			clientOpen++
+		}
+	}
+	if limit > 0 && clientOpen >= limit {
 		sc.smu.Unlock()
 		// At the concurrency limit: refuse rather than register. Record the ID as
 		// used (RFC 9113 §5.1.1) so it cannot be reused, then RST (best-effort,
@@ -97,6 +107,11 @@ func (sc *ServerConn) onClientRSTStream(_ uint32, rapid bool) error {
 	}
 	return nil
 }
+
+// notePeerGoAway records the client's GOAWAY. From that point the server must
+// not open new streams on this connection (RFC 9113 §6.8), which for a server
+// means server push.
+func (sc *ServerConn) notePeerGoAway() { sc.peerGoAway.Store(true) }
 
 // markStreamDone cleans up a finished stream.
 func (sc *ServerConn) markStreamDone(id uint32) {
@@ -181,12 +196,18 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 	newInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	sc.psMu.Unlock()
 
+	// The encoder is shared with every writer on this connection, and resizing its
+	// dynamic table emits a Dynamic Table Size Update into the next block it
+	// encodes (RFC 7541 §4.2). Taking wmu keeps that from landing in the middle of
+	// a header block another goroutine is already writing.
+	sc.wmu.Lock()
 	for i := range s.N {
 		p := s.Pairs[i]
 		if p.ID == frame.SettingHeaderTableSize {
 			sc.enc.SetMaxDynamicTableSize(p.Value)
 		}
 	}
+	sc.wmu.Unlock()
 
 	// Retroactive INITIAL_WINDOW_SIZE delta on all open streams.
 	if newInitial != oldInitial {
@@ -246,6 +267,13 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 	s.mu.Lock()
 	newVal := int64(s.sendWindow) + int64(increment)
 	if newVal > int64(maxWindow) {
+		// Mark it closed while the lock is still held. The EventReset below reaches
+		// the handler before writeServerRSTStream puts the frame on the wire, so a
+		// handler that reacts by calling Close would otherwise emit a second
+		// RST_STREAM — which RFC 9113 §5.4.2 (rfc9113.txt:1201) asks endpoints to
+		// avoid: "An endpoint SHOULD NOT send more than one RST_STREAM frame for
+		// any stream."
+		s.closed = true
 		s.mu.Unlock()
 		// RFC 9113 §6.9.1: a WINDOW_UPDATE overflowing a STREAM flow-control
 		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a
@@ -426,10 +454,18 @@ func (sc *ServerConn) writeServerDataChunks(ctx context.Context, ss *ServerStrea
 }
 
 // writeServerRSTStream sends RST_STREAM for a server stream.
+//
+// Resetting a stream closes it, so the flag is set here rather than left to
+// each caller: §5.1 (rfc9113.txt:1082) forbids sending anything but PRIORITY
+// afterwards, and a later ServerStream.Close on the same stream must be the
+// no-op it already is for a stream that ended normally.
 func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
 	if sc.closed.Load() {
 		return ErrConnClosed
 	}
+	ss.mu.Lock()
+	ss.closed = true
+	ss.mu.Unlock()
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
 	if err := sc.fr.WriteRSTStream(ss.id, code); err != nil {
@@ -570,7 +606,24 @@ func (sc *ServerConn) writeWindowUpdate(streamID, increment uint32) error {
 }
 
 // setPeerSetting merges a SETTINGS pair into params.
+//
+// Identifiers this server does not implement are dropped rather than stored.
+// RFC 9113 §6.5.2 (rfc9113.txt:1888): "An endpoint that receives a SETTINGS frame
+// with any unknown or unsupported identifier MUST ignore that setting."
+// Storing them was not merely untidy: SettingsParams holds a fixed 16 pairs, so a
+// peer sending sixteen invented identifiers filled the array and every real
+// setting after it was silently dropped.
 func setPeerSetting(params *frame.SettingsParams, id frame.SettingID, val uint32) {
+	//nolint:exhaustive // the listed six are the settings this server implements;
+	// everything else, SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441) included, is
+	// unsupported here and must therefore be ignored rather than stored.
+	switch id {
+	case frame.SettingHeaderTableSize, frame.SettingEnablePush,
+		frame.SettingMaxConcurrentStreams, frame.SettingInitialWindowSize,
+		frame.SettingMaxFrameSize, frame.SettingMaxHeaderListSize:
+	default:
+		return
+	}
 	for i := range params.N {
 		if params.Pairs[i].ID == id {
 			params.Pairs[i].Value = val

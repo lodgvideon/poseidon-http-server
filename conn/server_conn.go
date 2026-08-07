@@ -71,6 +71,17 @@ type ServerConn struct {
 	// goAwayRequested flags that the server has initiated GOAWAY.
 	goAwayRequested atomic.Bool
 
+	// goAwaySentID is the last stream identifier carried by the most recent
+	// GOAWAY, so a later one can never name a larger stream (RFC 9113 §6.8).
+	// Seeded to the maximum as the "nothing sent yet" sentinel. Guarded by wmu,
+	// which every GOAWAY write site already holds across its write.
+	goAwaySentID uint32
+
+	// peerGoAway records that the CLIENT has sent GOAWAY. After that the server
+	// must not create new streams on this connection, which for a server means
+	// no server push (RFC 9113 §6.8).
+	peerGoAway atomic.Bool
+
 	// rapidResetCount accumulates client-initiated RST_STREAM frames that
 	// reset a stream before it produced useful work (CVE-2023-44487).
 	// Compared against opts.rapidResetBudget(). Atomic: incremented by the
@@ -285,20 +296,9 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		connRecvWindow:     opts.effectiveConnRecvWindow(),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 		pushIDs:            newPushIDCounter(),
+		goAwaySentID:       maxStreamID,
 	}
-	// Wrap the transport so every frame byte read/written is tallied for Stats
-	// (BytesReceived/BytesSent). The 24-byte preface read above is not counted;
-	// everything from the SETTINGS exchange onward is.
-	sc.fr = frame.NewFramer(
-		&countingWriter{w: nc, n: &sc.atomicBytesSent},
-		&countingReader{r: nc, n: &sc.atomicBytesReceived},
-	)
-	// The Framer's read cap defaults to 16,384 regardless of what this server
-	// advertises. Left unset, an operator raising AdvertisedSettings.MaxFrameSize
-	// makes the server reject — with FRAME_SIZE_ERROR — exactly the frames its own
-	// SETTINGS invited (RFC 9113 §4.2, rfc9113.txt:513). defaulted() has already
-	// clamped the value into the legal [2^14, 2^24-1].
-	sc.fr.SetMaxReadFrameSize(opts.AdvertisedSettings.MaxFrameSize)
+	sc.fr = newCountingFramer(nc, sc, opts.AdvertisedSettings.MaxFrameSize)
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
 	// Connection-lifetime context: cancelled on Close or when the caller's ctx
 	// is cancelled. Per-stream contexts derive from this.
@@ -334,7 +334,9 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		return nil, verr
 	}
 	sc.psMu.Lock()
-	sc.peerSettings = peer
+	for i := range peer.N {
+		setPeerSetting(&sc.peerSettings, peer.Pairs[i].ID, peer.Pairs[i].Value)
+	}
 	sc.psMu.Unlock()
 	sc.applyInitialPeerSettings(peer)
 
@@ -397,14 +399,11 @@ func readClientPreface(nc net.Conn) error {
 //
 // Returns the client's SETTINGS.
 func handshakeServerSettings(ctx context.Context, fr *frame.Framer, delegate frame.Handler) (frame.SettingsParams, error) {
-	rec := &settingsRecorder{delegate: delegate}
+	rec := &settingsRecorder{delegate: delegate, fr: fr}
 	for !rec.peerSeen {
 		if err := readOneFrame(ctx, fr, rec); err != nil {
 			return frame.SettingsParams{}, fmt.Errorf("server read client settings: %w", err)
 		}
-	}
-	if err := fr.WriteSettingsAck(); err != nil {
-		return frame.SettingsParams{}, fmt.Errorf("server write settings ack: %w", err)
 	}
 	for !rec.ackSeen {
 		if err := readOneFrame(ctx, fr, rec); err != nil {
@@ -432,6 +431,12 @@ func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 			return nil, ErrConnClosed
 		}
 		return ss, nil
+	case <-sc.readerDone:
+		// The reader goroutine has exited — the connection is finished, whether it
+		// ended cleanly or on a protocol error. acceptCh is never closed, so without
+		// this the owner would block here until its own context expired, and with
+		// IdleTimeout disabled that is forever.
+		return nil, ErrConnClosed
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -462,7 +467,7 @@ func (sc *ServerConn) Close() error {
 	// Account for the GOAWAY frame and flag the connection as having emitted one,
 	// matching GoAway/sendGoAway, so Stats (FramesSent, GoAwaySent) stays accurate
 	// for Close-initiated teardowns (e.g. keepalive timeout).
-	if err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), frame.ErrCodeNoError, nil); err == nil {
+	if err := sc.fr.WriteGoAway(sc.clampGoAwayID(sc.lastPeerStreamID()), frame.ErrCodeNoError, nil); err == nil {
 		sc.bumpFramesSent()
 		sc.goAwayRequested.Store(true)
 	}
@@ -656,6 +661,78 @@ func (sc *ServerConn) deliverPingAck(payload [8]byte) {
 	}
 }
 
+// newCountingFramer builds the connection's Framer over a transport wrapped so
+// every frame byte read and written is tallied for Stats (BytesReceived /
+// BytesSent). The 24-byte preface read before this is not counted; everything
+// from the SETTINGS exchange onward is.
+//
+// maxFrameSize is the value this connection advertises in SETTINGS. The Framer's
+// own read cap defaults to 16,384 regardless, so left unset an operator raising
+// AdvertisedSettings.MaxFrameSize would make the server reject exactly the
+// frames its own SETTINGS invited (RFC 9113 §4.2, rfc9113.txt:513).
+// AdvertisedSettings.defaulted() has already clamped it into the legal range.
+func newCountingFramer(nc net.Conn, sc *ServerConn, maxFrameSize uint32) *frame.Framer {
+	fr := frame.NewFramer(
+		&countingWriter{w: nc, n: &sc.atomicBytesSent},
+		&countingReader{r: nc, n: &sc.atomicBytesReceived},
+	)
+	fr.SetMaxReadFrameSize(maxFrameSize)
+	return fr
+}
+
+// maxStreamID is the largest legal stream identifier, and the last-stream-id a
+// server sends in the advance-warning GOAWAY of a graceful shutdown.
+const maxStreamID = 1<<31 - 1
+
+// clampGoAwayID returns the last-stream-id for the next GOAWAY, never larger
+// than one already sent.
+//
+//	RFC 9113 §6.8 (rfc9113.txt:2029) — "Endpoints MUST NOT increase the value
+//	they send in the last stream identifier, since the peers might already have
+//	retried unprocessed requests on another connection."
+//
+// Raising it would tell a peer that streams it has already replayed elsewhere
+// were processed after all. Caller must hold wmu, which every GOAWAY write site
+// already does across its write.
+func (sc *ServerConn) clampGoAwayID(id uint32) uint32 {
+	if id > sc.goAwaySentID {
+		id = sc.goAwaySentID
+	}
+	sc.goAwaySentID = id
+	return id
+}
+
+// GoAwayGraceful sends the advance-warning GOAWAY of RFC 9113 §6.8's two-phase
+// shutdown.
+//
+//	rfc9113.txt:2035 — "A server that is attempting to gracefully shut down a
+//	connection SHOULD send an initial GOAWAY frame with the last stream
+//	identifier set to 2^31-1 and a NO_ERROR code. This signals to the client
+//	that a shutdown is imminent and that initiating further requests is
+//	prohibited. After allowing time for any in-flight stream creation (at least
+//	one round-trip time), the server can send another GOAWAY frame with an
+//	updated last stream identifier."
+//
+// Announcing the real last-stream-id in one shot instead makes every stream the
+// client had in flight look unprocessed, so it replays requests this server was
+// about to serve. Close provides phase two; clampGoAwayID lets the identifier
+// fall from 2^31-1 to the real one, which is the only direction §6.8 allows.
+func (sc *ServerConn) GoAwayGraceful() error {
+	if !sc.goAwayRequested.CompareAndSwap(false, true) {
+		return nil // already sent
+	}
+	sc.wmu.Lock()
+	defer sc.wmu.Unlock()
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	err := sc.fr.WriteGoAway(sc.clampGoAwayID(maxStreamID), frame.ErrCodeNoError, nil)
+	if err == nil {
+		sc.bumpFramesSent()
+	}
+	return err
+}
+
 // GoAway sends GOAWAY with the given error code. After this call
 // AcceptStream returns ErrConnClosed but existing streams continue.
 func (sc *ServerConn) GoAway(code frame.ErrCode) error {
@@ -667,7 +744,7 @@ func (sc *ServerConn) GoAway(code frame.ErrCode) error {
 	if sc.closed.Load() {
 		return ErrConnClosed
 	}
-	err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), code, nil)
+	err := sc.fr.WriteGoAway(sc.clampGoAwayID(sc.lastPeerStreamID()), code, nil)
 	if err == nil {
 		sc.bumpFramesSent()
 	}
@@ -796,7 +873,7 @@ func (sc *ServerConn) sendGoAway(code frame.ErrCode) {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	if !sc.closed.Load() {
-		if err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), code, nil); err == nil {
+		if err := sc.fr.WriteGoAway(sc.clampGoAwayID(sc.lastPeerStreamID()), code, nil); err == nil {
 			sc.bumpFramesSent()
 		}
 	}
@@ -906,6 +983,9 @@ type settingsRecorder struct {
 	peerSeen bool
 	ackSeen  bool
 	delegate frame.Handler // optional; receives forwarded frames
+	// fr, when set, is used to acknowledge each non-ACK SETTINGS frame the
+	// moment its values have been processed (RFC 9113 §6.5.3).
+	fr *frame.Framer
 }
 
 func (r *settingsRecorder) OnData(fh frame.FrameHeader, data []byte, pad uint8) error {
@@ -937,8 +1017,22 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 		r.ackSeen = true
 		return nil
 	}
-	r.peer = s
+	// Merge, never replace. RFC 9113 §6.5.3 (rfc9113.txt:1866): "The values in the
+	// SETTINGS frame MUST be processed in the order they appear" — a second
+	// SETTINGS frame updates the parameters it names and leaves the rest alone.
+	// Assigning the frame wholesale silently reverted every parameter it omitted.
+	for i := range s.N {
+		setPeerSetting(&r.peer, s.Pairs[i].ID, s.Pairs[i].Value)
+	}
 	r.peerSeen = true
+	// §6.5.3 (:1858): "Once all values have been processed, the recipient MUST
+	// immediately emit a SETTINGS frame with the ACK flag set." Every non-ACK
+	// SETTINGS in the handshake window gets its own acknowledgement; the caller
+	// used to send exactly one however many arrived. Safe without wmu: this runs
+	// on the constructing goroutine, before the reader loop starts.
+	if r.fr != nil {
+		return r.fr.WriteSettingsAck()
+	}
 	return nil
 }
 func (r *settingsRecorder) OnPushPromise(fh frame.FrameHeader, sid uint32, hb frame.HeaderBlock, flags uint8) error {

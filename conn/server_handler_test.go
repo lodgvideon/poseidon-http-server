@@ -126,7 +126,8 @@ type mockConnOps struct {
 	rstCalled         bool
 	// maxSeenID is the mock's stand-in for ServerConn.maxClientStreamID, so
 	// isIdleStream can tell an unopened identifier from a closed one.
-	maxSeenID uint32
+	maxSeenID  uint32
+	peerGoAway bool
 }
 
 func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
@@ -141,6 +142,8 @@ func (m *mockConnOps) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	m.rstStreamID, m.rstCode, m.rstCalled = id, code, true
 	return nil
 }
+
+func (m *mockConnOps) notePeerGoAway() { m.peerGoAway = true }
 func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool {
 	if id > m.maxSeenID {
 		m.maxSeenID = id
