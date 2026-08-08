@@ -6,11 +6,24 @@ import (
 )
 
 // serverConnOps is the contract server_handler.go needs from ServerConn.
+//
+// handler performs; the width tracks HTTP/2's own frame surface. Splitting it
+// into themed sub-interfaces would buy nothing — *ServerConn implements all of
+// it and the single mock in server_handler_test.go stubs all of it.
+//
+//nolint:interfacebloat // one method per connection-level operation the frame
 type serverConnOps interface {
 	lookupStream(id uint32) *ServerStream
+	// isIdleStream reports whether the identifier names a stream that has never
+	// been opened (RFC 9113 §5.1). A lookupStream miss alone cannot tell idle
+	// from closed, and the two demand opposite reactions.
+	isIdleStream(id uint32) bool
 	// validateClientStreamID enforces RFC 9113 §5.1.1 (odd, strictly increasing)
 	// for a newly opened client stream, returning a connError on violation.
 	validateClientStreamID(id uint32) error
+	// writeRSTStreamID resets a stream by identifier, for the paths that hold no
+	// *ServerStream: a closed stream, or one that was never registered.
+	writeRSTStreamID(id uint32, code frame.ErrCode) error
 	// registerStream registers a new client stream, returning false if it was
 	// refused for exceeding SETTINGS_MAX_CONCURRENT_STREAMS (RST_STREAM already
 	// sent). The caller must not process a refused stream.
@@ -26,6 +39,9 @@ type serverConnOps interface {
 	applyPeerSettings(s frame.SettingsParams) error
 	onWindowUpdate(streamID, increment uint32) error
 	onDataReceived(s *ServerStream, length uint32) error
+	// notePeerGoAway records that the peer has sent GOAWAY, after which this
+	// endpoint must not open further streams on the connection (RFC 9113 §6.8).
+	notePeerGoAway()
 	// onClientRSTStream accounts a client-initiated RST_STREAM for Rapid
 	// Reset (CVE-2023-44487) detection. Returns a non-nil error when the
 	// per-connection budget is exceeded; the reader loop then sends
@@ -62,6 +78,15 @@ var status431Fields = []hpack.HeaderField{
 // of 32 octets for each field line".
 const fieldEntryOverhead = 32
 
+// fieldSpan records one decoded field's extent inside serverConnHandler.fieldBuf.
+// Lengths rather than slices: fieldBuf reallocates as it grows, which would
+// invalidate any slice taken before the growth.
+type fieldSpan struct {
+	nameLen   int
+	valLen    int
+	sensitive bool
+}
+
 // serverConnHandler bridges frame.Handler into per-ServerStream events.
 type serverConnHandler struct {
 	streams serverConnOps
@@ -75,7 +100,23 @@ type serverConnHandler struct {
 	// accounting matches what the peer was told it may send.
 	recvWindowSeed int32
 
-	scratch          []hpack.HeaderField
+	// eventBuf is the per-stream event channel capacity, from
+	// ServerConnOptions.StreamEventBuffer. It used to be hardcoded to 8 here, so
+	// the documented option applied to nothing but the h2c seeded stream.
+	eventBuf int
+
+	scratch []hpack.HeaderField
+	// fieldBuf and spans hold a private copy of the decoded field section.
+	// hpack.Decoder documents its field slices as valid only for the duration of
+	// the visit call — they alias its scratch buffer, or the dynamic table's
+	// arena, which is rewritten in place when an insertion evicts the table
+	// empty. Retaining them meant a later field in the SAME block could silently
+	// rewrite an earlier one, which also defeats the §8.2.1 name validation:
+	// the checks run inside the callback, on bytes that no longer exist by the
+	// time the fields are read again. Both buffers are reused across blocks, so
+	// the copy costs no steady-state allocation.
+	fieldBuf         []byte
+	spans            []fieldSpan
 	pendingStreamID  uint32
 	pendingBuf       []byte
 	pendingEndStream bool
@@ -86,18 +127,22 @@ type serverConnHandler struct {
 	pendingDiscard bool
 }
 
-func newServerConnHandler(streams serverConnOps, dec *hpack.Decoder, maxHeaderBytes int, recvWindowSeed int32) *serverConnHandler {
+func newServerConnHandler(streams serverConnOps, dec *hpack.Decoder, maxHeaderBytes int, recvWindowSeed int32, eventBuf int) *serverConnHandler {
 	if maxHeaderBytes <= 0 {
 		maxHeaderBytes = defaultMaxHeaderBytes
 	}
 	if recvWindowSeed <= 0 {
 		recvWindowSeed = connInitialRecvWindow
 	}
+	if eventBuf <= 0 {
+		eventBuf = defaultStreamEventBuffer
+	}
 	return &serverConnHandler{
 		streams:        streams,
 		dec:            dec,
 		maxHeaderBytes: maxHeaderBytes,
 		recvWindowSeed: recvWindowSeed,
+		eventBuf:       eventBuf,
 		scratch:        make([]hpack.HeaderField, 0, 16),
 	}
 }
@@ -111,6 +156,18 @@ func (h *serverConnHandler) respondFieldsTooLarge(s *ServerStream) {
 	}
 	_ = s.SendHeaders(s.Context(), status431Fields, true)
 	h.streams.markStreamDone(s.id)
+}
+
+// undispatchedFrameType reports whether ReadFrame delivers no Handler callback
+// at all for this frame type — the codec's "ignore and discard" branch for
+// types it does not recognise (RFC 9113 §5.5). guardHeaderBlock can never fire
+// for one, so the §6.10 check for these has to happen in the reader loop, where
+// the FrameHeader is available.
+//
+// The dispatched set is 0x0..0x9 plus ALTSVC (0x0a) and ORIGIN (0x0c); this is
+// exactly 0x0b and 0x0d..0xff.
+func undispatchedFrameType(t frame.FrameType) bool {
+	return t > frame.FrameContinuation && t != frame.FrameAltSvc && t != frame.FrameOrigin
 }
 
 // guardHeaderBlock enforces RFC 9113 §6.10: once a HEADERS frame without
@@ -128,23 +185,66 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
-	s := h.streams.lookupStream(fh.StreamID)
-	if s == nil {
-		return nil
+	// A client may never send DATA on a server-initiated (even) stream, in any
+	// state. RFC 9113 §5.1 (rfc9113.txt:1020), reserved (local) — which is where a
+	// pushed stream begins and the only side the client ever sees: "Receiving any
+	// type of frame other than RST_STREAM, PRIORITY, or WINDOW_UPDATE on a stream
+	// in this state MUST be treated as a connection error (Section 5.4.1) of type
+	// PROTOCOL_ERROR."
+	//
+	// Checked before the flow-control debit on purpose. A pushed stream has no
+	// receive window — nothing may arrive on it — so letting this fall through
+	// would answer FLOW_CONTROL_ERROR, a connection error with the wrong
+	// diagnosis, before the state rule was ever consulted.
+	if fh.StreamID%2 == 0 {
+		return connError{code: frame.ErrCodeProtocolError, msg: "client DATA on a server-initiated stream"}
 	}
+	// §5.1 (rfc9113.txt:1000): in the idle state "receiving any frame other than
+	// HEADERS or PRIORITY ... MUST be treated as a connection error of type
+	// PROTOCOL_ERROR". Checked before the debit: an idle stream ends the
+	// connection, so there is no window left to keep books for.
+	if h.streams.isIdleStream(fh.StreamID) {
+		return connError{code: frame.ErrCodeProtocolError, msg: "DATA on an idle stream"}
+	}
+	s := h.streams.lookupStream(fh.StreamID)
+	// Account before branching. The connection-level window is owed for every
+	// flow-controlled frame that arrives, including one for a stream that no
+	// longer exists — see onDataReceived. s == nil is tolerated there.
 	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
 		return err
 	}
+	if s == nil {
+		// Closed, reset or refused. §5.1 lets a receiver "treat frames that arrive
+		// on a closed stream after ... RST_STREAM as being in error", but the peer
+		// may simply not have learned yet, so the frame is counted and dropped
+		// rather than escalated.
+		return nil
+	}
+	// §5.1 (rfc9113.txt:1044): in half-closed (remote), "if an endpoint receives
+	// additional frames, other than WINDOW_UPDATE, PRIORITY, or RST_STREAM, for a
+	// stream that is in this state, it MUST respond with a stream error of type
+	// STREAM_CLOSED". Left unenforced, body bytes sent after END_STREAM reached
+	// the handler behind its own EOF.
+	if s.remoteHalfEnded() {
+		// writeServerRSTStream, not writeRSTStreamID: it marks the stream closed
+		// under ss.mu and calls markStreamDone itself. Resetting by identifier alone
+		// leaves ss.closed false, and the handler goroutine — which already holds
+		// this *ServerStream and gates its writes on exactly that flag — would then
+		// put its response on the wire AFTER the RST_STREAM, which is the §5.1
+		// violation this guard exists to prevent.
+		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeStreamClosed)
+		return nil
+	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
 	dataCopy := append([]byte(nil), p...)
-	// Deliver the DATA (and its EOF) to the handler BEFORE releasing the stream:
-	// markStreamDone cancels the stream context, and Recv must not drop the final
-	// event in favour of cancellation.
+	// Record the transition before the push, release after it: the handler must
+	// never see EOF on a stream that still reports itself open, and it must
+	// observe the final event before markStreamDone cancels its context. Until
+	// the server has ended its half too, the stream stays registered
+	// (half-closed remote) so its WINDOW_UPDATE and RST_STREAM still reach it.
+	fullyClosed := end && s.markRemoteEnd()
 	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
-	if end && s.markRemoteEnd() {
-		// Release only once the server has also ended; until then the stream
-		// stays registered (half-closed remote) so its WINDOW_UPDATE and
-		// RST_STREAM still reach it (RFC 7540 §5.1).
+	if fullyClosed {
 		h.streams.markStreamDone(fh.StreamID)
 	}
 	return nil
@@ -174,12 +274,24 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	// subsequent stream on the connection.
 	refused := false
 	if isNew {
-		// RFC 9113 §5.1.1: reject an even or non-increasing client stream ID
-		// (a connection PROTOCOL_ERROR) before allocating anything for it.
+		// RFC 9113 §5.1.1 (rfc9113.txt:1113): "The identifier of a newly
+		// established stream MUST be numerically greater than all streams that the
+		// initiating endpoint has opened or reserved... An endpoint that receives
+		// an unexpected stream identifier MUST respond with a connection error
+		// (Section 5.4.1) of type PROTOCOL_ERROR."
+		//
+		// This deliberately also catches a field section arriving for a stream the
+		// server has already reset — the one-round-trip overlap where the client
+		// had trailers on the wire. §5.1's closed state would allow the softer
+		// stream error there, but only for a stream this endpoint reset, and once
+		// markStreamDone has removed it that is indistinguishable from genuine
+		// identifier reuse without per-stream-identifier memory. Trading §5.1.1's
+		// explicit MUST for a softer reaction to a case we cannot identify is the
+		// worse of the two errors; see docs/RFC_COVERAGE.md.
 		if err := h.streams.validateClientStreamID(fh.StreamID); err != nil {
 			return err
 		}
-		s = newServerStream(fh.StreamID, 8, nil, h.recvWindowSeed)
+		s = newServerStream(fh.StreamID, h.eventBuf, nil, h.recvWindowSeed)
 		if !h.streams.registerStream(fh.StreamID, s) {
 			refused = true
 		}
@@ -234,7 +346,12 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 func (h *serverConnHandler) discardHeaderBlock(hb []byte) error {
 	h.pendingStreamID = 0
 	h.pendingDiscard = false
-	return h.dec.DecodeBlock(hb, func(hpack.HeaderField) error { return nil })
+	if err := h.dec.DecodeBlock(hb, func(hpack.HeaderField) error { return nil }); err != nil {
+		// Same rule as emitHeaderBlock: a block that will not decode has already
+		// desynced the connection's shared dynamic table (RFC 9113 §4.3).
+		return connError{code: frame.ErrCodeCompressionError, msg: "HPACK decoding error: " + err.Error()}
+	}
+	return nil
 }
 
 func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
@@ -273,6 +390,34 @@ func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.Header
 	return h.emitHeaderBlock(s, h.pendingBuf, end, isTrailer)
 }
 
+// ownedCopy moves the decoded field section into a single right-sized backing
+// slab the event owns. h.fieldBuf is reused by the next block on this
+// connection, and the handler goroutine may retain the fields indefinitely
+// (req.Headers alias the slab), so a sync.Pool would be unsafe — like net/http
+// we allocate per request. Pre-sizing to the exact total means the appends never
+// reallocate, keeping the three-index sub-slices valid.
+func (h *serverConnHandler) ownedCopy() []hpack.HeaderField {
+	total := 0
+	for i := range h.scratch {
+		total += len(h.scratch[i].Name) + len(h.scratch[i].Value)
+	}
+	slab := make([]byte, 0, total)
+	copied := make([]hpack.HeaderField, len(h.scratch))
+	for i, f := range h.scratch {
+		nameOff := len(slab)
+		slab = append(slab, f.Name...)
+		valOff := len(slab)
+		slab = append(slab, f.Value...)
+		endOff := len(slab)
+		copied[i] = hpack.HeaderField{
+			Name:      slab[nameOff:valOff:valOff],
+			Value:     slab[valOff:endOff:endOff],
+			Sensitive: f.Sensitive,
+		}
+	}
+	return copied
+}
+
 func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStream, isTrailer bool) error {
 	// The header block is complete: clear the "awaiting CONTINUATION" state so
 	// the interleaving guard re-admits other frame types. hb may alias
@@ -284,6 +429,8 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// no allocation, but it only *flags* — the whole block must still decode or
 	// the shared HPACK dynamic table desyncs from the client's encoder and every
 	// later stream on this connection is corrupted.
+	h.fieldBuf = h.fieldBuf[:0]
+	h.spans = h.spans[:0]
 	malformed := false
 	// SETTINGS_MAX_HEADER_LIST_SIZE is measured over the UNCOMPRESSED list
 	// (RFC 9113 §6.5.2), so it cannot be checked on the encoded block — a small
@@ -293,7 +440,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// must still decode or the shared HPACK dynamic table desyncs.
 	listSize, oversized := 0, false
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
-		if !malformed && hasProhibitedFieldChar(f.Value) {
+		if !malformed && isProhibitedField(f.Name, f.Value, isTrailer) {
 			malformed = true
 		}
 		listSize += len(f.Name) + len(f.Value) + fieldEntryOverhead
@@ -302,23 +449,68 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 			return nil // keep decoding, stop collecting
 		}
 		if !oversized {
-			h.scratch = append(h.scratch, f)
+			h.fieldBuf = append(h.fieldBuf, f.Name...)
+			h.fieldBuf = append(h.fieldBuf, f.Value...)
+			h.spans = append(h.spans, fieldSpan{nameLen: len(f.Name), valLen: len(f.Value), sensitive: f.Sensitive})
 		}
 		return nil
 	})
+	// Materialise the fields now that fieldBuf has stopped growing, so every slice
+	// below points at storage this handler owns.
+	off := 0
+	for _, sp := range h.spans {
+		nameEnd := off + sp.nameLen
+		valEnd := nameEnd + sp.valLen
+		h.scratch = append(h.scratch, hpack.HeaderField{
+			Name:      h.fieldBuf[off:nameEnd:nameEnd],
+			Value:     h.fieldBuf[nameEnd:valEnd:valEnd],
+			Sensitive: sp.sensitive,
+		})
+		off = valEnd
+	}
 	if err != nil {
-		_ = s.Close()
-		return err
+		// RFC 9113 §4.3 (rfc9113.txt:668): "A decoding error in a field block MUST
+		// be treated as a connection error (Section 5.4.1) of type
+		// COMPRESSION_ERROR." Not a stream error, and the reason is structural
+		// rather than a matter of severity: the dynamic table this block was being
+		// decoded against is shared by every stream on the connection, so once a
+		// block fails there is no correct way to decode anything that follows.
+		// Resetting only this stream would leave the peer believing the connection
+		// is still usable — and RST_STREAM(CANCEL), which this used to send, would
+		// additionally invite it to retry the request.
+		return connError{code: frame.ErrCodeCompressionError, msg: "HPACK decoding error: " + err.Error()}
 	}
 	if oversized {
 		// RFC 9110 §5.4 — answer this stream, leave the connection alone.
 		h.respondFieldsTooLarge(s)
 		return nil
 	}
+	// §5.1 (rfc9113.txt:1044) — a field section arriving after the client already
+	// ended its half is a stream error of type STREAM_CLOSED. Without this the
+	// block was classified as trailers (headersReceived is already set) and
+	// delivered to the handler after its EOF: a second, unannounced field section
+	// on a request the application considers complete.
+	//
+	// Deliberately after the decode, never before. The block has to reach the
+	// shared HPACK decoder or the connection's dynamic table falls a step behind
+	// the client's encoder and every later stream decodes corruption.
+	if s.remoteHalfEnded() {
+		// See OnData: writeServerRSTStream also closes the stream for writing, so
+		// the handler cannot answer on a stream this just reset.
+		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeStreamClosed)
+		return nil
+	}
 	// RFC 9113 §8.3 — request pseudo-headers must be present, unique, defined,
 	// and ahead of every regular field. Only a request header block carries
 	// them; a trailer section is judged by the character rules alone.
 	if !isTrailer && !validRequestPseudoHeaders(h.scratch) {
+		malformed = true
+	}
+	// RFC 9113 §8.1 (rfc9113.txt:2415) — a trailer section is the end of the
+	// message: "The last frame in the sequence bears an END_STREAM flag". A
+	// trailer HEADERS without it leaves the request open behind a field section
+	// that claimed to close it.
+	if isTrailer && !endStream {
 		malformed = true
 	}
 	if malformed {
@@ -340,40 +532,20 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	if isTrailer {
 		evType = EventTrailers
 	}
-	// Copy the decoded headers into a single right-sized backing slab the event
-	// owns. The reader goroutine reuses h.scratch immediately after this returns,
-	// and the handler goroutine may retain the fields (req.Headers alias the
-	// slab), so a sync.Pool would be unsafe — like net/http we allocate per
-	// request. Pre-sizing to the exact total means the appends never reallocate,
-	// keeping the three-index sub-slices valid.
-	total := 0
-	for i := range h.scratch {
-		total += len(h.scratch[i].Name) + len(h.scratch[i].Value)
-	}
-	slab := make([]byte, 0, total)
-	copied := make([]hpack.HeaderField, len(h.scratch))
-	for i, f := range h.scratch {
-		nameOff := len(slab)
-		slab = append(slab, f.Name...)
-		valOff := len(slab)
-		slab = append(slab, f.Value...)
-		endOff := len(slab)
-		copied[i] = hpack.HeaderField{
-			Name:      slab[nameOff:valOff:valOff],
-			Value:     slab[valOff:endOff:endOff],
-			Sensitive: f.Sensitive,
-		}
-	}
+	copied := h.ownedCopy()
 
+	// Record the state transition BEFORE handing the event over, so a stream that
+	// has told its handler "this is the end" never simultaneously reports itself
+	// as still open. Releasing it stays AFTER the push, so the handler observes
+	// the headers and EOF before its context is cancelled — a half-closed (remote)
+	// stream stays registered for its WINDOW_UPDATE and RST_STREAM (§5.1).
+	fullyClosed := endStream && s.markRemoteEnd()
 	s.push(StreamEvent{
 		Type:      evType,
 		Headers:   copied,
 		EndStream: endStream,
 	})
-	if endStream && s.markRemoteEnd() {
-		// Release once both halves have ended (a half-closed-remote stream stays
-		// registered for WINDOW_UPDATE/RST_STREAM, RFC 7540 §5.1). AFTER the push
-		// so the handler observes the headers/EOF before the context is cancelled.
+	if fullyClosed {
 		h.streams.markStreamDone(s.id)
 	}
 	return nil
@@ -387,11 +559,20 @@ func (h *serverConnHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
+	// §5.1 (rfc9113.txt:1000) — RST_STREAM is not one of the two frames an idle
+	// stream accepts, and §6.4 (:1596) restates it: "If a RST_STREAM frame
+	// identifying an idle stream is received, the recipient MUST treat this as a
+	// connection error of type PROTOCOL_ERROR." Checking it also stops these
+	// being charged as rapid resets, which made the CVE-2023-44487 budget
+	// answerable by frames that had never opened a stream at all.
+	if h.streams.isIdleStream(fh.StreamID) {
+		return connError{code: frame.ErrCodeProtocolError, msg: "RST_STREAM on an idle stream"}
+	}
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
-		// RST_STREAM for an unknown/already-finished stream. A flood of
-		// these (e.g. resetting streams the server already closed) is the
-		// classic Rapid Reset signature, so still account it as rapid.
+		// RST_STREAM for an already-finished stream. A flood of these (e.g.
+		// resetting streams the server already closed) is the classic Rapid Reset
+		// signature, so still account it as rapid.
 		return h.streams.onClientRSTStream(fh.StreamID, true)
 	}
 	// A reset is "rapid" (cheap-to-trigger, no useful work) when the
@@ -439,7 +620,17 @@ func (h *serverConnHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error 
 }
 
 func (h *serverConnHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
-	return h.guardHeaderBlock()
+	if err := h.guardHeaderBlock(); err != nil {
+		return err
+	}
+	// RFC 9113 §6.8 (rfc9113.txt:1990): "Once sent, the sender will ignore frames
+	// sent on streams initiated by the receiver if the stream has an identifier
+	// higher than the included last stream identifier. Receivers of a GOAWAY frame
+	// MUST NOT open additional streams on the connection". For a server the only
+	// way to open one is server push, so this is what stops a push racing a
+	// shutdown the client has already announced.
+	h.streams.notePeerGoAway()
+	return nil
 }
 
 func (h *serverConnHandler) OnWindowUpdate(fh frame.FrameHeader, increment uint32) error {

@@ -40,13 +40,23 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	initial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	sc.psMu.RUnlock()
 	s.mu.Lock()
-		s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
+	s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
 	s.mu.Unlock()
 	s.sc = sc
 
+	// Count only client-initiated (odd) streams: the limit this server advertises
+	// governs what the CLIENT may open. Pushed streams are even and count against
+	// the peer's limit instead (see writePushPromise), so including them here
+	// would let the server's own pushes refuse the client's requests.
 	limit := int(sc.opts.AdvertisedSettings.MaxConcurrentStreams)
 	sc.smu.Lock()
-	if limit > 0 && len(sc.streams) >= limit {
+	clientOpen := 0
+	for sid := range sc.streams {
+		if sid%2 == 1 {
+			clientOpen++
+		}
+	}
+	if limit > 0 && clientOpen >= limit {
 		sc.smu.Unlock()
 		// At the concurrency limit: refuse rather than register. Record the ID as
 		// used (RFC 9113 §5.1.1) so it cannot be reused, then RST (best-effort,
@@ -97,6 +107,11 @@ func (sc *ServerConn) onClientRSTStream(_ uint32, rapid bool) error {
 	}
 	return nil
 }
+
+// notePeerGoAway records the client's GOAWAY. From that point the server must
+// not open new streams on this connection (RFC 9113 §6.8), which for a server
+// means server push.
+func (sc *ServerConn) notePeerGoAway() { sc.peerGoAway.Store(true) }
 
 // markStreamDone cleans up a finished stream.
 func (sc *ServerConn) markStreamDone(id uint32) {
@@ -181,12 +196,18 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 	newInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	sc.psMu.Unlock()
 
+	// The encoder is shared with every writer on this connection, and resizing its
+	// dynamic table emits a Dynamic Table Size Update into the next block it
+	// encodes (RFC 7541 §4.2). Taking wmu keeps that from landing in the middle of
+	// a header block another goroutine is already writing.
+	sc.wmu.Lock()
 	for i := range s.N {
 		p := s.Pairs[i]
 		if p.ID == frame.SettingHeaderTableSize {
 			sc.enc.SetMaxDynamicTableSize(p.Value)
 		}
 	}
+	sc.wmu.Unlock()
 
 	// Retroactive INITIAL_WINDOW_SIZE delta on all open streams.
 	if newInitial != oldInitial {
@@ -205,7 +226,7 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 				st.mu.Unlock()
 				return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)}
 			}
-						st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
+			st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
 			st.mu.Unlock()
 		}
 
@@ -226,18 +247,33 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 			sc.fcOutMu.Unlock()
 			return connError{code: frame.ErrCodeFlowControlError, msg: "WINDOW_UPDATE overflowed connection send window"}
 		}
-				sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
+		sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
 		sc.fcOutCond.Broadcast()
 		sc.fcOutMu.Unlock()
 		return nil
 	}
+	// §5.1 (rfc9113.txt:1000): WINDOW_UPDATE is not one of the two frames an idle
+	// stream accepts.
+	if sc.isIdleStream(streamID) {
+		return connError{code: frame.ErrCodeProtocolError, msg: "WINDOW_UPDATE on an idle stream"}
+	}
 	s := sc.lookupStream(streamID)
 	if s == nil {
+		// §6.9 (rfc9113.txt:2093) carves this out explicitly: a WINDOW_UPDATE for a
+		// stream the receiver has already closed "MUST NOT be treated as an error"
+		// — the peer cannot have known in time.
 		return nil
 	}
 	s.mu.Lock()
 	newVal := int64(s.sendWindow) + int64(increment)
 	if newVal > int64(maxWindow) {
+		// Mark it closed while the lock is still held. The EventReset below reaches
+		// the handler before writeServerRSTStream puts the frame on the wire, so a
+		// handler that reacts by calling Close would otherwise emit a second
+		// RST_STREAM — which RFC 9113 §5.4.2 (rfc9113.txt:1201) asks endpoints to
+		// avoid: "An endpoint SHOULD NOT send more than one RST_STREAM frame for
+		// any stream."
+		s.closed = true
 		s.mu.Unlock()
 		// RFC 9113 §6.9.1: a WINDOW_UPDATE overflowing a STREAM flow-control
 		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a
@@ -249,7 +285,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeFlowControlError)
 		return nil
 	}
-		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
+	s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
 	s.mu.Unlock()
 	sc.fcOutMu.Lock()
 	sc.fcOutCond.Broadcast()
@@ -258,23 +294,32 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 }
 
 // onDataReceived debits flow-control windows for an inbound DATA frame.
+//
+// s may be nil: the stream has been reset, refused or has already completed.
+// The connection-level half still runs, and must. RFC 9113 §6.9.1
+// (rfc9113.txt:2113) — "A receiver MUST count the padding and the entire size of
+// a frame ... against its connection-level flow-control window even if the
+// frame is in error"; §6.8 (:2044) says the same of frames on streams discarded
+// after a GOAWAY. The peer has already debited those octets from its own send
+// window, so a receiver that neither counts nor refunds them burns connection
+// credit permanently: repeat it and the peer's window drains to zero and every
+// stream on the connection wedges.
 func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
-		debit := int32(length) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
+	debit := int32(length) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
 
-	s.mu.Lock()
-	s.recvWindow -= debit
-	if s.recvWindow < 0 {
+	if s != nil {
+		// Debit only. The per-stream window is refunded when the application takes
+		// delivery of the bytes (ServerStream.creditConsumed), not when they
+		// arrive — refunding on receipt handed the peer credit for data that was
+		// merely buffered, so the advertised window bounded nothing.
+		s.mu.Lock()
+		s.recvWindow -= debit
+		if s.recvWindow < 0 {
+			s.mu.Unlock()
+			return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: flow control error", s.id)}
+		}
 		s.mu.Unlock()
-		return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: flow control error", s.id)}
 	}
-	s.recvRefundPending += length
-	streamRefund := uint32(0)
-	if s.recvRefundPending >= recvWindowRefundThreshold {
-		streamRefund = s.recvRefundPending
-		s.recvRefundPending = 0
-				s.recvWindow += int32(streamRefund) //nolint:gosec // G115: refund ≤ initial
-	}
-	s.mu.Unlock()
 
 	sc.fcMu.Lock()
 	sc.connRecvWindow -= debit
@@ -287,15 +332,10 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	if sc.connRefundPending >= recvWindowRefundThreshold {
 		connRefund = sc.connRefundPending
 		sc.connRefundPending = 0
-				sc.connRecvWindow += int32(connRefund) //nolint:gosec // G115: refund ≤ initial
+		sc.connRecvWindow += int32(connRefund) //nolint:gosec // G115: refund ≤ initial
 	}
 	sc.fcMu.Unlock()
 
-	if streamRefund > 0 {
-		if err := sc.writeWindowUpdate(s.id, streamRefund); err != nil {
-			return err
-		}
-	}
 	if connRefund > 0 {
 		if err := sc.writeWindowUpdate(0, connRefund); err != nil {
 			return err
@@ -320,6 +360,21 @@ func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fi
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
 
+	// Decide BEFORE encoding. EncodeBlock mutates the connection's shared HPACK
+	// dynamic table, and refusing afterwards leaves that table holding entries the
+	// peer never received — so its decoder falls a step behind and every LATER
+	// response on the connection is undecodable. That is the decode-side trap
+	// (emitHeaderBlock) seen from the encoder, and it is why this check cannot
+	// simply measure len(block).
+	// Budget the frame payload, not just the field block: a HEADERS frame carrying
+	// a priority block spends 5 octets before the fragment begins (§6.2).
+	budget := sc.peerMaxFrameSize()
+	if prio != nil {
+		budget -= 5
+	}
+	if !fieldsFitFrame(fields, budget) {
+		return ErrHeaderBlockTooLarge
+	}
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := sc.enc.EncodeBlock(*buf, fields)
@@ -405,11 +460,53 @@ func (sc *ServerConn) writeServerDataChunks(ctx context.Context, ss *ServerStrea
 	return nil
 }
 
+// fieldLineOverhead bounds the HPACK framing a single field line can cost on top
+// of its name and value: one prefix octet for the representation, plus at most
+// four octets for each of the two length integers. Huffman coding only ever
+// shrinks the payload, and an indexed or incrementally-indexed field costs far
+// less, so a field section whose raw size fits within a frame is certain to fit
+// once encoded.
+const fieldLineOverhead = 9
+
+// fieldsFitFrame reports whether the field section is guaranteed to encode into
+// limit octets or fewer, WITHOUT encoding it — which is the point: the encoder's
+// dynamic table must not be disturbed by a block that is never sent.
+//
+// Deliberately conservative. It can refuse a section that HPACK would have
+// compressed under the limit, but the alternative — encode, measure, then throw
+// the block away — desyncs the connection.
+func fieldsFitFrame(fields []hpack.HeaderField, limit int) bool {
+	total := 0
+	for i := range fields {
+		total += len(fields[i].Name) + len(fields[i].Value) + fieldLineOverhead
+		if total > limit {
+			return false
+		}
+	}
+	return true
+}
+
+// peerMaxFrameSize is the largest frame payload the peer has said it will
+// accept (RFC 9113 §6.5.2 SETTINGS_MAX_FRAME_SIZE, initial value 2^14).
+func (sc *ServerConn) peerMaxFrameSize() int {
+	sc.psMu.RLock()
+	defer sc.psMu.RUnlock()
+	return int(settingValue(sc.peerSettings, frame.SettingMaxFrameSize, 16384))
+}
+
 // writeServerRSTStream sends RST_STREAM for a server stream.
+//
+// Resetting a stream closes it, so the flag is set here rather than left to
+// each caller: §5.1 (rfc9113.txt:1082) forbids sending anything but PRIORITY
+// afterwards, and a later ServerStream.Close on the same stream must be the
+// no-op it already is for a stream that ended normally.
 func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
 	if sc.closed.Load() {
 		return ErrConnClosed
 	}
+	ss.mu.Lock()
+	ss.closed = true
+	ss.mu.Unlock()
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
 	if err := sc.fr.WriteRSTStream(ss.id, code); err != nil {
@@ -417,6 +514,38 @@ func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode)
 	}
 	sc.bumpFramesSent()
 	sc.markStreamDone(ss.id)
+	return nil
+}
+
+// writeRSTStreamID resets a stream by identifier, for the two codec-detected
+// violations RFC 9113 scopes to a stream (§6.3 a wrong-length PRIORITY, §6.9.1 a
+// zero-increment WINDOW_UPDATE). Those arrive with nothing but a FrameHeader —
+// the stream may be idle, or may never exist — so writeServerRSTStream's
+// *ServerStream signature cannot serve them.
+//
+// Deliberately does not call markStreamDone: a malformed PRIORITY naming an idle
+// stream must not evict a live sibling's registry entry.
+func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	// If the identifier does name a live stream, close it for writing before the
+	// reset goes out. A handler goroutine holding that *ServerStream gates its
+	// writes on ss.closed alone, so without this it would answer on a stream the
+	// server has just reset — RFC 9113 §5.1 (rfc9113.txt:1082) forbids sending
+	// anything but PRIORITY there. The registry entry is left alone: a malformed
+	// PRIORITY naming an idle stream must not evict a live sibling.
+	if ss := sc.lookupStream(id); ss != nil {
+		ss.mu.Lock()
+		ss.closed = true
+		ss.mu.Unlock()
+	}
+	sc.wmu.Lock()
+	defer sc.wmu.Unlock()
+	if err := sc.fr.WriteRSTStream(id, code); err != nil {
+		return err
+	}
+	sc.bumpFramesSent()
 	return nil
 }
 
@@ -445,7 +574,7 @@ func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, 
 			avail = connWin
 		}
 		if avail > 0 {
-				n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+			n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
 			if n > avail {
 				n = avail
 			}
@@ -500,7 +629,7 @@ func (sc *ServerConn) acquireSendCreditsSlow(ctx context.Context, ss *ServerStre
 			avail = connWin
 		}
 		if avail > 0 {
-				n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+			n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
 			if n > avail {
 				n = avail
 			}
@@ -529,7 +658,24 @@ func (sc *ServerConn) writeWindowUpdate(streamID, increment uint32) error {
 }
 
 // setPeerSetting merges a SETTINGS pair into params.
+//
+// Identifiers this server does not implement are dropped rather than stored.
+// RFC 9113 §6.5.2 (rfc9113.txt:1888): "An endpoint that receives a SETTINGS frame
+// with any unknown or unsupported identifier MUST ignore that setting."
+// Storing them was not merely untidy: SettingsParams holds a fixed 16 pairs, so a
+// peer sending sixteen invented identifiers filled the array and every real
+// setting after it was silently dropped.
 func setPeerSetting(params *frame.SettingsParams, id frame.SettingID, val uint32) {
+	//nolint:exhaustive // the listed six are the settings this server implements;
+	// everything else, SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441) included, is
+	// unsupported here and must therefore be ignored rather than stored.
+	switch id {
+	case frame.SettingHeaderTableSize, frame.SettingEnablePush,
+		frame.SettingMaxConcurrentStreams, frame.SettingInitialWindowSize,
+		frame.SettingMaxFrameSize, frame.SettingMaxHeaderListSize:
+	default:
+		return
+	}
 	for i := range params.N {
 		if params.Pairs[i].ID == id {
 			params.Pairs[i].Value = val

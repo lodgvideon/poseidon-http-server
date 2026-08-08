@@ -24,6 +24,27 @@ func (s *Server) ListenAndServeTLS(ctx context.Context, certFile, keyFile string
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{"h2"},
 		MinVersion:   tls.VersionTLS12,
+		// RFC 9113 §9.2.2 (rfc9113.txt:3067): "A deployment of HTTP/2 over TLS 1.2
+		// SHOULD NOT use any of the cipher suites that are listed in Appendix A."
+		// Appendix A is a denylist of several hundred entries; the tractable way to
+		// honour it is to name the allowed suites instead. These six are the
+		// AEAD-with-ECDHE set §9.2.2 describes as the target ("TLS_ECDHE_RSA_WITH_
+		// AES_128_GCM_SHA256... is available in TLS 1.2").
+		//
+		// crypto/tls ignores CipherSuites for TLS 1.3, so this bounds only the 1.2
+		// negotiation — which is the entire scope of Appendix A.
+		//
+		// Deliberately not applied in ListenAndServeTLSConfig: that path takes the
+		// caller's config, and silently overriding an explicit cipher choice is a
+		// worse failure than the SHOULD NOT it would fix.
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+		},
 	}
 	return s.ListenAndServeTLSConfig(ctx, tlsConfig)
 }

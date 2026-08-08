@@ -16,6 +16,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+
 	"github.com/lodgvideon/poseidon-http-server/conn"
 )
 
@@ -291,11 +292,40 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn, cfg *tls.Config) {
 		_ = nc.Close()
 		return
 	}
+	if cs, ok := tlsAdmissible(nc); !ok {
+		s.logger.Printf("poseidon: rejecting %s: alpn=%q tls=%#04x", nc.RemoteAddr(), cs.NegotiatedProtocol, cs.Version)
+		_ = sc.GoAway(frame.ErrCodeInadequateSecurity)
+		_ = sc.Close()
+		return
+	}
 	s.trackConn(sc, true)
 	defer s.trackConn(sc, false)
 	// Resolve, once per connection, the certificate this server presented. Every
 	// stream on the connection is judged against it (RFC 9110 §7.4).
 	s.acceptLoop(ctx, sc, presentedLeaf(cfg, nc))
+}
+
+// tlsAdmissible reports whether a TLS connection actually satisfies the two
+// conditions RFC 9113 places on HTTP/2 over TLS. A cleartext connection is not
+// this function's business and is always admitted.
+//
+//	§3.3 (rfc9113.txt:437) — "HTTP/2 connections over TLS MUST use protocol
+//	negotiation in TLS [TLS-ALPN]."
+//	§9.2 (rfc9113.txt:3038) — "Implementations of HTTP/2 MUST use TLS version 1.2
+//	[TLS12] or higher for HTTP/2 over TLS."
+//
+// Both are checked against what was actually negotiated rather than against the
+// configuration, because a *tls.Config can be supplied by the caller
+// (ListenAndServeTLSConfig, ServeTLSConfig) or already be in force on a
+// connection handed to Serve. Called after conn.NewServerConn so the lazy TLS
+// handshake has completed and ConnectionState is populated.
+func tlsAdmissible(nc net.Conn) (tls.ConnectionState, bool) {
+	tc, ok := nc.(*tls.Conn)
+	if !ok {
+		return tls.ConnectionState{}, true
+	}
+	cs := tc.ConnectionState()
+	return cs, cs.NegotiatedProtocol == "h2" && cs.Version >= tls.VersionTLS12
 }
 
 // acceptLoop reads streams from a ServerConn with optional idle timeout.
@@ -306,6 +336,15 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn, leaf *x509
 			stream, err := sc.AcceptStream(acceptCtx)
 			cancel()
 			if err != nil {
+				// A deadline with streams still in flight does not end anything: the
+				// connection is busy, it just has not opened a NEW stream lately.
+				// Returning here would leave the socket open with nobody accepting
+				// on it, so the response in flight completes and every request after
+				// it is ignored. Keep waiting instead.
+				if errors.Is(err, context.DeadlineExceeded) && sc.ActiveStreams() > 0 {
+					continue
+				}
+				s.closeIfFinished(sc, err)
 				return
 			}
 			if !s.spawnStream(stream, leaf) {
@@ -316,11 +355,41 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn, leaf *x509
 	for {
 		stream, err := sc.AcceptStream(ctx)
 		if err != nil {
+			s.closeIfFinished(sc, err)
 			return
 		}
 		if !s.spawnStream(stream, leaf) {
 			return
 		}
+	}
+}
+
+// closeIfFinished tears the connection down on the two exits from the accept
+// loop that mean it is over, and leaves it alone on the one that does not.
+//
+// The transport is nobody else's to close once this loop returns: serveConn
+// untracks the connection immediately afterwards, so a connection left open
+// here is invisible to Shutdown and survives as a leaked descriptor for the
+// life of the process.
+//
+//   - ErrConnClosed means the reader goroutine has already exited, whatever the
+//     cause. Nothing more will ever be read; Close reclaims the socket and the
+//     framer's buffer.
+//   - A deadline means no NEW stream arrived within IdleTimeout, which is not
+//     the same as an idle connection. A single slow request — a gRPC
+//     server-streaming call, an SSE feed, a large download — occupies the
+//     connection for minutes without opening another stream, and closing it
+//     would cancel every in-flight handler's context and cut the response in
+//     half. Only a connection with no live streams is actually idle.
+//   - Anything else (a cancelled parent context from Shutdown, a drain exit) is
+//     someone else's teardown already in progress; touching the connection here
+//     would truncate responses that are being drained on purpose.
+func (s *Server) closeIfFinished(sc *conn.ServerConn, err error) {
+	switch {
+	case errors.Is(err, conn.ErrConnClosed):
+		_ = sc.Close()
+	case errors.Is(err, context.DeadlineExceeded) && sc.ActiveStreams() == 0:
+		_ = sc.Close()
 	}
 }
 
@@ -738,7 +807,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Send GOAWAY to all connections so clients stop opening new streams.
 	for _, sc := range conns {
-		_ = sc.GoAway(frame.ErrCodeNoError)
+		_ = sc.GoAwayGraceful()
 	}
 
 	// Wait for in-flight streams to complete or context cancellation.

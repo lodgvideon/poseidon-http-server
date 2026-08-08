@@ -86,12 +86,39 @@ serve HTTP/1.1.
 
 ## RFC 9113 — HTTP/2
 
-The HTTP/2 conformance audit has not been run yet; these rows arrived via the
-HTTP/1.1 audit, which found the target URI was reconstructed with no validation
-at all and landed on §8.3 as the HTTP/2-native way to state the rule.
+The HTTP/2 audit is in
+[rfc-analysis/HTTP2_SERVER_RECONCILIATION.md](rfc-analysis/HTTP2_SERVER_RECONCILIATION.md).
+The §8.3 and §8.4 rows below predate it — they arrived via the HTTP/1.1 audit,
+which found the target URI was reconstructed with no validation at all and
+landed on §8.3 as the HTTP/2-native way to state the rule.
 
 | Section | Type | Test |
 |---------|------|------|
+| §3.3 (`rfc9113.txt:437`), §9.2 (`:3038`) | Conformance | `TestConformance_RFC9113_Sec33_And92_TLSAdmission` |
+| §4.2 (`rfc9113.txt:513`) | Conformance | `TestConformance_RFC9113_Sec42_OversizedFrame_GoAwayFrameSizeError` |
+| §4.2 (`rfc9113.txt:513`, receiving side) | Conformance | `TestConformance_RFC9113_Sec42_AdvertisedMaxFrameSizeIsAccepted` |
+| §4.3 (`rfc9113.txt:668`) | Conformance | `TestConformance_RFC9113_Sec43_HPACKDecodeError_IsAConnectionError` |
+| §5.1 idle (`rfc9113.txt:1000`), §6.4 (`:1596`) | Conformance | `TestConformance_RFC9113_Sec51_IdleStream_NonHeadersFrame_ConnectionError` |
+| §5.2.1 (`rfc9113.txt:1274`) | Conformance | `TestConformance_RFC9113_Sec521_WindowBoundsUnconsumedData` |
+| §5.1 idle, control | Conformance | `TestConformance_RFC9113_Sec51_PriorityOnIdleStreamIsPermitted` |
+| §5.1 half-closed remote (`rfc9113.txt:1044`) | Conformance | `TestConformance_RFC9113_Sec51_HalfClosedRemote_DataAfterEndStream` |
+| §5.1 half-closed remote + HPACK sync | Conformance | `TestConformance_RFC9113_Sec51_HalfClosedRemote_HeadersAfterEndStream` |
+| §5.4 (`rfc9113.txt:1159`), §6.1–§6.9 frame syntax | Conformance | `TestConformance_RFC9113_Sec54_CodecErrorsAreReportedWithAnErrorCode` |
+| §5.4.1 (`rfc9113.txt:1173`) | Conformance | `TestConformance_RFC9113_Sec541_ConnectionErrorClosesTheTransport` |
+| §5.4.2 (`rfc9113.txt:1197`), §5.1 (`:1082`) | Conformance | `TestConformance_RFC9113_Sec542_NoResetInResponseToReset` |
+| §6.3 (`rfc9113.txt:1519`) | Conformance | `TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError` |
+| §6.6 (`rfc9113.txt:1899`), §5.1.2 (`:1140`), §8.4 | Conformance | `TestConformance_RFC9113_Sec66_PushPreconditions` |
+| §6.8 (`rfc9113.txt:2029`, `:2035`) | Conformance | `TestConformance_RFC9113_Sec68_GracefulShutdownIsTwoPhase` |
+| §6.8 (`rfc9113.txt:1990`) | Conformance | `TestConformance_RFC9113_Sec68_PushRefusedAfterPeerGoAway` |
+| §6.9.1 (`rfc9113.txt:2113`), §6.8 (`:2044`) | Conformance | `TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWindow` |
+| §6.9.1 split: connection on receipt, stream on consumption | Conformance | `TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead` |
+| §6.9.1 (`rfc9113.txt:2125`, both clauses) | Conformance | `TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit` |
+| §6.10 (`rfc9113.txt:2263`), §5.5 (`:1230`) | Conformance | `TestConformance_RFC9113_Sec610_MalformedFrameDuringOpenFieldBlock` |
+| §8.1 trailers (`rfc9113.txt:2411`, `:2415`) | Conformance | `TestConformance_RFC9113_Sec81_TrailerRules` |
+| §8.2.1 (`rfc9113.txt:2508`, `:2513`, `:2517`, `:2521`), §8.2.2 (`:2547`, `:2559`) | Conformance | `TestConformance_RFC9113_Sec821_MalformedFieldSyntax_StreamError` |
+| §8.2.1 control | Conformance | `TestConformance_RFC9113_Sec821_LegalFieldsAccepted` |
+| §8.2.3 (`rfc9113.txt:2585`) | Conformance | `TestConformance_RFC9113_Sec823_CookiesConcatenated` |
+| §8.2.3 control | Conformance | `TestConformance_RFC9113_Sec823_SingleCookieUnchanged` |
 | §8.3 (`rfc9113.txt:2614`, `:2619`, `:2624`, `:2690`, `:2699`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError` |
 | §8.3 (`rfc9113.txt:2643`, `:2703`, `:2710`) | Conformance | `TestConformance_RFC9113_Sec83_ValidRequestsAccepted` |
 | §8.3 / RFC 9110 §4.2.3 (`rfc9110.txt:1179`) | Conformance | `TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive` |
@@ -120,6 +147,36 @@ had been made moot by the merged fixes, five were real and are fixed, one
 recorded in [ADR-0004](adr/0004-grpc-framing-and-status-trailers.md), and one
 flipped — the reviewer was right that a bug existed but wrong about the rule;
 the binding one turned out to be §8.6, not §9.3.2.
+
+The HTTP/2 audit confirmed 17 root-cause clusters. Sixteen are closed by the
+rows above. Two obligations are knowingly left open, both for reasons that are
+decisions rather than oversights:
+
+- **§5.2.2 (`rfc9113.txt:1327`)** — *"Endpoints MUST read and process HTTP/2
+  frames from the TCP receive buffer as soon as data is available."* Three
+  control-frame writes still happen on the reader goroutine (the refunding
+  WINDOW_UPDATE, the SETTINGS ACK, the PING ACK), so a peer that stops reading
+  can block the reader in a write and stall the connection. Closing it properly
+  means a dedicated writer goroutine, which changes the model
+  [ADR-0003](adr/0003-serverconn-accept-stream-goroutine-model.md) records; that is a design change, not
+  a conformance patch, and belongs in its own PR with its own ADR amendment.
+- **§5.1.1 (`rfc9113.txt:1113`) vs §5.1 closed-state** — a field section
+  arriving for a stream the server has just reset draws
+  GOAWAY(PROTOCOL_ERROR) rather than the stream error §5.1 would permit. Once
+  `markStreamDone` has removed the stream, an in-flight trailer and genuine
+  identifier reuse are indistinguishable without per-identifier memory, and
+  §5.1.1 makes the connection error mandatory for an unexpected identifier.
+  Softening it would trade an explicit MUST for a case that cannot be
+  identified.
+
+Two defects found during the audit belong to the codec module and are filed
+there rather than worked around here: `frame.ErrInvalidPadding` is never
+returned, because the real sentinel lives in an internal package
+(poseidon-http-client#402), and `ErrSettingsLength` conflates a malformed length
+with a legal SETTINGS frame carrying more than sixteen entries
+(poseidon-http-client#401). `codecErrCode`'s default arm answers PROTOCOL_ERROR
+for anything it cannot name, which covers the first correctly today and will
+keep reporting something sane if the codec grows a new sentinel.
 
 The 421 check (RFC 9110 §7.4) enforces only where the presented certificate is
 knowable without guessing: a TLS listener served through

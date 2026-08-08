@@ -71,6 +71,17 @@ type ServerConn struct {
 	// goAwayRequested flags that the server has initiated GOAWAY.
 	goAwayRequested atomic.Bool
 
+	// goAwaySentID is the last stream identifier carried by the most recent
+	// GOAWAY, so a later one can never name a larger stream (RFC 9113 §6.8).
+	// Seeded to the maximum as the "nothing sent yet" sentinel. Guarded by wmu,
+	// which every GOAWAY write site already holds across its write.
+	goAwaySentID uint32
+
+	// peerGoAway records that the CLIENT has sent GOAWAY. After that the server
+	// must not create new streams on this connection, which for a server means
+	// no server push (RFC 9113 §6.8).
+	peerGoAway atomic.Bool
+
 	// rapidResetCount accumulates client-initiated RST_STREAM frames that
 	// reset a stream before it produced useful work (CVE-2023-44487).
 	// Compared against opts.rapidResetBudget(). Atomic: incremented by the
@@ -159,6 +170,12 @@ type ServerConnOptions struct {
 // to shed Slowloris-style connections that never finish the preface.
 const defaultHandshakeTimeout = 10 * time.Second
 
+// defaultStreamEventBuffer is the per-stream event channel capacity. It absorbs
+// the scheduling gap between the single reader goroutine and one handler
+// goroutine; the peer's flow-control window is what bounds how far ahead the
+// reader can get, so this only has to cover jitter, not backlog.
+const defaultStreamEventBuffer = 8
+
 // rapidResetFloor is the minimum Rapid Reset budget regardless of how
 // small MaxConcurrentStreams is, so low-concurrency configs still tolerate
 // a reasonable burst of legitimate cancellations.
@@ -171,7 +188,7 @@ func (o ServerConnOptions) defaulted() ServerConnOptions {
 	// then advertised a 0 recv window and deadlocked every request body.
 	o.AdvertisedSettings = o.AdvertisedSettings.defaulted()
 	if o.StreamEventBuffer <= 0 {
-		o.StreamEventBuffer = 8
+		o.StreamEventBuffer = defaultStreamEventBuffer
 	}
 	if o.MaxRapidResets == 0 {
 		budget := int(o.AdvertisedSettings.MaxConcurrentStreams) * 4
@@ -285,14 +302,9 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		connRecvWindow:     opts.effectiveConnRecvWindow(),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 		pushIDs:            newPushIDCounter(),
+		goAwaySentID:       maxStreamID,
 	}
-	// Wrap the transport so every frame byte read/written is tallied for Stats
-	// (BytesReceived/BytesSent). The 24-byte preface read above is not counted;
-	// everything from the SETTINGS exchange onward is.
-	sc.fr = frame.NewFramer(
-		&countingWriter{w: nc, n: &sc.atomicBytesSent},
-		&countingReader{r: nc, n: &sc.atomicBytesReceived},
-	)
+	sc.fr = newCountingFramer(nc, sc, opts.AdvertisedSettings.MaxFrameSize)
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
 	// Connection-lifetime context: cancelled on Close or when the caller's ctx
 	// is cancelled. Per-stream contexts derive from this.
@@ -309,7 +321,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	// Steps 3-5: handshake — read client SETTINGS, send ACK, read ACK.
 	// Create the real frame handler early so that non-SETTINGS frames
 	// arriving during the handshake (e.g. HEADERS) are not lost.
-	sc.handler = newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize), int32(sc.opts.AdvertisedSettings.InitialWindowSize)) //nolint:gosec // G115: AdvertisedSettings.defaulted() clamps InitialWindowSize to ≤ 2^31-1
+	sc.handler = newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize), int32(sc.opts.AdvertisedSettings.InitialWindowSize), sc.opts.StreamEventBuffer) //nolint:gosec // G115: AdvertisedSettings.defaulted() clamps InitialWindowSize to ≤ 2^31-1
 	peer, err := handshakeServerSettings(ctx, sc.fr, sc.handler)
 	if err != nil {
 		_ = nc.Close()
@@ -328,7 +340,9 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		return nil, verr
 	}
 	sc.psMu.Lock()
-	sc.peerSettings = peer
+	for i := range peer.N {
+		setPeerSetting(&sc.peerSettings, peer.Pairs[i].ID, peer.Pairs[i].Value)
+	}
 	sc.psMu.Unlock()
 	sc.applyInitialPeerSettings(peer)
 
@@ -391,14 +405,11 @@ func readClientPreface(nc net.Conn) error {
 //
 // Returns the client's SETTINGS.
 func handshakeServerSettings(ctx context.Context, fr *frame.Framer, delegate frame.Handler) (frame.SettingsParams, error) {
-	rec := &settingsRecorder{delegate: delegate}
+	rec := &settingsRecorder{delegate: delegate, fr: fr}
 	for !rec.peerSeen {
 		if err := readOneFrame(ctx, fr, rec); err != nil {
 			return frame.SettingsParams{}, fmt.Errorf("server read client settings: %w", err)
 		}
-	}
-	if err := fr.WriteSettingsAck(); err != nil {
-		return frame.SettingsParams{}, fmt.Errorf("server write settings ack: %w", err)
 	}
 	for !rec.ackSeen {
 		if err := readOneFrame(ctx, fr, rec); err != nil {
@@ -420,12 +431,31 @@ func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 	if sc.closed.Load() {
 		return nil, ErrConnClosed
 	}
+	// Drain what is already queued before considering the connection over. Both
+	// channels can be ready at once — acceptCh is buffered and the reader
+	// registers a stream before it exits — and select would then pick uniformly
+	// at random, silently discarding requests that were already accepted and
+	// counted. Same reason ServerStream.Recv checks its buffer first.
 	select {
 	case ss, ok := <-sc.acceptCh:
 		if !ok {
 			return nil, ErrConnClosed
 		}
 		return ss, nil
+	default:
+	}
+	select {
+	case ss, ok := <-sc.acceptCh:
+		if !ok {
+			return nil, ErrConnClosed
+		}
+		return ss, nil
+	case <-sc.readerDone:
+		// The reader goroutine has exited — the connection is finished, whether it
+		// ended cleanly or on a protocol error. acceptCh is never closed, so without
+		// this the owner would block here until its own context expired, and with
+		// IdleTimeout disabled that is forever.
+		return nil, ErrConnClosed
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -456,7 +486,7 @@ func (sc *ServerConn) Close() error {
 	// Account for the GOAWAY frame and flag the connection as having emitted one,
 	// matching GoAway/sendGoAway, so Stats (FramesSent, GoAwaySent) stays accurate
 	// for Close-initiated teardowns (e.g. keepalive timeout).
-	if err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), frame.ErrCodeNoError, nil); err == nil {
+	if err := sc.fr.WriteGoAway(sc.clampGoAwayID(sc.lastPeerStreamID()), frame.ErrCodeNoError, nil); err == nil {
 		sc.bumpFramesSent()
 		sc.goAwayRequested.Store(true)
 	}
@@ -551,6 +581,36 @@ func (sc *ServerConn) validateClientStreamID(id uint32) error {
 	return nil
 }
 
+// ActiveStreams reports how many streams are currently live on the connection:
+// open, half-closed, or reserved for a push whose response is still being
+// written. Zero means the connection is genuinely idle, which is not the same
+// question as "has a new stream arrived recently".
+func (sc *ServerConn) ActiveStreams() int {
+	sc.smu.Lock()
+	defer sc.smu.Unlock()
+	return len(sc.streams)
+}
+
+// isIdleStream reports whether the identifier names a stream that has never
+// been opened — RFC 9113 §5.1's "idle" state.
+//
+// The streams map alone cannot answer this: it holds only live streams, so a
+// lookup miss means idle, closed, reset or refused indifferently, and those
+// states demand opposite reactions. A frame on an idle stream is a connection
+// error; the same frame on a closed one is at most a stream error, because a
+// peer cannot know a stream is gone until its RST_STREAM has arrived.
+//
+// Both counters already exist. maxClientStreamID is the highest client stream
+// ever registered; pushIDs holds the next unused even identifier.
+//
+// Called from the reader goroutine: two atomic loads, no lock, no allocation.
+func (sc *ServerConn) isIdleStream(id uint32) bool {
+	if id%2 == 1 {
+		return id > sc.maxClientStreamID.Load()
+	}
+	return id >= sc.pushIDs.v.Load()
+}
+
 func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
 	for i := range peer.N {
 		p := peer.Pairs[i]
@@ -630,6 +690,78 @@ func (sc *ServerConn) deliverPingAck(payload [8]byte) {
 	}
 }
 
+// newCountingFramer builds the connection's Framer over a transport wrapped so
+// every frame byte read and written is tallied for Stats (BytesReceived /
+// BytesSent). The 24-byte preface read before this is not counted; everything
+// from the SETTINGS exchange onward is.
+//
+// maxFrameSize is the value this connection advertises in SETTINGS. The Framer's
+// own read cap defaults to 16,384 regardless, so left unset an operator raising
+// AdvertisedSettings.MaxFrameSize would make the server reject exactly the
+// frames its own SETTINGS invited (RFC 9113 §4.2, rfc9113.txt:513).
+// AdvertisedSettings.defaulted() has already clamped it into the legal range.
+func newCountingFramer(nc net.Conn, sc *ServerConn, maxFrameSize uint32) *frame.Framer {
+	fr := frame.NewFramer(
+		&countingWriter{w: nc, n: &sc.atomicBytesSent},
+		&countingReader{r: nc, n: &sc.atomicBytesReceived},
+	)
+	fr.SetMaxReadFrameSize(maxFrameSize)
+	return fr
+}
+
+// maxStreamID is the largest legal stream identifier, and the last-stream-id a
+// server sends in the advance-warning GOAWAY of a graceful shutdown.
+const maxStreamID = 1<<31 - 1
+
+// clampGoAwayID returns the last-stream-id for the next GOAWAY, never larger
+// than one already sent.
+//
+//	RFC 9113 §6.8 (rfc9113.txt:2029) — "Endpoints MUST NOT increase the value
+//	they send in the last stream identifier, since the peers might already have
+//	retried unprocessed requests on another connection."
+//
+// Raising it would tell a peer that streams it has already replayed elsewhere
+// were processed after all. Caller must hold wmu, which every GOAWAY write site
+// already does across its write.
+func (sc *ServerConn) clampGoAwayID(id uint32) uint32 {
+	if id > sc.goAwaySentID {
+		id = sc.goAwaySentID
+	}
+	sc.goAwaySentID = id
+	return id
+}
+
+// GoAwayGraceful sends the advance-warning GOAWAY of RFC 9113 §6.8's two-phase
+// shutdown.
+//
+//	rfc9113.txt:2035 — "A server that is attempting to gracefully shut down a
+//	connection SHOULD send an initial GOAWAY frame with the last stream
+//	identifier set to 2^31-1 and a NO_ERROR code. This signals to the client
+//	that a shutdown is imminent and that initiating further requests is
+//	prohibited. After allowing time for any in-flight stream creation (at least
+//	one round-trip time), the server can send another GOAWAY frame with an
+//	updated last stream identifier."
+//
+// Announcing the real last-stream-id in one shot instead makes every stream the
+// client had in flight look unprocessed, so it replays requests this server was
+// about to serve. Close provides phase two; clampGoAwayID lets the identifier
+// fall from 2^31-1 to the real one, which is the only direction §6.8 allows.
+func (sc *ServerConn) GoAwayGraceful() error {
+	if !sc.goAwayRequested.CompareAndSwap(false, true) {
+		return nil // already sent
+	}
+	sc.wmu.Lock()
+	defer sc.wmu.Unlock()
+	if sc.closed.Load() {
+		return ErrConnClosed
+	}
+	err := sc.fr.WriteGoAway(sc.clampGoAwayID(maxStreamID), frame.ErrCodeNoError, nil)
+	if err == nil {
+		sc.bumpFramesSent()
+	}
+	return err
+}
+
 // GoAway sends GOAWAY with the given error code. After this call
 // AcceptStream returns ErrConnClosed but existing streams continue.
 func (sc *ServerConn) GoAway(code frame.ErrCode) error {
@@ -641,7 +773,7 @@ func (sc *ServerConn) GoAway(code frame.ErrCode) error {
 	if sc.closed.Load() {
 		return ErrConnClosed
 	}
-	err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), code, nil)
+	err := sc.fr.WriteGoAway(sc.clampGoAwayID(sc.lastPeerStreamID()), code, nil)
 	if err == nil {
 		sc.bumpFramesSent()
 	}
@@ -684,20 +816,90 @@ func (sc *ServerConn) readerLoop() {
 	// boundary keeps its pending CONTINUATION state instead of being lost.
 	h := sc.handler
 	for {
-		_, err := sc.fr.ReadFrame(context.Background(), h)
-		if err != nil {
-			// A connError from a handler callback (e.g. PROTOCOL_ERROR or
-			// the Rapid Reset ENHANCE_YOUR_CALM trip) is a connection-fatal
-			// error: emit GOAWAY with its code before tearing down so the
-			// peer learns why the connection is closing (RFC 7540 §6.8).
-			var ce connError
-			if errors.As(err, &ce) {
-				sc.sendGoAway(ce.code)
-			}
+		fh, err := sc.fr.ReadFrame(context.Background(), h)
+		// RFC 9113 §5.5 (rfc9113.txt:1230): "extension frames that appear in the
+		// middle of a field block (Section 4.3) are not permitted; these MUST be
+		// treated as a connection error (Section 5.4.1) of type PROTOCOL_ERROR."
+		// The codec correctly discards frame types it does not recognise before
+		// calling any Handler method, so guardHeaderBlock — which enforces §6.10
+		// for every dispatched type — can never see one. Here the FrameHeader is
+		// still in hand, which is all the check needs.
+		if err == nil && h.pendingStreamID != 0 && undispatchedFrameType(fh.Type) {
+			err = connError{code: frame.ErrCodeProtocolError, msg: "extension frame inside an open field block"}
+		}
+		if err == nil {
+			sc.atomicFramesReceived.Add(1)
+			continue
+		}
+
+		// §6.10 (rfc9113.txt:2263) outranks whatever the codec objected to: while
+		// a field block is open, "any other type of frame or a frame on a
+		// different stream" is a connection error of type PROTOCOL_ERROR. A
+		// malformed PRIORITY is rejected on length before guardHeaderBlock runs,
+		// so without this the peer would be told FRAME_SIZE_ERROR and never learn
+		// it had broken the far more important rule.
+		//
+		// Only for a frame that was actually read. ReadFrame returns the zero
+		// FrameHeader when it fails before parsing one — an EOF on the 9-byte
+		// header, a deadline, a socket closed under the reader — and that zero
+		// value has Type DATA and stream 0, which would read as a §6.10 violation
+		// and blame a peer that has simply gone away.
+		if h.pendingStreamID != 0 && !transportErr(err) &&
+			(fh.Type != frame.FrameContinuation || fh.StreamID != h.pendingStreamID) {
+			sc.sendGoAway(frame.ErrCodeProtocolError)
+			_ = sc.transport.Close()
 			sc.shutdownStreams(err)
 			return
 		}
-		sc.atomicFramesReceived.Add(1)
+
+		// RFC 9113 §6.3 (rfc9113.txt:1519) and §6.9.1 (rfc9113.txt:2125) scope
+		// two of the codec's rejections to a single stream, not the connection.
+		// Recovering in place is safe because ReadFrame consumes the whole
+		// payload before rejecting either one, so the byte stream is still
+		// frame-aligned. Never while a field block is open: §6.10 makes any
+		// non-CONTINUATION frame there a connection error whatever it was, and
+		// the codec rejects the malformed frame before guardHeaderBlock can run.
+		//
+		// Nor on an idle stream. §6.4 (rfc9113.txt:1596) is flatly the other way:
+		// "RST_STREAM frames MUST NOT be sent for a stream in the 'idle' state. If
+		// a RST_STREAM frame identifying an idle stream is received, the recipient
+		// MUST treat this as a connection error ... of type PROTOCOL_ERROR."
+		// Answering a malformed PRIORITY on an unopened stream with RST_STREAM
+		// would hand a conformant peer a mandatory reason to kill the connection
+		// the recovery exists to save.
+		if h.pendingStreamID == 0 && fh.StreamID != 0 && !sc.isIdleStream(fh.StreamID) {
+			switch {
+			case errors.Is(err, frame.ErrPriorityWrongLength):
+				_ = sc.writeRSTStreamID(fh.StreamID, frame.ErrCodeFrameSizeError)
+				continue
+			case errors.Is(err, frame.ErrZeroIncrement):
+				_ = sc.writeRSTStreamID(fh.StreamID, frame.ErrCodeProtocolError)
+				continue
+			}
+		}
+
+		// A connError from a handler callback (e.g. PROTOCOL_ERROR or the Rapid
+		// Reset ENHANCE_YOUR_CALM trip) carries its own code. Everything else
+		// that is a protocol violation arrives as a codec sentinel and is mapped
+		// by codecErrCode. Either way RFC 9113 §5.4 requires the error be
+		// reported, and §5.4.1 (rfc9113.txt:1173) requires the transport be
+		// closed afterwards: "After sending the GOAWAY frame for an error
+		// condition, the endpoint MUST close the TCP connection." Not sc.Close(),
+		// which waits on readerDone and would deadlock here.
+		var ce connError
+		var code frame.ErrCode
+		var mapped bool
+		if errors.As(err, &ce) {
+			code, mapped = ce.code, true
+		} else {
+			code, mapped = codecErrCode(err)
+		}
+		if mapped {
+			sc.sendGoAway(code)
+			_ = sc.transport.Close()
+		}
+		sc.shutdownStreams(err)
+		return
 	}
 }
 
@@ -715,7 +917,7 @@ func (sc *ServerConn) sendGoAway(code frame.ErrCode) {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	if !sc.closed.Load() {
-		if err := sc.fr.WriteGoAway(sc.lastPeerStreamID(), code, nil); err == nil {
+		if err := sc.fr.WriteGoAway(sc.clampGoAwayID(sc.lastPeerStreamID()), code, nil); err == nil {
 			sc.bumpFramesSent()
 		}
 	}
@@ -789,8 +991,19 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 		// range window (and the int32 recv-window seed derived from it stays valid).
 		s.InitialWindowSize = 1<<31 - 1
 	}
-	if s.MaxFrameSize == 0 {
+	// RFC 9113 §6.5.2 (rfc9113.txt:1876): SETTINGS_MAX_FRAME_SIZE — "The initial
+	// value is 2^14 (16,384) octets. The value advertised by an endpoint MUST be
+	// between this initial value and the maximum allowed frame size (2^24-1 or
+	// 16,777,215 octets), inclusive." The clamp binds this server as a sender:
+	// an operator value outside the range would put an illegal SETTINGS frame on
+	// the wire. Clamping rather than erroring keeps a misconfiguration from
+	// refusing to serve, and the floor also guarantees the server still accepts
+	// the 16,384-octet frames §4.2 entitles every peer to send.
+	switch {
+	case s.MaxFrameSize < 16384:
 		s.MaxFrameSize = 16384
+	case s.MaxFrameSize > 16777215:
+		s.MaxFrameSize = 16777215
 	}
 	return s
 }
@@ -814,6 +1027,9 @@ type settingsRecorder struct {
 	peerSeen bool
 	ackSeen  bool
 	delegate frame.Handler // optional; receives forwarded frames
+	// fr, when set, is used to acknowledge each non-ACK SETTINGS frame the
+	// moment its values have been processed (RFC 9113 §6.5.3).
+	fr *frame.Framer
 }
 
 func (r *settingsRecorder) OnData(fh frame.FrameHeader, data []byte, pad uint8) error {
@@ -845,8 +1061,22 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 		r.ackSeen = true
 		return nil
 	}
-	r.peer = s
+	// Merge, never replace. RFC 9113 §6.5.3 (rfc9113.txt:1866): "The values in the
+	// SETTINGS frame MUST be processed in the order they appear" — a second
+	// SETTINGS frame updates the parameters it names and leaves the rest alone.
+	// Assigning the frame wholesale silently reverted every parameter it omitted.
+	for i := range s.N {
+		setPeerSetting(&r.peer, s.Pairs[i].ID, s.Pairs[i].Value)
+	}
 	r.peerSeen = true
+	// §6.5.3 (:1858): "Once all values have been processed, the recipient MUST
+	// immediately emit a SETTINGS frame with the ACK flag set." Every non-ACK
+	// SETTINGS in the handshake window gets its own acknowledgement; the caller
+	// used to send exactly one however many arrived. Safe without wmu: this runs
+	// on the constructing goroutine, before the reader loop starts.
+	if r.fr != nil {
+		return r.fr.WriteSettingsAck()
+	}
 	return nil
 }
 func (r *settingsRecorder) OnPushPromise(fh frame.FrameHeader, sid uint32, hb frame.HeaderBlock, flags uint8) error {
@@ -906,4 +1136,10 @@ var (
 	ErrConnClosed = errors.New("conn: connection closed")
 	// ErrStreamClosed is returned when operating on a closed stream.
 	ErrStreamClosed = errors.New("conn: stream already closed")
+	// ErrHeaderBlockTooLarge is returned when an encoded field section exceeds
+	// the peer's SETTINGS_MAX_FRAME_SIZE. A field section cannot be split without
+	// CONTINUATION chunking, which this server does not do, so the write is
+	// refused rather than emitted as a frame RFC 9113 §4.2 obliges the receiver
+	// to answer with a connection error.
+	ErrHeaderBlockTooLarge = errors.New("conn: encoded field section exceeds the peer's SETTINGS_MAX_FRAME_SIZE")
 )

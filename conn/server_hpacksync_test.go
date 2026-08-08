@@ -24,7 +24,7 @@ func TestServerConnHandler_RefusedStream_KeepsHPACKDecoderSynced(t *testing.T) {
 		streams:     make(map[uint32]*ServerStream),
 		refuseAfter: 1, // only one concurrent stream allowed
 	}
-	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0)
+	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0, 0)
 	enc := hpack.NewEncoder() // one shared encoder across all streams
 
 	hdr := func(id uint32) frame.FrameHeader {
@@ -103,7 +103,7 @@ func TestServerConnHandler_RefusedStream_KeepsHPACKDecoderSynced(t *testing.T) {
 // refused-stream test above guards, reachable by a different route.
 func TestServerConnHandler_MalformedStream_KeepsHPACKDecoderSynced(t *testing.T) {
 	mock := &mockConnOps{streams: make(map[uint32]*ServerStream)}
-	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0)
+	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0, 0)
 	enc := hpack.NewEncoder() // one shared encoder, like a real persistent client
 
 	hdr := func(id uint32) frame.FrameHeader {

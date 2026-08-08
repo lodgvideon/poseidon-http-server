@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 
 	"github.com/lodgvideon/poseidon-http-server/conn"
@@ -386,6 +387,18 @@ func (s *Server) serveConnReader(ctx context.Context, nc net.Conn, br *bufio.Rea
 	if err != nil {
 		s.logger.Printf("poseidon: h2c handshake failed for %s: %v", nc.RemoteAddr(), err)
 		_ = nc.Close()
+		return
+	}
+
+	// Same §3.3/§9.2 admission check as serveConn. Not hypothetical: with
+	// Options.H2C set, a real *tls.Conn from ListenAndServeTLSConfig is routed
+	// through detectAndServe to here, so skipping it would leave a hole exactly
+	// where both mechanisms overlap. nc, not rwc: the bufio wrapper is not a
+	// *tls.Conn.
+	if cs, ok := tlsAdmissible(nc); !ok {
+		s.logger.Printf("poseidon: rejecting %s: alpn=%q tls=%#04x", nc.RemoteAddr(), cs.NegotiatedProtocol, cs.Version)
+		_ = sc.GoAway(frame.ErrCodeInadequateSecurity)
+		_ = sc.Close()
 		return
 	}
 

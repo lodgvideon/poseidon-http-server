@@ -22,11 +22,11 @@ type ServerStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu            sync.Mutex
-	localEnded    bool
-	remoteEnded   bool
-	closed        bool
-	headersSent   bool
+	mu              sync.Mutex
+	localEnded      bool
+	remoteEnded     bool
+	closed          bool
+	headersSent     bool
 	headersReceived bool
 	// priority stores the RFC 7540 §5.3 priority payload received in
 	// the first HEADERS frame (or set by PushWithPriority), if any.
@@ -36,9 +36,9 @@ type ServerStream struct {
 	priority atomic.Pointer[frame.Priority]
 
 	// Flow control.
-	recvWindow         int32
-	recvRefundPending  uint32
-	sendWindow         int32
+	recvWindow        int32
+	recvRefundPending uint32
+	sendWindow        int32
 }
 
 // Priority returns the RFC 7540 §5.3 priority payload extracted from
@@ -62,7 +62,7 @@ func (ss *ServerStream) setPriority(p *frame.Priority) {
 type StreamEventType uint8
 
 const (
-	EventHeaders  StreamEventType = iota + 1
+	EventHeaders StreamEventType = iota + 1
 	EventData
 	EventTrailers
 	EventReset
@@ -171,6 +171,7 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 		if !ok {
 			return StreamEvent{}, ErrStreamClosed
 		}
+		ss.creditConsumed(e)
 		return e, nil
 	default:
 	}
@@ -179,9 +180,48 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 		if !ok {
 			return StreamEvent{}, ErrStreamClosed
 		}
+		ss.creditConsumed(e)
 		return e, nil
 	case <-ctx.Done():
 		return StreamEvent{}, ctx.Err()
+	}
+}
+
+// creditConsumed returns per-stream flow-control credit for body bytes the
+// application has now taken delivery of, emitting a WINDOW_UPDATE once enough
+// has accumulated to be worth a frame.
+//
+// Refunding on CONSUMPTION rather than on receipt is what makes
+// SETTINGS_INITIAL_WINDOW_SIZE mean what it advertises. Refunding the moment a
+// DATA frame arrived handed the peer fresh credit for bytes that were only
+// buffered, so the window bounded nothing and a fast uploader could outrun a
+// briefly descheduled handler until the per-stream event channel overflowed and
+// the stream was reset. RFC 9113 §5.2.1 (rfc9113.txt:1274) is explicit that this
+// is what the window is for: "The sender of a flow-controlled frame MUST NOT
+// send more than the receiver allows", and a receiver that always allows more
+// has opted out of the mechanism.
+//
+// Called on the handler goroutine, which already writes under wmu elsewhere.
+// The connection-level window keeps its receipt-time refund: §6.9.1 requires
+// every flow-controlled frame be counted there whatever becomes of its stream,
+// and gating it on one application's reading would let a single slow handler
+// wedge every other stream on the connection.
+func (ss *ServerStream) creditConsumed(e StreamEvent) {
+	if ss.sc == nil || e.Type != EventData || len(e.Data) == 0 {
+		return
+	}
+	ss.mu.Lock()
+	ss.recvRefundPending += uint32(len(e.Data)) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
+	refund := uint32(0)
+	if ss.recvRefundPending >= recvWindowRefundThreshold {
+		refund = ss.recvRefundPending
+		ss.recvRefundPending = 0
+		ss.recvWindow += int32(refund) //nolint:gosec // G115: refund ≤ the window it came from
+	}
+	closed := ss.closed
+	ss.mu.Unlock()
+	if refund > 0 && !closed {
+		_ = ss.sc.writeWindowUpdate(ss.id, refund)
 	}
 }
 
@@ -199,6 +239,16 @@ func (ss *ServerStream) Close() error {
 		return nil
 	}
 	return ss.sc.writeServerRSTStream(ss, frame.ErrCodeCancel)
+}
+
+// remoteHalfEnded reports whether the client has ended its half of the stream,
+// i.e. whether the stream is in RFC 9113 §5.1's "half-closed (remote)" state.
+// Read under ss.mu: the reader goroutine consults it while handler goroutines
+// may be writing localEnded through markLocalEnd.
+func (ss *ServerStream) remoteHalfEnded() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.remoteEnded
 }
 
 // markRemoteEnd marks the remote side as closed.
@@ -224,21 +274,39 @@ func (ss *ServerStream) markLocalEnd() bool {
 	return ss.remoteEnded
 }
 
-// markRemoteEndReset records a client RST_STREAM as ending the remote half and
-// reports whether the request was still open (END_STREAM not yet observed) at
-// that moment — computed atomically under ss.mu so the rapid-reset
-// classification (CVE-2023-44487) cannot race the flag write. RST is a hard
-// close, so the caller releases the stream unconditionally afterwards.
+// markRemoteEndReset records a client RST_STREAM and reports whether the
+// request was still open (END_STREAM not yet observed) at that moment —
+// computed atomically under ss.mu so the rapid-reset classification
+// (CVE-2023-44487) cannot race the flag write.
+//
+// A received RST_STREAM closes the stream in both directions, not merely the
+// remote half. Recording that is what stops the server answering a reset with a
+// reset: RFC 9113 §5.1 (rfc9113.txt:1082) — "An endpoint MUST NOT send frames
+// other than PRIORITY on a closed stream" — and §5.4.2 (:1197) — "To avoid
+// looping, an endpoint MUST NOT send a RST_STREAM in response to a RST_STREAM
+// frame." Called before the EventReset is pushed, so no handler can observe the
+// reset while the stream still reports itself writable.
 func (ss *ServerStream) markRemoteEndReset() (wasOpen bool) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	wasOpen = !ss.remoteEnded
 	ss.remoteEnded = true
+	ss.closed = true
 	return wasOpen
 }
 
-// push delivers an event from the reader goroutine. Non-blocking;
-// on overflow marks stream closed and sends RST.
+// push delivers an event from the reader goroutine. Non-blocking; on overflow
+// it drops the stream and resets it.
+//
+// INTERNAL_ERROR, not REFUSED_STREAM. RFC 9113 §8.7 (rfc9113.txt:2977) makes
+// REFUSED_STREAM a promise: "The REFUSED_STREAM error code can be included in a
+// RST_STREAM frame to indicate that the stream is being closed prior to any
+// processing having occurred. Any request that was sent on the reset stream can
+// be safely retried." By the time this buffer overflows the request has already
+// been dispatched — some of its events reached the application — so that promise
+// would be false, and a conformant client would replay a request this server had
+// begun to serve. The overflow is a server-side buffer failure and INTERNAL_ERROR
+// is what says so.
 func (ss *ServerStream) push(e StreamEvent) {
 	select {
 	case ss.events <- e:
@@ -253,10 +321,10 @@ func (ss *ServerStream) push(e StreamEvent) {
 		return
 	}
 	go func() {
-		_ = ss.sc.writeServerRSTStream(ss, frame.ErrCodeRefusedStream)
+		_ = ss.sc.writeServerRSTStream(ss, frame.ErrCodeInternalError)
 	}()
 	select {
-	case ss.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeRefusedStream, EndStream: true}:
+	case ss.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeInternalError, EndStream: true}:
 	default:
 	}
 }
