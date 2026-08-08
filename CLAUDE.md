@@ -6,7 +6,7 @@ HTTP/2 + gRPC server for Go, built on the `poseidon-http-client` codec
 
 ## Project shape
 
-- **Language:** Go 1.24, single module `github.com/lodgvideon/poseidon-http-server`.
+- **Language:** Go 1.25, single module `github.com/lodgvideon/poseidon-http-server`.
 - **Dependencies:** exactly **one** runtime dep — `poseidon-http-client` (see go.mod).
   The server links only its `frame` and `hpack` packages. Do **not** add
   third-party runtime deps without a strong reason; "no other deps" is a

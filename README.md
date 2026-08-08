@@ -22,7 +22,7 @@ Drop-in `http.Handler` replacement — compatible with **chi**, **echo**, **gin*
 go get github.com/lodgvideon/poseidon-http-server@latest
 ```
 
-Requires **Go 1.24+**. The only dependency is the HTTP/2 codec (`frame` + `hpack`)
+Requires **Go 1.25+**. The only dependency is the HTTP/2 codec (`frame` + `hpack`)
 from [poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client);
 there are no other third-party runtime dependencies.
 
@@ -126,7 +126,7 @@ BenchmarkLookup            0 ns/op    0 B/op    0 allocs/op
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.25+
 - [poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client) (codec: frame + hpack) — resolved automatically via `go get`
 
 ## Documentation
