@@ -170,6 +170,12 @@ type ServerConnOptions struct {
 // to shed Slowloris-style connections that never finish the preface.
 const defaultHandshakeTimeout = 10 * time.Second
 
+// defaultStreamEventBuffer is the per-stream event channel capacity. It absorbs
+// the scheduling gap between the single reader goroutine and one handler
+// goroutine; the peer's flow-control window is what bounds how far ahead the
+// reader can get, so this only has to cover jitter, not backlog.
+const defaultStreamEventBuffer = 8
+
 // rapidResetFloor is the minimum Rapid Reset budget regardless of how
 // small MaxConcurrentStreams is, so low-concurrency configs still tolerate
 // a reasonable burst of legitimate cancellations.
@@ -182,7 +188,7 @@ func (o ServerConnOptions) defaulted() ServerConnOptions {
 	// then advertised a 0 recv window and deadlocked every request body.
 	o.AdvertisedSettings = o.AdvertisedSettings.defaulted()
 	if o.StreamEventBuffer <= 0 {
-		o.StreamEventBuffer = 8
+		o.StreamEventBuffer = defaultStreamEventBuffer
 	}
 	if o.MaxRapidResets == 0 {
 		budget := int(o.AdvertisedSettings.MaxConcurrentStreams) * 4
@@ -315,7 +321,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	// Steps 3-5: handshake — read client SETTINGS, send ACK, read ACK.
 	// Create the real frame handler early so that non-SETTINGS frames
 	// arriving during the handshake (e.g. HEADERS) are not lost.
-	sc.handler = newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize), int32(sc.opts.AdvertisedSettings.InitialWindowSize)) //nolint:gosec // G115: AdvertisedSettings.defaulted() clamps InitialWindowSize to ≤ 2^31-1
+	sc.handler = newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize), int32(sc.opts.AdvertisedSettings.InitialWindowSize), sc.opts.StreamEventBuffer) //nolint:gosec // G115: AdvertisedSettings.defaulted() clamps InitialWindowSize to ≤ 2^31-1
 	peer, err := handshakeServerSettings(ctx, sc.fr, sc.handler)
 	if err != nil {
 		_ = nc.Close()

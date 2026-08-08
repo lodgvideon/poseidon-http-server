@@ -128,17 +128,18 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 		}
 	}
 
+	// Same pre-encode check as writeServerHeaders: measuring the encoded block
+	// would already have mutated the shared dynamic table.
+	// A PUSH_PROMISE payload carries the 4-octet promised stream identifier ahead
+	// of the fragment (§6.6), so the field section gets that much less room.
+	if !fieldsFitFrame(fields, sc.peerMaxFrameSize()-4) {
+		return nil, ErrHeaderBlockTooLarge
+	}
+
 	// Encode the header block.
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := sc.enc.EncodeBlock(*buf, fields)
-	if len(block) > sc.peerMaxFrameSize() {
-		// Same reason as writeServerHeaders: the Framer's cap describes what this
-		// endpoint accepts, not what the peer does (RFC 9113 §4.2).
-		*buf = block[:0]
-		encBufPool.Put(buf)
-		return nil, ErrHeaderBlockTooLarge
-	}
 
 	// Write PUSH_PROMISE on the parent stream.
 	err := sc.fr.WritePushPromise(parent.id, promisedID, block, true, 0)

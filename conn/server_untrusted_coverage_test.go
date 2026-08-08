@@ -18,7 +18,7 @@ import (
 // connection PROTOCOL_ERROR, RFC 9113 §6.10, not a silent ignore).
 func TestServerConnHandler_OnOriginAltSvc_IgnoredAndGuarded(t *testing.T) {
 	mock := &mockConnOps{streams: make(map[uint32]*ServerStream)}
-	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0)
+	h := newServerConnHandler(mock, hpack.NewDecoder(), 0, 0, 0)
 
 	// No open header block → both are silently ignored.
 	if err := h.OnOrigin(frame.FrameHeader{}, []string{"https://example.com"}); err != nil {

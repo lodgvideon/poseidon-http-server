@@ -40,7 +40,7 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	initial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	sc.psMu.RUnlock()
 	s.mu.Lock()
-		s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
+	s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
 	s.mu.Unlock()
 	s.sc = sc
 
@@ -226,7 +226,7 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 				st.mu.Unlock()
 				return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)}
 			}
-						st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
+			st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
 			st.mu.Unlock()
 		}
 
@@ -247,7 +247,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 			sc.fcOutMu.Unlock()
 			return connError{code: frame.ErrCodeFlowControlError, msg: "WINDOW_UPDATE overflowed connection send window"}
 		}
-				sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
+		sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
 		sc.fcOutCond.Broadcast()
 		sc.fcOutMu.Unlock()
 		return nil
@@ -285,7 +285,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeFlowControlError)
 		return nil
 	}
-		s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
+	s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
 	s.mu.Unlock()
 	sc.fcOutMu.Lock()
 	sc.fcOutCond.Broadcast()
@@ -305,21 +305,18 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 // credit permanently: repeat it and the peer's window drains to zero and every
 // stream on the connection wedges.
 func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
-		debit := int32(length) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
+	debit := int32(length) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
 
-	streamRefund := uint32(0)
 	if s != nil {
+		// Debit only. The per-stream window is refunded when the application takes
+		// delivery of the bytes (ServerStream.creditConsumed), not when they
+		// arrive — refunding on receipt handed the peer credit for data that was
+		// merely buffered, so the advertised window bounded nothing.
 		s.mu.Lock()
 		s.recvWindow -= debit
 		if s.recvWindow < 0 {
 			s.mu.Unlock()
 			return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("stream %d: flow control error", s.id)}
-		}
-		s.recvRefundPending += length
-		if s.recvRefundPending >= recvWindowRefundThreshold {
-			streamRefund = s.recvRefundPending
-			s.recvRefundPending = 0
-					s.recvWindow += int32(streamRefund) //nolint:gosec // G115: refund ≤ initial
 		}
 		s.mu.Unlock()
 	}
@@ -335,15 +332,10 @@ func (sc *ServerConn) onDataReceived(s *ServerStream, length uint32) error {
 	if sc.connRefundPending >= recvWindowRefundThreshold {
 		connRefund = sc.connRefundPending
 		sc.connRefundPending = 0
-				sc.connRecvWindow += int32(connRefund) //nolint:gosec // G115: refund ≤ initial
+		sc.connRecvWindow += int32(connRefund) //nolint:gosec // G115: refund ≤ initial
 	}
 	sc.fcMu.Unlock()
 
-	if streamRefund > 0 {
-		if err := sc.writeWindowUpdate(s.id, streamRefund); err != nil {
-			return err
-		}
-	}
 	if connRefund > 0 {
 		if err := sc.writeWindowUpdate(0, connRefund); err != nil {
 			return err
@@ -368,21 +360,24 @@ func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fi
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
 
+	// Decide BEFORE encoding. EncodeBlock mutates the connection's shared HPACK
+	// dynamic table, and refusing afterwards leaves that table holding entries the
+	// peer never received — so its decoder falls a step behind and every LATER
+	// response on the connection is undecodable. That is the decode-side trap
+	// (emitHeaderBlock) seen from the encoder, and it is why this check cannot
+	// simply measure len(block).
+	// Budget the frame payload, not just the field block: a HEADERS frame carrying
+	// a priority block spends 5 octets before the fragment begins (§6.2).
+	budget := sc.peerMaxFrameSize()
+	if prio != nil {
+		budget -= 5
+	}
+	if !fieldsFitFrame(fields, budget) {
+		return ErrHeaderBlockTooLarge
+	}
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := sc.enc.EncodeBlock(*buf, fields)
-	if len(block) > sc.peerMaxFrameSize() {
-		*buf = block[:0]
-		encBufPool.Put(buf)
-		// The Framer's own size check is keyed to what THIS endpoint advertised,
-		// which says nothing about what the peer will accept: RFC 9113 §4.2
-		// (rfc9113.txt:513) makes an oversized frame a connection error at the
-		// RECEIVER. writeServerData already computes min(peerMax, ourMax) for the
-		// same reason. A field section cannot be split here — that needs
-		// CONTINUATION chunking — so refuse rather than put a frame on the wire
-		// that a conformant peer must answer by killing the connection.
-		return ErrHeaderBlockTooLarge
-	}
 	err := sc.fr.WriteHeaders(frame.WriteHeadersParams{
 		StreamID:      ss.id,
 		BlockFragment: block,
@@ -465,6 +460,32 @@ func (sc *ServerConn) writeServerDataChunks(ctx context.Context, ss *ServerStrea
 	return nil
 }
 
+// fieldLineOverhead bounds the HPACK framing a single field line can cost on top
+// of its name and value: one prefix octet for the representation, plus at most
+// four octets for each of the two length integers. Huffman coding only ever
+// shrinks the payload, and an indexed or incrementally-indexed field costs far
+// less, so a field section whose raw size fits within a frame is certain to fit
+// once encoded.
+const fieldLineOverhead = 9
+
+// fieldsFitFrame reports whether the field section is guaranteed to encode into
+// limit octets or fewer, WITHOUT encoding it — which is the point: the encoder's
+// dynamic table must not be disturbed by a block that is never sent.
+//
+// Deliberately conservative. It can refuse a section that HPACK would have
+// compressed under the limit, but the alternative — encode, measure, then throw
+// the block away — desyncs the connection.
+func fieldsFitFrame(fields []hpack.HeaderField, limit int) bool {
+	total := 0
+	for i := range fields {
+		total += len(fields[i].Name) + len(fields[i].Value) + fieldLineOverhead
+		if total > limit {
+			return false
+		}
+	}
+	return true
+}
+
 // peerMaxFrameSize is the largest frame payload the peer has said it will
 // accept (RFC 9113 §6.5.2 SETTINGS_MAX_FRAME_SIZE, initial value 2^14).
 func (sc *ServerConn) peerMaxFrameSize() int {
@@ -508,6 +529,17 @@ func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	if sc.closed.Load() {
 		return ErrConnClosed
 	}
+	// If the identifier does name a live stream, close it for writing before the
+	// reset goes out. A handler goroutine holding that *ServerStream gates its
+	// writes on ss.closed alone, so without this it would answer on a stream the
+	// server has just reset — RFC 9113 §5.1 (rfc9113.txt:1082) forbids sending
+	// anything but PRIORITY there. The registry entry is left alone: a malformed
+	// PRIORITY naming an idle stream must not evict a live sibling.
+	if ss := sc.lookupStream(id); ss != nil {
+		ss.mu.Lock()
+		ss.closed = true
+		ss.mu.Unlock()
+	}
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
 	if err := sc.fr.WriteRSTStream(id, code); err != nil {
@@ -542,7 +574,7 @@ func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, 
 			avail = connWin
 		}
 		if avail > 0 {
-				n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+			n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
 			if n > avail {
 				n = avail
 			}
@@ -597,7 +629,7 @@ func (sc *ServerConn) acquireSendCreditsSlow(ctx context.Context, ss *ServerStre
 			avail = connWin
 		}
 		if avail > 0 {
-				n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+			n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
 			if n > avail {
 				n = avail
 			}

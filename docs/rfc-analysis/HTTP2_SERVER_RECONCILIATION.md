@@ -108,6 +108,47 @@ unenforced on a fresh checkout. That is tracked separately; this audit verified
 the contract by hand instead (the native write path is unchanged at 0
 allocs/op).
 
+## The review of the repairs
+
+The 13 confirmed findings above were repaired in one commit, and that commit was
+then reviewed on its own — because a repair written to close a review is exactly
+where the next defect hides. Four reviewers raised 14 findings; 13 survived a
+refute-by-default verifier, deduplicating to six distinct defects. Two are worth
+recording because they are the same mistake seen twice:
+
+**The HPACK trap, from the encoder side.** The repair for over-large field
+sections measured the block *after* `EncodeBlock` and refused to write it. But
+`EncodeBlock` has already inserted into the connection's shared dynamic table, so
+refusing left the encoder holding entries the peer never received — and every
+later response on that connection decoded as garbage or failed outright. This is
+the decode-side invariant the audit had documented three times over, walked into
+from the other direction. The size decision now happens before encoding, from a
+conservative bound on the uncompressed field section.
+
+**A fix that traded truncation for a leak.** Closing a connection on the idle
+deadline cut off long in-flight requests, so the repair declined to close a busy
+one — but still returned from the accept loop, leaving a socket that was open,
+untracked by Shutdown, and deaf to every subsequent request. The correct repair
+was to keep waiting, not to stop closing.
+
+The CI failure on the pull request was a third: a 1 MiB upload to a handler
+lagging a few milliseconds behind the wire was killed mid-request. The chain ran
+five deep — RST_STREAM(INTERNAL_ERROR), because the per-stream event channel
+overflowed, because it holds eight events, because the peer could send far more
+than eight frames, because the receive window was refunded when bytes ARRIVED
+rather than when the application read them, so the window bounded nothing. The
+per-stream window is now refunded on consumption (§5.2.1: "The sender of a
+flow-controlled frame MUST NOT send more than the receiver allows" means nothing
+if the receiver always allows more); the connection window keeps its
+receipt-time refund, because §6.9.1 requires every frame be counted there and
+gating it on one application's reading would let a single slow handler wedge the
+connection. `ServerConnOptions.StreamEventBuffer`, documented and plumbed
+through `server/` but ignored for every client stream, now applies.
+
+That failure was only visible because this branch changed the overflow reset
+from REFUSED_STREAM to INTERNAL_ERROR. A Go client silently retries the first,
+so the defect had been there, hidden, the whole time.
+
 ## Upstream
 
 Two defects belong to the codec module and were filed there rather than worked

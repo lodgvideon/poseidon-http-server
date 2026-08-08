@@ -99,6 +99,7 @@ landed on §8.3 as the HTTP/2-native way to state the rule.
 | §4.2 (`rfc9113.txt:513`, receiving side) | Conformance | `TestConformance_RFC9113_Sec42_AdvertisedMaxFrameSizeIsAccepted` |
 | §4.3 (`rfc9113.txt:668`) | Conformance | `TestConformance_RFC9113_Sec43_HPACKDecodeError_IsAConnectionError` |
 | §5.1 idle (`rfc9113.txt:1000`), §6.4 (`:1596`) | Conformance | `TestConformance_RFC9113_Sec51_IdleStream_NonHeadersFrame_ConnectionError` |
+| §5.2.1 (`rfc9113.txt:1274`) | Conformance | `TestConformance_RFC9113_Sec521_WindowBoundsUnconsumedData` |
 | §5.1 idle, control | Conformance | `TestConformance_RFC9113_Sec51_PriorityOnIdleStreamIsPermitted` |
 | §5.1 half-closed remote (`rfc9113.txt:1044`) | Conformance | `TestConformance_RFC9113_Sec51_HalfClosedRemote_DataAfterEndStream` |
 | §5.1 half-closed remote + HPACK sync | Conformance | `TestConformance_RFC9113_Sec51_HalfClosedRemote_HeadersAfterEndStream` |
@@ -110,7 +111,7 @@ landed on §8.3 as the HTTP/2-native way to state the rule.
 | §6.8 (`rfc9113.txt:2029`, `:2035`) | Conformance | `TestConformance_RFC9113_Sec68_GracefulShutdownIsTwoPhase` |
 | §6.8 (`rfc9113.txt:1990`) | Conformance | `TestConformance_RFC9113_Sec68_PushRefusedAfterPeerGoAway` |
 | §6.9.1 (`rfc9113.txt:2113`), §6.8 (`:2044`) | Conformance | `TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWindow` |
-| §6.9.1 control | Conformance | `TestConformance_RFC9113_Sec69_LiveStreamStillRefundsBothLevels` |
+| §6.9.1 split: connection on receipt, stream on consumption | Conformance | `TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead` |
 | §6.9.1 (`rfc9113.txt:2125`, both clauses) | Conformance | `TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit` |
 | §6.10 (`rfc9113.txt:2263`), §5.5 (`:1230`) | Conformance | `TestConformance_RFC9113_Sec610_MalformedFrameDuringOpenFieldBlock` |
 | §8.1 trailers (`rfc9113.txt:2411`, `:2415`) | Conformance | `TestConformance_RFC9113_Sec81_TrailerRules` |

@@ -100,6 +100,11 @@ type serverConnHandler struct {
 	// accounting matches what the peer was told it may send.
 	recvWindowSeed int32
 
+	// eventBuf is the per-stream event channel capacity, from
+	// ServerConnOptions.StreamEventBuffer. It used to be hardcoded to 8 here, so
+	// the documented option applied to nothing but the h2c seeded stream.
+	eventBuf int
+
 	scratch []hpack.HeaderField
 	// fieldBuf and spans hold a private copy of the decoded field section.
 	// hpack.Decoder documents its field slices as valid only for the duration of
@@ -122,18 +127,22 @@ type serverConnHandler struct {
 	pendingDiscard bool
 }
 
-func newServerConnHandler(streams serverConnOps, dec *hpack.Decoder, maxHeaderBytes int, recvWindowSeed int32) *serverConnHandler {
+func newServerConnHandler(streams serverConnOps, dec *hpack.Decoder, maxHeaderBytes int, recvWindowSeed int32, eventBuf int) *serverConnHandler {
 	if maxHeaderBytes <= 0 {
 		maxHeaderBytes = defaultMaxHeaderBytes
 	}
 	if recvWindowSeed <= 0 {
 		recvWindowSeed = connInitialRecvWindow
 	}
+	if eventBuf <= 0 {
+		eventBuf = defaultStreamEventBuffer
+	}
 	return &serverConnHandler{
 		streams:        streams,
 		dec:            dec,
 		maxHeaderBytes: maxHeaderBytes,
 		recvWindowSeed: recvWindowSeed,
+		eventBuf:       eventBuf,
 		scratch:        make([]hpack.HeaderField, 0, 16),
 	}
 }
@@ -176,16 +185,18 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
-	// A client may never send DATA on a server-initiated (even) stream, but §5.1
-	// scopes the reaction by the state this server holds it in. A push stream that
-	// is still reserved (local) — or one that never existed — gives "Receiving any
+	// A client may never send DATA on a server-initiated (even) stream, in any
+	// state. RFC 9113 §5.1 (rfc9113.txt:1020), reserved (local) — which is where a
+	// pushed stream begins and the only side the client ever sees: "Receiving any
 	// type of frame other than RST_STREAM, PRIORITY, or WINDOW_UPDATE on a stream
-	// in this state MUST be treated as a connection error ... of type
-	// PROTOCOL_ERROR" (rfc9113.txt:1020). Once the server has sent its response
-	// the stream is half-closed (remote), and there the same section mandates only
-	// a stream error of type STREAM_CLOSED (:1044). Falling through lets the
-	// idle/closed/half-closed guards below draw that distinction.
-	if fh.StreamID%2 == 0 && h.streams.lookupStream(fh.StreamID) == nil {
+	// in this state MUST be treated as a connection error (Section 5.4.1) of type
+	// PROTOCOL_ERROR."
+	//
+	// Checked before the flow-control debit on purpose. A pushed stream has no
+	// receive window — nothing may arrive on it — so letting this fall through
+	// would answer FLOW_CONTROL_ERROR, a connection error with the wrong
+	// diagnosis, before the state rule was ever consulted.
+	if fh.StreamID%2 == 0 {
 		return connError{code: frame.ErrCodeProtocolError, msg: "client DATA on a server-initiated stream"}
 	}
 	// §5.1 (rfc9113.txt:1000): in the idle state "receiving any frame other than
@@ -280,7 +291,7 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 		if err := h.streams.validateClientStreamID(fh.StreamID); err != nil {
 			return err
 		}
-		s = newServerStream(fh.StreamID, 8, nil, h.recvWindowSeed)
+		s = newServerStream(fh.StreamID, h.eventBuf, nil, h.recvWindowSeed)
 		if !h.streams.registerStream(fh.StreamID, s) {
 			refused = true
 		}

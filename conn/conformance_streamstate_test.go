@@ -308,12 +308,19 @@ func TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWin
 	}
 }
 
-// TestConformance_RFC9113_Sec69_LiveStreamStillRefundsBothLevels is the guard
-// for the other direction: making the connection-level accounting unconditional
-// must not lose the per-stream half. It passes before and after the fix, and
-// exists so that a later simplification cannot quietly drop the stream refund
-// the way the connection one was dropped.
-func TestConformance_RFC9113_Sec69_LiveStreamStillRefundsBothLevels(t *testing.T) {
+// TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead pins the split
+// between the two windows, which is not symmetric and must not be made so.
+//
+// The CONNECTION window is refunded on receipt: §6.9.1 requires every
+// flow-controlled frame be counted there whatever becomes of its stream, and
+// withholding it until some application reads would let one slow handler wedge
+// every other stream on the connection.
+//
+// The PER-STREAM window is refunded on CONSUMPTION. Refunding it on receipt was
+// what made SETTINGS_INITIAL_WINDOW_SIZE meaningless — see
+// TestConformance_RFC9113_Sec521_WindowBoundsUnconsumedData, which is the
+// failure that produced.
+func TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead(t *testing.T) {
 	const chunk = 16384
 	seen := runWindowProbe(t, ServerConnOptions{}, func(cli net.Conn, cliFr *frame.Framer, _ *flowCapture) {
 		sendReq(t, cliFr, 1, goodHeaders("/upload"), false)
@@ -321,10 +328,13 @@ func TestConformance_RFC9113_Sec69_LiveStreamStillRefundsBothLevels(t *testing.T
 			_, _ = cli.Write(rawFrame(frame.FrameData, 0, 1, make([]byte, chunk)))
 		}
 	})
+	// Nothing in this probe accepts the stream, so nothing has read the body.
 	if got := seen.connTotal(); got < 2*chunk {
-		t.Errorf("connection WINDOW_UPDATE total = %d, want >= %d", got, 2*chunk)
+		t.Errorf("connection WINDOW_UPDATE total = %d, want >= %d: the connection window "+
+			"is owed for every flow-controlled frame that arrives", got, 2*chunk)
 	}
-	if got := seen.streamTotal(1); got < 2*chunk {
-		t.Errorf("stream 1 WINDOW_UPDATE total = %d, want >= %d", got, 2*chunk)
+	if got := seen.streamTotal(1); got != 0 {
+		t.Errorf("stream 1 WINDOW_UPDATE total = %d, want 0: no application has read "+
+			"these bytes, so the peer is owed no fresh per-stream credit", got)
 	}
 }

@@ -22,11 +22,11 @@ type ServerStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu            sync.Mutex
-	localEnded    bool
-	remoteEnded   bool
-	closed        bool
-	headersSent   bool
+	mu              sync.Mutex
+	localEnded      bool
+	remoteEnded     bool
+	closed          bool
+	headersSent     bool
 	headersReceived bool
 	// priority stores the RFC 7540 §5.3 priority payload received in
 	// the first HEADERS frame (or set by PushWithPriority), if any.
@@ -36,9 +36,9 @@ type ServerStream struct {
 	priority atomic.Pointer[frame.Priority]
 
 	// Flow control.
-	recvWindow         int32
-	recvRefundPending  uint32
-	sendWindow         int32
+	recvWindow        int32
+	recvRefundPending uint32
+	sendWindow        int32
 }
 
 // Priority returns the RFC 7540 §5.3 priority payload extracted from
@@ -62,7 +62,7 @@ func (ss *ServerStream) setPriority(p *frame.Priority) {
 type StreamEventType uint8
 
 const (
-	EventHeaders  StreamEventType = iota + 1
+	EventHeaders StreamEventType = iota + 1
 	EventData
 	EventTrailers
 	EventReset
@@ -171,6 +171,7 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 		if !ok {
 			return StreamEvent{}, ErrStreamClosed
 		}
+		ss.creditConsumed(e)
 		return e, nil
 	default:
 	}
@@ -179,9 +180,48 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 		if !ok {
 			return StreamEvent{}, ErrStreamClosed
 		}
+		ss.creditConsumed(e)
 		return e, nil
 	case <-ctx.Done():
 		return StreamEvent{}, ctx.Err()
+	}
+}
+
+// creditConsumed returns per-stream flow-control credit for body bytes the
+// application has now taken delivery of, emitting a WINDOW_UPDATE once enough
+// has accumulated to be worth a frame.
+//
+// Refunding on CONSUMPTION rather than on receipt is what makes
+// SETTINGS_INITIAL_WINDOW_SIZE mean what it advertises. Refunding the moment a
+// DATA frame arrived handed the peer fresh credit for bytes that were only
+// buffered, so the window bounded nothing and a fast uploader could outrun a
+// briefly descheduled handler until the per-stream event channel overflowed and
+// the stream was reset. RFC 9113 §5.2.1 (rfc9113.txt:1274) is explicit that this
+// is what the window is for: "The sender of a flow-controlled frame MUST NOT
+// send more than the receiver allows", and a receiver that always allows more
+// has opted out of the mechanism.
+//
+// Called on the handler goroutine, which already writes under wmu elsewhere.
+// The connection-level window keeps its receipt-time refund: §6.9.1 requires
+// every flow-controlled frame be counted there whatever becomes of its stream,
+// and gating it on one application's reading would let a single slow handler
+// wedge every other stream on the connection.
+func (ss *ServerStream) creditConsumed(e StreamEvent) {
+	if ss.sc == nil || e.Type != EventData || len(e.Data) == 0 {
+		return
+	}
+	ss.mu.Lock()
+	ss.recvRefundPending += uint32(len(e.Data)) //nolint:gosec // G115: frame length ≤ 2^24 per RFC
+	refund := uint32(0)
+	if ss.recvRefundPending >= recvWindowRefundThreshold {
+		refund = ss.recvRefundPending
+		ss.recvRefundPending = 0
+		ss.recvWindow += int32(refund) //nolint:gosec // G115: refund ≤ the window it came from
+	}
+	closed := ss.closed
+	ss.mu.Unlock()
+	if refund > 0 && !closed {
+		_ = ss.sc.writeWindowUpdate(ss.id, refund)
 	}
 }
 

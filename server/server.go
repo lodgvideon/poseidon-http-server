@@ -336,6 +336,14 @@ func (s *Server) acceptLoop(ctx context.Context, sc *conn.ServerConn, leaf *x509
 			stream, err := sc.AcceptStream(acceptCtx)
 			cancel()
 			if err != nil {
+				// A deadline with streams still in flight does not end anything: the
+				// connection is busy, it just has not opened a NEW stream lately.
+				// Returning here would leave the socket open with nobody accepting
+				// on it, so the response in flight completes and every request after
+				// it is ignored. Keep waiting instead.
+				if errors.Is(err, context.DeadlineExceeded) && sc.ActiveStreams() > 0 {
+					continue
+				}
 				s.closeIfFinished(sc, err)
 				return
 			}
