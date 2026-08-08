@@ -501,19 +501,38 @@ func (sc *ServerConn) peerMaxFrameSize() int {
 // afterwards, and a later ServerStream.Close on the same stream must be the
 // no-op it already is for a stream that ended normally.
 func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
-	if sc.closed.Load() {
-		return ErrConnClosed
-	}
+	// Close for writing BEFORE the frame goes out. A handler goroutine holding
+	// this stream gates its writes on ss.closed alone, so any window between the
+	// RST_STREAM reaching the wire and the flag being set is a window in which it
+	// can answer on a stream the server has just reset — what RFC 9113 §5.1
+	// (rfc9113.txt:1082) forbids.
 	ss.mu.Lock()
 	ss.closed = true
 	ss.mu.Unlock()
+	if sc.closed.Load() {
+		// Connection already gone: release here, since no write will follow.
+		sc.markStreamDone(ss.id)
+		return ErrConnClosed
+	}
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
+	// Release unconditionally, whatever becomes of the write — an early return
+	// used to leave the stream in the registry with its context uncancelled,
+	// stranding the handler goroutine, inflating ActiveStreams, and leaking the
+	// peer's push allowance (which is counted by scanning that registry). Every
+	// caller discards this error, so nothing downstream could compensate.
+	//
+	// Registered AFTER the wmu unlock so that, by defer LIFO, it runs BEFORE it —
+	// the deregistration stays inside the wmu critical section. writePushPromise
+	// takes wmu and then tests registry identity to decide whether the parent is
+	// still live, so a window in which wmu is free while the reset stream is
+	// still registered is a window in which PUSH_PROMISE goes out on a stream
+	// this endpoint has already reset (§6.6, and §5.1 rfc9113.txt:1082).
+	defer sc.markStreamDone(ss.id)
 	if err := sc.fr.WriteRSTStream(ss.id, code); err != nil {
 		return err
 	}
 	sc.bumpFramesSent()
-	sc.markStreamDone(ss.id)
 	return nil
 }
 
@@ -533,15 +552,33 @@ func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	// reset goes out. A handler goroutine holding that *ServerStream gates its
 	// writes on ss.closed alone, so without this it would answer on a stream the
 	// server has just reset — RFC 9113 §5.1 (rfc9113.txt:1082) forbids sending
-	// anything but PRIORITY there. The registry entry is left alone: a malformed
-	// PRIORITY naming an idle stream must not evict a live sibling.
-	if ss := sc.lookupStream(id); ss != nil {
+	// anything but PRIORITY there.
+	live := sc.lookupStream(id) != nil
+	if live {
+		ss := sc.lookupStream(id)
 		ss.mu.Lock()
 		ss.closed = true
 		ss.mu.Unlock()
 	}
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
+	// ...and release it, exactly as writeServerRSTStream does. Setting ss.closed
+	// without deregistering leaves the stream in the registry with its context
+	// uncancelled: its handler goroutine waits forever on events that will never
+	// come, ActiveStreams never returns to zero so IdleTimeout can never reap the
+	// connection, and the odd-stream scan keeps counting it toward
+	// MaxConcurrentStreams until every later request is refused. Two client
+	// frames reach this path — a wrong-length PRIORITY or a zero-increment
+	// WINDOW_UPDATE on an open stream — and the rapid-reset budget does not apply,
+	// because these are resets this server sends.
+	//
+	// Only when the identifier resolved: an unknown or idle id must not evict a
+	// live sibling's entry. Deferred after the unlock so it runs before it, so
+	// the deregistration stays inside the wmu critical section that
+	// writePushPromise's liveness test depends on.
+	if live {
+		defer sc.markStreamDone(id)
+	}
 	if err := sc.fr.WriteRSTStream(id, code); err != nil {
 		return err
 	}
