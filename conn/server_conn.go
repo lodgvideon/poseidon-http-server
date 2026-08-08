@@ -313,7 +313,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	// Step 2: send server SETTINGS.
 	myParams := encodeAdvertised(opts.AdvertisedSettings)
 	if err := sc.fr.WriteSettings(myParams); err != nil {
-		_ = nc.Close()
+		sc.abortHandshake(nc)
 		return nil, fmt.Errorf("server write settings: %w", err)
 	}
 	sc.atomicFramesSent.Add(1)
@@ -322,35 +322,27 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 	// Create the real frame handler early so that non-SETTINGS frames
 	// arriving during the handshake (e.g. HEADERS) are not lost.
 	sc.handler = newServerConnHandler(sc, sc.dec, int(sc.opts.AdvertisedSettings.MaxHeaderListSize), int32(sc.opts.AdvertisedSettings.InitialWindowSize), sc.opts.StreamEventBuffer) //nolint:gosec // G115: AdvertisedSettings.defaulted() clamps InitialWindowSize to ≤ 2^31-1
-	peer, err := handshakeServerSettings(ctx, sc.fr, sc.handler)
-	if err != nil {
-		_ = nc.Close()
-		return nil, err
-	}
-	// Validate the client's INITIAL SETTINGS (RFC 9113 §6.5.2). The handshake
-	// path does not flow through applyPeerSettings, so a bad initial value — e.g.
-	// an INITIAL_WINDOW_SIZE that would make every stream's send window negative —
-	// must be rejected here, with a GOAWAY carrying the right error code.
-	if verr := validatePeerSettings(peer); verr != nil {
+	// applyPeerSettings is handed to the handshake rather than called after it, so
+	// the client's values are in force before any frame that follows them in the
+	// same batch is dispatched. It validates (RFC 9113 §6.5.2), merges, resizes
+	// the shared encoder under wmu, and carries the retroactive
+	// SETTINGS_INITIAL_WINDOW_SIZE delta to any stream that already exists —
+	// though with the settings applied in receipt order there is normally nothing
+	// for that delta to correct. Uncontended: the reader goroutine has not started.
+	if _, err := handshakeServerSettings(ctx, sc.fr, sc.handler, sc.applyPeerSettings); err != nil {
 		var ce connError
-		if errors.As(verr, &ce) {
+		if errors.As(err, &ce) {
 			sc.sendGoAway(ce.code)
 		}
-		_ = nc.Close()
-		return nil, verr
+		sc.abortHandshake(nc)
+		return nil, err
 	}
-	sc.psMu.Lock()
-	for i := range peer.N {
-		setPeerSetting(&sc.peerSettings, peer.Pairs[i].ID, peer.Pairs[i].Value)
-	}
-	sc.psMu.Unlock()
-	sc.applyInitialPeerSettings(peer)
 
 	// If the caller opted into a larger connection recv window, advertise it now
 	// (one WINDOW_UPDATE, after the handshake and before the reader starts so
 	// there is no wmu contention). No-op — and no unsolicited frame — by default.
 	if err := sc.sendInitialConnWindowUpdate(); err != nil {
-		_ = nc.Close()
+		sc.abortHandshake(nc)
 		return nil, fmt.Errorf("server initial connection window update: %w", err)
 	}
 
@@ -404,8 +396,8 @@ func readClientPreface(nc net.Conn) error {
 //   - Read client SETTINGS ACK for our SETTINGS
 //
 // Returns the client's SETTINGS.
-func handshakeServerSettings(ctx context.Context, fr *frame.Framer, delegate frame.Handler) (frame.SettingsParams, error) {
-	rec := &settingsRecorder{delegate: delegate, fr: fr}
+func handshakeServerSettings(ctx context.Context, fr *frame.Framer, delegate frame.Handler, apply func(frame.SettingsParams) error) (frame.SettingsParams, error) {
+	rec := &settingsRecorder{delegate: delegate, fr: fr, apply: apply}
 	for !rec.peerSeen {
 		if err := readOneFrame(ctx, fr, rec); err != nil {
 			return frame.SettingsParams{}, fmt.Errorf("server read client settings: %w", err)
@@ -544,7 +536,16 @@ func (sc *ServerConn) lastPeerStreamID() uint32 {
 	maxID := sc.maxClientStreamID.Load()
 	sc.smu.Lock()
 	for id := range sc.streams {
-		if id > maxID {
+		// Odd only. RFC 9113 §5.1.1 reserves even identifiers for the server, and
+		// §6.8 (rfc9113.txt:2013) asks for "the highest-numbered stream identifier
+		// for which the sender of the GOAWAY frame might have taken some action on"
+		// — among streams the PEER initiated. Counting a live push stream here
+		// raised the answer above the highest client stream, so a client read the
+		// GOAWAY as "everything below this was processed" and stopped retrying
+		// requests this server had never seen. The two counting loops in
+		// registerStream and writePushPromise both filter by parity; this one did
+		// not.
+		if id%2 == 1 && id > maxID {
 			maxID = id
 		}
 	}
@@ -609,15 +610,6 @@ func (sc *ServerConn) isIdleStream(id uint32) bool {
 		return id > sc.maxClientStreamID.Load()
 	}
 	return id >= sc.pushIDs.v.Load()
-}
-
-func (sc *ServerConn) applyInitialPeerSettings(peer frame.SettingsParams) {
-	for i := range peer.N {
-		p := peer.Pairs[i]
-		if p.ID == frame.SettingHeaderTableSize {
-			sc.enc.SetMaxDynamicTableSize(p.Value)
-		}
-	}
 }
 
 // IsAlive reports whether the connection is open.
@@ -707,6 +699,22 @@ func newCountingFramer(nc net.Conn, sc *ServerConn, maxFrameSize uint32) *frame.
 	)
 	fr.SetMaxReadFrameSize(maxFrameSize)
 	return fr
+}
+
+// abortHandshake tears down a connection that failed to come up, after connCtx
+// exists. Closing the socket alone is not enough: connCtx is a child of the
+// caller's context, which for this server is the process-lifetime context every
+// connection is handed, so an uncancelled child stays in its parent's map
+// forever — a leak whose rate an unauthenticated peer chooses. A stream may also
+// already be registered, because the handshake forwards HEADERS to the real
+// handler; shutdownStreams releases it and its own context child.
+func (sc *ServerConn) abortHandshake(nc net.Conn) {
+	sc.shutdownStreams(nil)
+	if sc.connCancel != nil {
+		sc.connCancel()
+	}
+	sc.fr.Close()
+	_ = nc.Close()
 }
 
 // maxStreamID is the largest legal stream identifier, and the last-stream-id a
@@ -1030,6 +1038,15 @@ type settingsRecorder struct {
 	// fr, when set, is used to acknowledge each non-ACK SETTINGS frame the
 	// moment its values have been processed (RFC 9113 §6.5.3).
 	fr *frame.Framer
+	// apply, when set, publishes the peer's SETTINGS to the connection the
+	// instant they are processed — before any later frame in the same batch is
+	// dispatched. RFC 9113 §6.5 (rfc9113.txt:1830): SETTINGS "applies to the
+	// connection, not a single stream". A client may pipeline preface, SETTINGS
+	// and its first HEADERS into one segment, and the handshake forwards that
+	// HEADERS to the real handler, so a stream can register mid-handshake; if the
+	// settings are published only afterwards it seeds its windows from the
+	// protocol defaults and stays there.
+	apply func(frame.SettingsParams) error
 }
 
 func (r *settingsRecorder) OnData(fh frame.FrameHeader, data []byte, pad uint8) error {
@@ -1069,6 +1086,14 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 		setPeerSetting(&r.peer, s.Pairs[i].ID, s.Pairs[i].Value)
 	}
 	r.peerSeen = true
+	// Publish before acknowledging, and before the next frame is read. Everything
+	// after this point in the handshake — a pipelined HEADERS, a stream-level
+	// WINDOW_UPDATE — then sees the values the client actually sent.
+	if r.apply != nil {
+		if err := r.apply(r.peer); err != nil {
+			return err
+		}
+	}
 	// §6.5.3 (:1858): "Once all values have been processed, the recipient MUST
 	// immediately emit a SETTINGS frame with the ACK flag set." Every non-ACK
 	// SETTINGS in the handshake window gets its own acknowledgement; the caller

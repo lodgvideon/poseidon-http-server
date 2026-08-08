@@ -43,13 +43,19 @@ func TestServerConnHandler_OnOriginAltSvc_IgnoredAndGuarded(t *testing.T) {
 	}
 }
 
-// applyInitialPeerSettings applies the client's initial SETTINGS to the server's
-// HPACK encoder; the SETTINGS_HEADER_TABLE_SIZE branch (which resizes the
-// encoder's dynamic table) was uncovered. Feed it an explicit table size plus an
-// unrelated setting so both the matched and skipped branches run, across a range
-// of peer-supplied sizes (including 0 and a large value) — an untrusted peer
-// value must never panic the server.
-func TestServerConn_ApplyInitialPeerSettings_HeaderTableSize(t *testing.T) {
+// applyPeerSettings applies the client's SETTINGS to the server's HPACK encoder;
+// the SETTINGS_HEADER_TABLE_SIZE branch (which resizes the encoder's dynamic
+// table) was uncovered. Feed it an explicit table size plus an unrelated setting
+// so both the matched and skipped branches run, across a range of peer-supplied
+// sizes (including 0 and a large value) — an untrusted peer value must never
+// panic the server.
+//
+// This used to drive applyInitialPeerSettings, a second entry point that applied
+// the handshake's SETTINGS without the retroactive INITIAL_WINDOW_SIZE delta.
+// That omission was a defect (a stream opened in the handshake window never saw
+// the client's window), so the handshake now goes through applyPeerSettings and
+// this test follows it there.
+func TestServerConn_ApplyPeerSettings_HeaderTableSize(t *testing.T) {
 	cli, srv := net.Pipe()
 	defer cli.Close()
 	done := make(chan struct{})
@@ -68,7 +74,9 @@ func TestServerConn_ApplyInitialPeerSettings_HeaderTableSize(t *testing.T) {
 		var p frame.SettingsParams
 		setPeerSetting(&p, frame.SettingHeaderTableSize, size)
 		setPeerSetting(&p, frame.SettingInitialWindowSize, 65535) // exercises the skipped branch
-		sc.applyInitialPeerSettings(p)                            // must not panic for any peer value
+		if err := sc.applyPeerSettings(p); err != nil {           // must not panic or reject
+			t.Fatalf("applyPeerSettings(HEADER_TABLE_SIZE=%d): %v", size, err)
+		}
 	}
 	if !sc.IsAlive() {
 		t.Fatal("connection died applying peer HEADER_TABLE_SIZE settings")
