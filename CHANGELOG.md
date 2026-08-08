@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.6.0...v0.7.0) (2026-08-08)
+
+
+### Features
+
+* reconcile the server with RFC 9113 (HTTP/2) ([#60](https://github.com/lodgvideon/poseidon-http-server/issues/60)) ([5fb20f3](https://github.com/lodgvideon/poseidon-http-server/commit/5fb20f350b3cf925f47bba13c59ed790fcd25914))
+
 ## [0.6.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.5.0...v0.6.0) (2026-08-01)
 
 
