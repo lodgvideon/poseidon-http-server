@@ -22,12 +22,11 @@ type ServerStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu              sync.Mutex
-	localEnded      bool
-	remoteEnded     bool
-	closed          bool
-	headersSent     bool
-	headersReceived bool
+	// st is the RFC §5.1 state, packed. It replaced five booleans; see
+	// conn/stream_state.go for why none of them is separately settable.
+	st atomic.Uint32
+
+	mu sync.Mutex
 	// priority stores the RFC 7540 §5.3 priority payload received in
 	// the first HEADERS frame (or set by PushWithPriority), if any.
 	// nil if no priority was specified. Accessed atomically: written
@@ -121,18 +120,14 @@ func (ss *ServerStream) SendHeaders(ctx context.Context, fields []hpack.HeaderFi
 // frame via the PRIORITY flag. Pass nil to omit the priority block
 // (equivalent to SendHeaders).
 func (ss *ServerStream) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
-	ss.mu.Lock()
-	if ss.closed || ss.localEnded {
-		ss.mu.Unlock()
+	// Early exit only; authorizeSend inside the write lock is what decides.
+	if !ss.state().Writable() {
 		return ErrStreamClosed
 	}
-	ss.mu.Unlock()
 	if err := ss.sc.writeServerHeaders(ctx, ss, fields, endStream, prio); err != nil {
 		return err
 	}
-	ss.mu.Lock()
-	ss.headersSent = true
-	ss.mu.Unlock()
+	ss.advance(stSentFields)
 	if endStream && ss.markLocalEnd() {
 		// Fully closed (both halves ended): release the stream.
 		ss.sc.markStreamDone(ss.id)
@@ -145,18 +140,46 @@ func (ss *ServerStream) SendHeadersWithPriority(ctx context.Context, fields []hp
 // outbound flow control (RFC 7540 §6.9). Blocks until enough send-window
 // credit is available.
 func (ss *ServerStream) SendData(ctx context.Context, p []byte, endStream bool) error {
-	ss.mu.Lock()
-	if ss.closed || ss.localEnded {
-		ss.mu.Unlock()
+	// Early exit only; authorizeSend inside the write lock is what decides.
+	if !ss.state().Writable() {
 		return ErrStreamClosed
 	}
-	ss.mu.Unlock()
 	if err := ss.sc.writeServerData(ctx, ss, p, endStream); err != nil {
 		return err
 	}
 	if endStream && ss.markLocalEnd() {
 		// Fully closed (both halves ended): release the stream.
 		ss.sc.markStreamDone(ss.id)
+	}
+	return nil
+}
+
+// authorizeSend reports whether a HEADERS or DATA frame may still be put on this
+// stream. It MUST be called with sc.wmu held, immediately before the frame is
+// handed to the framer.
+//
+// Checking earlier is not equivalent, and the gap is not small: SendData can
+// wait in acquireSendCredits for as long as the peer withholds window, and a
+// HEADERS write has an encode step in front of it. A reset arriving in that gap
+// used to produce this interleaving —
+//
+//	reset path: record the reset · take wmu · write RST_STREAM · release wmu
+//	writer:     (already past its check)  ·  take wmu · write DATA
+//
+// — which puts DATA on the wire after RST_STREAM, on a stream RFC 9113 §5.1
+// (rfc9113.txt:1082) has closed: "An endpoint MUST NOT send frames other than
+// PRIORITY on a closed stream." Because every reset path records the reset
+// BEFORE acquiring wmu, a writer that re-reads the state while holding wmu
+// cannot miss one that has already reached the wire.
+//
+// Scoped to HEADERS and DATA on purpose. RST_STREAM, WINDOW_UPDATE and PRIORITY
+// do not pass through here, and must not: the RST_STREAM that closes the stream
+// is written by a path that has just recorded the reset, and gating it on that
+// same state would keep the §6.9.1 FLOW_CONTROL_ERROR and the event-overflow
+// INTERNAL_ERROR resets off the wire entirely.
+func (ss *ServerStream) authorizeSend() error {
+	if !ss.state().Writable() {
+		return ErrStreamClosed
 	}
 	return nil
 }
@@ -218,24 +241,19 @@ func (ss *ServerStream) creditConsumed(e StreamEvent) {
 		ss.recvRefundPending = 0
 		ss.recvWindow += int32(refund) //nolint:gosec // G115: refund ≤ the window it came from
 	}
-	closed := ss.closed
 	ss.mu.Unlock()
-	if refund > 0 && !closed {
+	if refund > 0 && !ss.state().WasReset() {
 		_ = ss.sc.writeWindowUpdate(ss.id, refund)
 	}
 }
 
 // Close sends RST_STREAM(CANCEL) if neither side has ended. Idempotent.
 func (ss *ServerStream) Close() error {
-	ss.mu.Lock()
-	already := ss.closed
-	bothEnded := ss.localEnded && ss.remoteEnded
-	ss.closed = true
-	ss.mu.Unlock()
-	if already {
-		return nil
-	}
-	if bothEnded {
+	// One transition answers both questions: was this already closed, and had both
+	// halves ended. Reading them separately is what let a reset land between the
+	// two and draw a second RST_STREAM.
+	before := ss.advance(stReset)
+	if before.Terminal() {
 		return nil
 	}
 	return ss.sc.writeServerRSTStream(ss, frame.ErrCodeCancel)
@@ -243,13 +261,7 @@ func (ss *ServerStream) Close() error {
 
 // remoteHalfEnded reports whether the client has ended its half of the stream,
 // i.e. whether the stream is in RFC 9113 §5.1's "half-closed (remote)" state.
-// Read under ss.mu: the reader goroutine consults it while handler goroutines
-// may be writing localEnded through markLocalEnd.
-func (ss *ServerStream) remoteHalfEnded() bool {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	return ss.remoteEnded
-}
+func (ss *ServerStream) remoteHalfEnded() bool { return ss.state().RemoteEnded() }
 
 // markRemoteEnd marks the remote side as closed.
 // markRemoteEnd records that the client has ended its half of the stream
@@ -259,25 +271,19 @@ func (ss *ServerStream) remoteHalfEnded() bool {
 // server may still be writing its response and must keep receiving that stream's
 // WINDOW_UPDATE / RST_STREAM (RFC 7540 §5.1).
 func (ss *ServerStream) markRemoteEnd() bool {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	ss.remoteEnded = true
-	return ss.localEnded
+	return ss.advance(stRecvEnded).LocalEnded()
 }
 
 // markLocalEnd records that the server has ended its half of the stream (sent
 // END_STREAM). It returns true if the stream is now fully closed.
 func (ss *ServerStream) markLocalEnd() bool {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	ss.localEnded = true
-	return ss.remoteEnded
+	return ss.advance(stSentEnded).RemoteEnded()
 }
 
 // markRemoteEndReset records a client RST_STREAM and reports whether the
-// request was still open (END_STREAM not yet observed) at that moment —
-// computed atomically under ss.mu so the rapid-reset classification
-// (CVE-2023-44487) cannot race the flag write.
+// request was still open (END_STREAM not yet observed) at that moment. The
+// answer comes from the transition itself, so the rapid-reset classification
+// (CVE-2023-44487) cannot race the state it is classifying.
 //
 // A received RST_STREAM closes the stream in both directions, not merely the
 // remote half. Recording that is what stops the server answering a reset with a
@@ -287,12 +293,7 @@ func (ss *ServerStream) markLocalEnd() bool {
 // frame." Called before the EventReset is pushed, so no handler can observe the
 // reset while the stream still reports itself writable.
 func (ss *ServerStream) markRemoteEndReset() (wasOpen bool) {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	wasOpen = !ss.remoteEnded
-	ss.remoteEnded = true
-	ss.closed = true
-	return wasOpen
+	return !ss.advance(stRecvEnded | stReset).RemoteEnded()
 }
 
 // push delivers an event from the reader goroutine. Non-blocking; on overflow
@@ -313,11 +314,7 @@ func (ss *ServerStream) push(e StreamEvent) {
 		return
 	default:
 	}
-	ss.mu.Lock()
-	already := ss.closed
-	ss.closed = true
-	ss.mu.Unlock()
-	if already {
+	if ss.advance(stReset).WasReset() {
 		return
 	}
 	go func() {

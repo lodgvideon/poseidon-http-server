@@ -3,8 +3,6 @@ package conn
 import (
 	"context"
 	"errors"
-	"math"
-	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -20,7 +18,7 @@ import (
 // Requirements:
 //   - Client must have SETTINGS_ENABLE_PUSH = 1 (default).
 //   - PUSH_PROMISE must be sent before any response headers on the parent stream.
-//   - Promised stream ID must be even, server-initiated, monotonically increasing.
+//   - The promised stream ID is even and server-initiated; streamTable owns it.
 //   - Server must not push in response to a push response (no recursive push).
 // ---------------------------------------------------------------------------
 
@@ -55,29 +53,6 @@ var ErrPushRefused = errors.New("poseidon: push would exceed the peer's concurre
 // streams on the connection". Server push is the only way a server opens one.
 var ErrPeerGoAway = errors.New("poseidon: peer has sent GOAWAY; no new streams")
 
-// pushIDCounter generates even-numbered stream IDs for server-initiated
-// push streams. Must start at 2 (the lowest valid server stream ID).
-type pushIDCounter struct {
-	v atomic.Uint32
-}
-
-func newPushIDCounter() *pushIDCounter {
-	c := &pushIDCounter{}
-	c.v.Store(2) // first push stream ID
-	return c
-}
-
-// next returns the next even stream ID (2, 4, 6, ...).
-func (c *pushIDCounter) next() uint32 {
-	for {
-		old := c.v.Load()
-		nextID := old + 2
-		if c.v.CompareAndSwap(old, nextID) {
-			return old
-		}
-	}
-}
-
 // isPushEnabled checks whether the peer has enabled push.
 func (sc *ServerConn) isPushEnabled() bool {
 	sc.psMu.RLock()
@@ -91,7 +66,7 @@ func (sc *ServerConn) isPushEnabled() bool {
 //
 // The caller must hold the parent stream's trust (i.e. this is called
 // from Push on ServerStream).
-func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, promisedID uint32, fields []hpack.HeaderField) (*ServerStream, error) {
+func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, fields []hpack.HeaderField) (*ServerStream, error) {
 	if sc.closed.Load() {
 		return nil, ErrConnClosed
 	}
@@ -99,87 +74,63 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
 
-	// §6.6 again, the stateful half: the parent must still be live. markStreamDone
-	// deregisters a stream on completion or reset, so identity in the registry is
-	// the only reliable test — ss.closed is not set on every reset path, and
-	// remoteEnded is true for every legitimate push (the request has ended; the
-	// response has not).
+	// §6.6 again, the stateful half: the parent must still be live. A reset alone
+	// does not say enough — a stream that ended normally is equally unavailable to
+	// push on — so the test is identity in the registry, which markStreamDone
+	// clears on completion and on reset alike.
 	if sc.lookupStream(parent.id) != parent {
 		return nil, ErrStreamClosed
 	}
-	// §5.1.2: a promised stream counts against the peer's concurrency limit from
-	// the moment the PUSH_PROMISE is sent. Only server-initiated (even) streams
-	// count against OUR allowance; the client's own streams are governed by the
-	// limit this server advertises.
+	// §5.1.2 (rfc9113.txt:1140): "Endpoints MUST NOT exceed the limit set by their
+	// peer." A promised stream counts from the moment the PUSH_PROMISE is sent,
+	// and only server-initiated streams count against that allowance.
 	sc.psMu.RLock()
-	pushLimit := settingValue(sc.peerSettings, frame.SettingMaxConcurrentStreams, math.MaxUint32)
+	pushLimit := settingValue(sc.peerSettings, frame.SettingMaxConcurrentStreams, noStreamLimit)
 	sc.psMu.RUnlock()
-	if limit := pushLimit; limit < math.MaxUint32 {
-		sc.smu.Lock()
-		open := 0
-		for id := range sc.streams {
-			if id%2 == 0 {
-				open++
-			}
-		}
-		sc.smu.Unlock()
-		if uint32(open) >= limit { //nolint:gosec // G115: open is bounded by the same limit
-			return nil, ErrPushRefused
-		}
-	}
 
-	// Same pre-encode check as writeServerHeaders: measuring the encoded block
-	// would already have mutated the shared dynamic table.
-	// A PUSH_PROMISE payload carries the 4-octet promised stream identifier ahead
-	// of the fragment (§6.6), so the field section gets that much less room.
-	if !fieldsFitFrame(fields, sc.peerMaxFrameSize()-4) {
+	// Pre-encode, because measuring the encoded block would already have mutated
+	// the connection's shared HPACK dynamic table. The budget is what this
+	// endpoint can actually emit — the peer's limit and the framer's are two
+	// different numbers — less the 4-octet promised stream identifier a
+	// PUSH_PROMISE payload carries ahead of the fragment (§6.6).
+	if !fieldsFitFrame(fields, sc.maxWritableFrame()-4) {
 		return nil, ErrHeaderBlockTooLarge
 	}
 
-	// Encode the header block.
+	// Born half-closed (remote): §5.1 (rfc9113.txt:1032) — the client never sends
+	// on a pushed stream, so recording it is what lets markLocalEnd complete the
+	// stream when the pushed response ends. The context is bound before the
+	// stream is published, so nothing can find it in the table half-built.
+	pushStream := &ServerStream{sc: sc, events: make(chan StreamEvent, 4)}
+	pushStream.advance(stRecvEnded)
+	pushStream.ctx, pushStream.cancel = context.WithCancel(sc.connCtx)
+
+	// Reserving the identifier, registering the stream and seeding its window are
+	// one step. Allocating an identifier separately burned it when the write then
+	// failed, and seeding outside the table's lock let a concurrent
+	// SETTINGS_INITIAL_WINDOW_SIZE change double-apply its delta or miss it.
+	promisedID, ok := sc.tbl.reservePush(pushStream, pushLimit)
+	if !ok {
+		pushStream.cancel()
+		return nil, ErrPushRefused
+	}
+
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := sc.enc.EncodeBlock(*buf, fields)
-
-	// Write PUSH_PROMISE on the parent stream.
 	err := sc.fr.WritePushPromise(parent.id, promisedID, block, true, 0)
-
 	*buf = block[:0]
 	encBufPool.Put(buf)
 	if err != nil {
+		// The reservation is registered and counted by now, so a failed write has
+		// to give it back. Leaving it behind kept ActiveStreams above zero for the
+		// life of the connection — the exact predicate IdleTimeout uses to decide a
+		// connection is busy, so it could never be reaped — and permanently spent
+		// one of the peer's SETTINGS_MAX_CONCURRENT_STREAMS slots.
+		sc.tbl.release(promisedID)
+		pushStream.cancel()
 		return nil, err
 	}
-
-	// Create the promised stream, already half-closed (remote). RFC 9113 §5.1
-	// (rfc9113.txt:1032): a stream the server reserves goes to "half-closed
-	// (remote)" the moment it starts sending — the client never sends anything on
-	// it. Recording that is what lets markLocalEnd complete the stream when the
-	// pushed response ends; without it markLocalEnd always saw remoteEnded=false,
-	// markStreamDone was never reached, and every pushed stream stayed in the
-	// registry for the life of the connection. Harmless until §5.1.2 counting
-	// arrived, at which point it permanently exhausted the peer's push allowance.
-	pushStream := &ServerStream{
-		id:     promisedID,
-		sc:     sc,
-		events: make(chan StreamEvent, 4),
-	}
-	pushStream.remoteEnded = true
-
-	// Seed push stream send window from peer's INITIAL_WINDOW_SIZE.
-	sc.psMu.RLock()
-	initial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	sc.psMu.RUnlock()
-	pushStream.mu.Lock()
-	pushStream.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
-	pushStream.mu.Unlock()
-
-	// Register the push stream. Bind a per-stream context (like registerStream)
-	// so markStreamDone cancels a pushed response's handler on push-stream reset
-	// or connection close.
-	sc.smu.Lock()
-	pushStream.ctx, pushStream.cancel = context.WithCancel(sc.connCtx)
-	sc.streams[promisedID] = pushStream
-	sc.smu.Unlock()
 
 	sc.bumpFramesSent()
 
@@ -213,24 +164,17 @@ func (ss *ServerStream) Push(ctx context.Context, promiseHeaders []hpack.HeaderF
 	// §8.4 defers to §8.3: the promise is a request, so it must satisfy the same
 	// pseudo-header rules. Checked here rather than in the server/ wrapper so a
 	// direct user of this package gets the same guarantee, and checked before an
-	// identifier is burned — pushIDs.next() is not reversible.
+	// identifier is reserved.
 	if !validRequestPseudoHeaders(promiseHeaders) {
 		return nil, ErrPushMalformedPromise
 	}
 
 	// RFC 7540 §8.2.1: PUSH_PROMISE must come before response headers.
-	ss.mu.Lock()
-	if ss.headersSent {
-		ss.mu.Unlock()
+	if ss.state().SentFields() {
 		return nil, ErrPushAfterResponse
 	}
-	ss.mu.Unlock()
 
-	// Allocate even stream ID.
-	promisedID := ss.sc.pushIDs.next()
-
-	// Write PUSH_PROMISE and create the push stream.
-	return ss.sc.writePushPromise(ctx, ss, promisedID, promiseHeaders)
+	return ss.sc.writePushPromise(ctx, ss, promiseHeaders)
 }
 
 // PushWithPriority is like Push but also stores an RFC 7540 §5.3

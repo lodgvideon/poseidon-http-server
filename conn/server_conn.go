@@ -32,9 +32,12 @@ type ServerConn struct {
 
 	wmu sync.Mutex // serializes all writes to fr
 
-	// smu guards streams map and stream ID tracking.
-	smu     sync.Mutex
-	streams map[uint32]*ServerStream
+	// tbl owns the stream identifier space and the live stream population:
+	// parity rules, admission, release, counting, and the idle/closed
+	// distinction. It replaced a bare map plus a mutex plus two counters that
+	// every caller composed its own answer out of — see conn/stream_table.go for
+	// the three defects that produced.
+	tbl *streamTable
 
 	// fcMu guards the connection-level recv window.
 	fcMu              sync.Mutex
@@ -87,15 +90,6 @@ type ServerConn struct {
 	// Compared against opts.rapidResetBudget(). Atomic: incremented by the
 	// single reader goroutine, read on the same path; no allocation.
 	rapidResetCount atomic.Uint32
-
-	// maxClientStreamID tracks the highest client-initiated (odd) stream
-	// ID ever registered, so GOAWAY reports the correct last-processed
-	// stream ID (RFC 7540 §6.8) even after the stream has been torn down
-	// and removed from the streams map.
-	maxClientStreamID atomic.Uint32
-
-	// pushIDs generates even stream IDs for server push (RFC 7540 §8.2).
-	pushIDs *pushIDCounter
 
 	// Stats counters.
 	atomicBytesSent       atomic.Int64
@@ -295,15 +289,21 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		enc:                hpack.NewEncoder(),
 		dec:                hpack.NewDecoder(),
 		opts:               opts,
-		streams:            map[uint32]*ServerStream{},
 		readerDone:         make(chan struct{}),
 		acceptCh:           make(chan *ServerStream, 64),
 		pingWaiters:        make(map[[8]byte]chan struct{}),
 		connRecvWindow:     opts.effectiveConnRecvWindow(),
 		peerConnSendWindow: int32(connInitialRecvWindow),
-		pushIDs:            newPushIDCounter(),
 		goAwaySentID:       maxStreamID,
 	}
+	// The table reads the peer's SETTINGS_INITIAL_WINDOW_SIZE while holding its
+	// own lock, so seeding a new stream and the §6.9.2 retroactive walk cannot
+	// interleave. psMu is a leaf with respect to the table lock and must stay so.
+	sc.tbl = newStreamTable(func() uint32 {
+		sc.psMu.RLock()
+		defer sc.psMu.RUnlock()
+		return settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+	})
 	sc.fr = newCountingFramer(nc, sc, opts.AdvertisedSettings.MaxFrameSize)
 	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
 	// Connection-lifetime context: cancelled on Close or when the caller's ctx
@@ -532,65 +532,20 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (sc *ServerConn) lastPeerStreamID() uint32 {
-	maxID := sc.maxClientStreamID.Load()
-	sc.smu.Lock()
-	for id := range sc.streams {
-		// Odd only. RFC 9113 §5.1.1 reserves even identifiers for the server, and
-		// §6.8 (rfc9113.txt:2013) asks for "the highest-numbered stream identifier
-		// for which the sender of the GOAWAY frame might have taken some action on"
-		// — among streams the PEER initiated. Counting a live push stream here
-		// raised the answer above the highest client stream, so a client read the
-		// GOAWAY as "everything below this was processed" and stopped retrying
-		// requests this server had never seen. The two counting loops in
-		// registerStream and writePushPromise both filter by parity; this one did
-		// not.
-		if id%2 == 1 && id > maxID {
-			maxID = id
-		}
-	}
-	sc.smu.Unlock()
-	return maxID
-}
-
-// noteClientStreamID records id as the highest client-initiated stream ID
-// seen, monotonically (CAS loop). Cheap and race-safe; no allocation.
-func (sc *ServerConn) noteClientStreamID(id uint32) {
-	for {
-		cur := sc.maxClientStreamID.Load()
-		if id <= cur {
-			return
-		}
-		if sc.maxClientStreamID.CompareAndSwap(cur, id) {
-			return
-		}
-	}
-}
+func (sc *ServerConn) lastPeerStreamID() uint32 { return sc.tbl.lastPeerID() }
 
 // validateClientStreamID enforces RFC 9113 §5.1.1 for a newly opened client
 // stream: the ID must be odd and strictly greater than every client stream ID
 // already seen. An even ID, or a reused/decreasing ID (idle-stream reuse), is a
 // connection error of type PROTOCOL_ERROR. Called only for new streams, on the
-// single reader goroutine, before registerStream advances maxClientStreamID.
-func (sc *ServerConn) validateClientStreamID(id uint32) error {
-	if id%2 == 0 {
-		return connError{code: frame.ErrCodeProtocolError, msg: "client-initiated stream ID must be odd"}
-	}
-	if id <= sc.maxClientStreamID.Load() {
-		return connError{code: frame.ErrCodeProtocolError, msg: "client stream ID must exceed all previous client streams"}
-	}
-	return nil
-}
+// single reader goroutine, before admission consumes the identifier.
+func (sc *ServerConn) validateClientStreamID(id uint32) error { return sc.tbl.validateClientID(id) }
 
 // ActiveStreams reports how many streams are currently live on the connection:
 // open, half-closed, or reserved for a push whose response is still being
 // written. Zero means the connection is genuinely idle, which is not the same
 // question as "has a new stream arrived recently".
-func (sc *ServerConn) ActiveStreams() int {
-	sc.smu.Lock()
-	defer sc.smu.Unlock()
-	return len(sc.streams)
-}
+func (sc *ServerConn) ActiveStreams() int { return sc.tbl.live() }
 
 // isIdleStream reports whether the identifier names a stream that has never
 // been opened — RFC 9113 §5.1's "idle" state.
@@ -601,16 +556,12 @@ func (sc *ServerConn) ActiveStreams() int {
 // error; the same frame on a closed one is at most a stream error, because a
 // peer cannot know a stream is gone until its RST_STREAM has arrived.
 //
-// Both counters already exist. maxClientStreamID is the highest client stream
-// ever registered; pushIDs holds the next unused even identifier.
-//
-// Called from the reader goroutine: two atomic loads, no lock, no allocation.
-func (sc *ServerConn) isIdleStream(id uint32) bool {
-	if id%2 == 1 {
-		return id > sc.maxClientStreamID.Load()
-	}
-	return id >= sc.pushIDs.v.Load()
-}
+// The identifier space knows the answer; see conn/stream_table.go. Reading it
+// takes the table's lock — it used to be two atomic loads, but the counters and
+// the population have to be observed together or a caller sees them disagreeing,
+// which is how a stream came to be reported idle and live at once. The lock is
+// held for a comparison, on a path that already takes it to look the stream up.
+func (sc *ServerConn) isIdleStream(id uint32) bool { return sc.tbl.idle(id) }
 
 // IsAlive reports whether the connection is open.
 func (sc *ServerConn) IsAlive() bool {
@@ -933,9 +884,7 @@ func (sc *ServerConn) sendGoAway(code frame.ErrCode) {
 }
 
 func (sc *ServerConn) shutdownStreams(_ error) {
-	sc.smu.Lock()
-	defer sc.smu.Unlock()
-	for _, s := range sc.streams {
+	for _, s := range sc.tbl.drain() {
 		select {
 		case s.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeInternalError, EndStream: true}:
 		default:

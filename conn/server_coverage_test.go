@@ -247,20 +247,18 @@ func TestServerConn_HeadersReceivedFlag(t *testing.T) {
 		t.Fatal("EndStream should be true")
 	}
 
-	stream.mu.Lock()
-	hr := stream.headersReceived
-	re := stream.remoteEnded
-	le := stream.localEnded
-	stream.mu.Unlock()
-
-	if !hr {
-		t.Fatal("headersReceived should be true")
+	// A HEADERS frame carrying END_STREAM changes two facts about the stream, and
+	// they land together: §5.1's "half-closed (remote)", with this endpoint's half
+	// still open.
+	st := stream.state()
+	if !st.RecvdFields() {
+		t.Error("the request field section should be recorded as received")
 	}
-	if !re {
-		t.Fatal("remoteEnded should be true")
+	if !st.RemoteEnded() {
+		t.Error("END_STREAM arrived, so the remote half should be ended")
 	}
-	if le {
-		t.Fatal("localEnded should be false")
+	if st.LocalEnded() {
+		t.Error("this endpoint has sent nothing, so its half should still be open")
 	}
 }
 

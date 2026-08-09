@@ -19,6 +19,7 @@ history.
 | [ADR-0005](0005-h2c-prior-knowledge-and-upgrade.md) | h2c support: prior knowledge vs HTTP/1.1 Upgrade | Accepted |
 | [ADR-0006](0006-responsewriter-interface-and-pusher.md) | `ResponseWriter` as an interface + Push via optional `Pusher` | Accepted |
 | [ADR-0007](0007-rapid-reset-mitigation.md) | Rapid Reset (CVE-2023-44487) mitigation strategy | Accepted |
+| [ADR-0009](0009-stream-state-as-one-value.md) | Stream state is one value, not a set of flags | Accepted |
 
 ## Template
 

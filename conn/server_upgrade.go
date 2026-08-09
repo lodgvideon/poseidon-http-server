@@ -50,7 +50,7 @@ func (sc *ServerConn) seedUpgradedStream(up *UpgradedRequest) {
 	// half-closed (remote) transition below it draws RST_STREAM(STREAM_CLOSED),
 	// which is what RFC 9113 §5.1 requires of that state — a conformant client
 	// sends nothing more on stream 1 after upgrading.
-	s.headersReceived = true
+	s.advance(stRecvFields)
 	s.push(StreamEvent{
 		Type:      EventHeaders,
 		Headers:   up.Headers,

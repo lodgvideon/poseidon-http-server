@@ -226,12 +226,9 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	// STREAM_CLOSED". Left unenforced, body bytes sent after END_STREAM reached
 	// the handler behind its own EOF.
 	if s.remoteHalfEnded() {
-		// writeServerRSTStream, not writeRSTStreamID: it marks the stream closed
-		// under ss.mu and calls markStreamDone itself. Resetting by identifier alone
-		// leaves ss.closed false, and the handler goroutine — which already holds
-		// this *ServerStream and gates its writes on exactly that flag — would then
-		// put its response on the wire AFTER the RST_STREAM, which is the §5.1
-		// violation this guard exists to prevent.
+		// writeServerRSTStream, not writeRSTStreamID: it calls markStreamDone itself,
+		// so the handler goroutine holding this *ServerStream is released rather than
+		// left waiting on events that will never come.
 		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeStreamClosed)
 		return nil
 	}
@@ -316,7 +313,7 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
 		h.pendingDiscard = refused
-		h.pendingTrailer = !isNew && s.headersReceived
+		h.pendingTrailer = !isNew && s.state().RecvdFields()
 		// Only the first HEADERS carries priority; ignore any on trailers.
 		return nil
 	}
@@ -328,11 +325,11 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 
 	isTrailer := false
 	if !isNew {
-		isTrailer = s.headersReceived
+		isTrailer = s.state().RecvdFields()
 	}
 
 	if !isTrailer {
-		s.headersReceived = true
+		s.advance(stRecvFields)
 	}
 	return h.emitHeaderBlock(s, hb, end, isTrailer)
 }
@@ -385,7 +382,7 @@ func (h *serverConnHandler) OnContinuation(fh frame.FrameHeader, hb frame.Header
 	end := h.pendingEndStream
 	isTrailer := h.pendingTrailer
 	if !isTrailer {
-		s.headersReceived = true
+		s.advance(stRecvFields)
 	}
 	return h.emitHeaderBlock(s, h.pendingBuf, end, isTrailer)
 }
@@ -487,8 +484,8 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	}
 	// §5.1 (rfc9113.txt:1044) — a field section arriving after the client already
 	// ended its half is a stream error of type STREAM_CLOSED. Without this the
-	// block was classified as trailers (headersReceived is already set) and
-	// delivered to the handler after its EOF: a second, unannounced field section
+	// block was classified as trailers (the request field section has already been
+	// received) and delivered to the handler after its EOF: a second, unannounced field section
 	// on a request the application considers complete.
 	//
 	// Deliberately after the decode, never before. The block has to reach the
