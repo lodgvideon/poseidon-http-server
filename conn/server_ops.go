@@ -20,11 +20,7 @@ var encBufPool = sync.Pool{
 // --- serverConnOps implementation on *ServerConn ---
 
 // lookupStream returns the stream for the given ID, or nil.
-func (sc *ServerConn) lookupStream(id uint32) *ServerStream {
-	sc.smu.Lock()
-	defer sc.smu.Unlock()
-	return sc.streams[id]
-}
+func (sc *ServerConn) lookupStream(id uint32) *ServerStream { return sc.tbl.lookup(id) }
 
 // registerStream adds a new stream to the registry and delivers it to
 // AcceptStream via acceptCh, seeding its send window from the peer's
@@ -35,42 +31,23 @@ func (sc *ServerConn) lookupStream(id uint32) *ServerStream {
 // without registering it. REFUSED_STREAM signals the request was not processed,
 // so the client may safely retry it on a fresh connection.
 func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
-	// Seed per-stream send window from peer's INITIAL_WINDOW_SIZE.
-	sc.psMu.RLock()
-	initial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	sc.psMu.RUnlock()
-	s.mu.Lock()
-	s.sendWindow = int32(initial) //nolint:gosec // G115: INITIAL_WINDOW_SIZE ≤ 2^31-1 per RFC
-	s.mu.Unlock()
 	s.sc = sc
-
-	// Count only client-initiated (odd) streams: the limit this server advertises
-	// governs what the CLIENT may open. Pushed streams are even and count against
-	// the peer's limit instead (see writePushPromise), so including them here
-	// would let the server's own pushes refuse the client's requests.
-	limit := int(sc.opts.AdvertisedSettings.MaxConcurrentStreams)
-	sc.smu.Lock()
-	clientOpen := 0
-	for sid := range sc.streams {
-		if sid%2 == 1 {
-			clientOpen++
-		}
-	}
-	if limit > 0 && clientOpen >= limit {
-		sc.smu.Unlock()
-		// At the concurrency limit: refuse rather than register. Record the ID as
-		// used (RFC 9113 §5.1.1) so it cannot be reused, then RST (best-effort,
-		// ignored if the connection is already tearing down).
-		sc.noteClientStreamID(id)
+	// Admission seeds the send window and consumes the identifier under the
+	// table's own lock, so the §6.9.2 retroactive window walk cannot interleave
+	// with the seeding, and a refusal still burns the identifier (§5.1.1 forbids
+	// reuse either way).
+	if !sc.tbl.admitClient(id, s, int(sc.opts.AdvertisedSettings.MaxConcurrentStreams)) {
+		// At the concurrency limit: refuse rather than serve. REFUSED_STREAM says
+		// the request was not processed, so the client may safely retry it
+		// elsewhere (§5.1.2). Best-effort; ignored if the connection is going away.
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
 		return false
 	}
 	// Per-stream context derived from the connection context; cancelled when the
-	// stream completes/resets (markStreamDone) or the connection closes.
+	// stream completes or resets (markStreamDone) or the connection closes.
+	s.mu.Lock()
 	s.ctx, s.cancel = context.WithCancel(sc.connCtx)
-	sc.streams[id] = s
-	sc.smu.Unlock()
-	sc.noteClientStreamID(id)
+	s.mu.Unlock()
 	sc.atomicStreamsAccepted.Add(1)
 
 	select {
@@ -115,12 +92,15 @@ func (sc *ServerConn) notePeerGoAway() { sc.peerGoAway.Store(true) }
 
 // markStreamDone cleans up a finished stream.
 func (sc *ServerConn) markStreamDone(id uint32) {
-	sc.smu.Lock()
-	s := sc.streams[id]
-	delete(sc.streams, id)
-	sc.smu.Unlock()
-	if s != nil && s.cancel != nil {
-		s.cancel() // cancel the handler's context on stream completion/reset
+	s := sc.tbl.release(id)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	cancel := s.cancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel() // cancel the handler's context on stream completion/reset
 	}
 }
 
@@ -187,19 +167,12 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 	}
 	const maxWindow = int64(1<<31 - 1)
 
-	sc.psMu.Lock()
-	oldInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	for i := range s.N {
-		p := s.Pairs[i]
-		setPeerSetting(&sc.peerSettings, p.ID, p.Value)
-	}
-	newInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	sc.psMu.Unlock()
-
 	// The encoder is shared with every writer on this connection, and resizing its
 	// dynamic table emits a Dynamic Table Size Update into the next block it
 	// encodes (RFC 7541 §4.2). Taking wmu keeps that from landing in the middle of
-	// a header block another goroutine is already writing.
+	// a header block another goroutine is already writing. Done before the table
+	// section so wmu is never held while the table lock is: a pushing handler
+	// holds wmu across writePushPromise and takes the table lock inside it.
 	sc.wmu.Lock()
 	for i := range s.N {
 		p := s.Pairs[i]
@@ -209,27 +182,37 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 	}
 	sc.wmu.Unlock()
 
-	// Retroactive INITIAL_WINDOW_SIZE delta on all open streams.
-	if newInitial != oldInitial {
-		delta := int64(newInitial) - int64(oldInitial)
-		sc.smu.Lock()
-		victims := make([]*ServerStream, 0, len(sc.streams))
-		for _, st := range sc.streams {
-			victims = append(victims, st)
-		}
-		sc.smu.Unlock()
-
-		for _, st := range victims {
+	// Publishing the new values and carrying §6.9.2's retroactive delta happen
+	// under one lock, together with the seeding of any stream admitted meanwhile.
+	// See streamTable.applyInitialWindow for why they cannot be separate steps.
+	changed := false
+	err := sc.tbl.applyInitialWindow(
+		func() (uint32, uint32) {
+			sc.psMu.Lock()
+			defer sc.psMu.Unlock()
+			oldInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+			for i := range s.N {
+				sett := s.Pairs[i]
+				setPeerSetting(&sc.peerSettings, sett.ID, sett.Value)
+			}
+			newInitial := settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+			changed = newInitial != oldInitial
+			return oldInitial, newInitial
+		},
+		func(st *ServerStream, delta int64) error {
 			st.mu.Lock()
+			defer st.mu.Unlock()
 			newWin := int64(st.sendWindow) + delta
 			if newWin > maxWindow {
-				st.mu.Unlock()
 				return connError{code: frame.ErrCodeFlowControlError, msg: fmt.Sprintf("SETTINGS_INITIAL_WINDOW_SIZE delta overflowed stream %d send window", st.id)}
 			}
 			st.sendWindow = int32(newWin) //nolint:gosec // G115: checked above
-			st.mu.Unlock()
-		}
-
+			return nil
+		})
+	if err != nil {
+		return err
+	}
+	if changed {
 		sc.fcOutMu.Lock()
 		sc.fcOutCond.Broadcast()
 		sc.fcOutMu.Unlock()
@@ -368,7 +351,7 @@ func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fi
 	// simply measure len(block).
 	// Budget the frame payload, not just the field block: a HEADERS frame carrying
 	// a priority block spends 5 octets before the fragment begins (§6.2).
-	budget := sc.peerMaxFrameSize()
+	budget := sc.maxWritableFrame()
 	if prio != nil {
 		budget -= 5
 	}
@@ -484,6 +467,23 @@ func fieldsFitFrame(fields []hpack.HeaderField, limit int) bool {
 		}
 	}
 	return true
+}
+
+// maxWritableFrame is the largest frame payload this endpoint can actually put
+// on the wire: the smaller of what the peer will accept and what the framer will
+// emit.
+//
+// The two are different numbers and pre-checking against the peer's alone lets a
+// frame past the check that the framer then refuses — a client that advertises a
+// large SETTINGS_MAX_FRAME_SIZE (legal up to 2^24-1) opens a whole band of sizes
+// where that happens. writeServerData has always computed this minimum; the
+// field-section paths did not.
+func (sc *ServerConn) maxWritableFrame() int {
+	ours := int(sc.opts.AdvertisedSettings.MaxFrameSize)
+	if peer := sc.peerMaxFrameSize(); peer < ours {
+		return peer
+	}
+	return ours
 }
 
 // peerMaxFrameSize is the largest frame payload the peer has said it will
