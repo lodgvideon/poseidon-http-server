@@ -250,14 +250,14 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 	s.mu.Lock()
 	newVal := int64(s.sendWindow) + int64(increment)
 	if newVal > int64(maxWindow) {
-		// Mark it closed while the lock is still held. The EventReset below reaches
+		s.mu.Unlock()
+		// Record the reset BEFORE the event is pushed. The EventReset below reaches
 		// the handler before writeServerRSTStream puts the frame on the wire, so a
 		// handler that reacts by calling Close would otherwise emit a second
 		// RST_STREAM — which RFC 9113 §5.4.2 (rfc9113.txt:1201) asks endpoints to
 		// avoid: "An endpoint SHOULD NOT send more than one RST_STREAM frame for
 		// any stream."
-		s.closed = true
-		s.mu.Unlock()
+		s.advance(stReset)
 		// RFC 9113 §6.9.1: a WINDOW_UPDATE overflowing a STREAM flow-control
 		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a
 		// connection error — the connection and its other streams survive.
@@ -342,7 +342,6 @@ func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fi
 	}
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
-
 	// Decide BEFORE encoding. EncodeBlock mutates the connection's shared HPACK
 	// dynamic table, and refusing afterwards leaves that table holding entries the
 	// peer never received — so its decoder falls a step behind and every LATER
@@ -496,19 +495,17 @@ func (sc *ServerConn) peerMaxFrameSize() int {
 
 // writeServerRSTStream sends RST_STREAM for a server stream.
 //
-// Resetting a stream closes it, so the flag is set here rather than left to
-// each caller: §5.1 (rfc9113.txt:1082) forbids sending anything but PRIORITY
-// afterwards, and a later ServerStream.Close on the same stream must be the
-// no-op it already is for a stream that ended normally.
+// Resetting a stream closes it, so the transition is recorded here rather than
+// left to each caller: §5.1 (rfc9113.txt:1082) forbids sending anything but
+// PRIORITY afterwards, and a later ServerStream.Close on the same stream must be
+// the no-op it already is for a stream that ended normally.
 func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
 	// Close for writing BEFORE the frame goes out. A handler goroutine holding
-	// this stream gates its writes on ss.closed alone, so any window between the
-	// RST_STREAM reaching the wire and the flag being set is a window in which it
-	// can answer on a stream the server has just reset — what RFC 9113 §5.1
+	// this stream gates its writes on the reset bit alone, so any window between
+	// the RST_STREAM reaching the wire and the bit being set is a window in which
+	// it can answer on a stream the server has just reset — what RFC 9113 §5.1
 	// (rfc9113.txt:1082) forbids.
-	ss.mu.Lock()
-	ss.closed = true
-	ss.mu.Unlock()
+	ss.advance(stReset)
 	if sc.closed.Load() {
 		// Connection already gone: release here, since no write will follow.
 		sc.markStreamDone(ss.id)
@@ -550,19 +547,17 @@ func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	}
 	// If the identifier does name a live stream, close it for writing before the
 	// reset goes out. A handler goroutine holding that *ServerStream gates its
-	// writes on ss.closed alone, so without this it would answer on a stream the
-	// server has just reset — RFC 9113 §5.1 (rfc9113.txt:1082) forbids sending
+	// writes on the reset bit alone, so without this it would answer on a stream
+	// the server has just reset — RFC 9113 §5.1 (rfc9113.txt:1082) forbids sending
 	// anything but PRIORITY there.
-	live := sc.lookupStream(id) != nil
-	if live {
-		ss := sc.lookupStream(id)
-		ss.mu.Lock()
-		ss.closed = true
-		ss.mu.Unlock()
+	live := false
+	if ss := sc.lookupStream(id); ss != nil {
+		live = true
+		ss.advance(stReset)
 	}
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
-	// ...and release it, exactly as writeServerRSTStream does. Setting ss.closed
+	// ...and release it, exactly as writeServerRSTStream does. Recording the reset
 	// without deregistering leaves the stream in the registry with its context
 	// uncancelled: its handler goroutine waits forever on events that will never
 	// come, ActiveStreams never returns to zero so IdleTimeout can never reap the

@@ -74,11 +74,10 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
 
-	// §6.6 again, the stateful half: the parent must still be live. markStreamDone
-	// deregisters a stream on completion or reset, so identity in the registry is
-	// the only reliable test — ss.closed is not set on every reset path, and
-	// remoteEnded is true for every legitimate push (the request has ended; the
-	// response has not).
+	// §6.6 again, the stateful half: the parent must still be live. A reset alone
+	// does not say enough — a stream that ended normally is equally unavailable to
+	// push on — so the test is identity in the registry, which markStreamDone
+	// clears on completion and on reset alike.
 	if sc.lookupStream(parent.id) != parent {
 		return nil, ErrStreamClosed
 	}
@@ -103,7 +102,7 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 	// stream when the pushed response ends. The context is bound before the
 	// stream is published, so nothing can find it in the table half-built.
 	pushStream := &ServerStream{sc: sc, events: make(chan StreamEvent, 4)}
-	pushStream.remoteEnded = true
+	pushStream.advance(stRecvEnded)
 	pushStream.ctx, pushStream.cancel = context.WithCancel(sc.connCtx)
 
 	// Reserving the identifier, registering the stream and seeding its window are
@@ -165,18 +164,15 @@ func (ss *ServerStream) Push(ctx context.Context, promiseHeaders []hpack.HeaderF
 	// §8.4 defers to §8.3: the promise is a request, so it must satisfy the same
 	// pseudo-header rules. Checked here rather than in the server/ wrapper so a
 	// direct user of this package gets the same guarantee, and checked before an
-	// identifier is burned — pushIDs.next() is not reversible.
+	// identifier is reserved.
 	if !validRequestPseudoHeaders(promiseHeaders) {
 		return nil, ErrPushMalformedPromise
 	}
 
 	// RFC 7540 §8.2.1: PUSH_PROMISE must come before response headers.
-	ss.mu.Lock()
-	if ss.headersSent {
-		ss.mu.Unlock()
+	if ss.state().SentFields() {
 		return nil, ErrPushAfterResponse
 	}
-	ss.mu.Unlock()
 
 	return ss.sc.writePushPromise(ctx, ss, promiseHeaders)
 }
