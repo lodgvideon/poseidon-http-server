@@ -342,6 +342,10 @@ func (sc *ServerConn) writeServerHeaders(_ context.Context, ss *ServerStream, fi
 	}
 	sc.wmu.Lock()
 	defer sc.wmu.Unlock()
+	if err := ss.authorizeSend(); err != nil {
+		return err
+	}
+
 	// Decide BEFORE encoding. EncodeBlock mutates the connection's shared HPACK
 	// dynamic table, and refusing afterwards leaves that table holding entries the
 	// peer never received — so its decoder falls a step behind and every LATER
@@ -404,6 +408,9 @@ func (sc *ServerConn) writeServerData(ctx context.Context, ss *ServerStream, p [
 		if sc.closed.Load() {
 			return ErrConnClosed
 		}
+		if err := ss.authorizeSend(); err != nil {
+			return err
+		}
 		if err := sc.fr.WriteData(ss.id, true, nil); err != nil {
 			return err
 		}
@@ -430,6 +437,15 @@ func (sc *ServerConn) writeServerDataChunks(ctx context.Context, ss *ServerStrea
 		if sc.closed.Load() {
 			sc.wmu.Unlock()
 			return ErrConnClosed
+		}
+		// Re-checked per chunk: acquireSendCredits above can block for as long as
+		// the peer withholds window, and a reset can arrive throughout. Refusing
+		// here — unlike the two exits above — happens on a HEALTHY connection, so
+		// the credit already debited for this chunk has to go back.
+		if aerr := ss.authorizeSend(); aerr != nil {
+			sc.wmu.Unlock()
+			sc.releaseSendCredits(ss, n)
+			return aerr
 		}
 		if werr := sc.fr.WriteData(ss.id, last, p[:n]); werr != nil {
 			sc.wmu.Unlock()
@@ -626,6 +642,57 @@ func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, 
 		}
 		sc.fcOutCond.Wait()
 	}
+}
+
+// releaseSendCredits returns credit that acquireSendCredits debited for octets
+// that were then never written.
+//
+// Only a refusal on a live connection needs this. RFC 9113 §6.9.1 replenishes a
+// flow-control window solely through the peer's WINDOW_UPDATE, and the peer
+// sends those for octets it has RECEIVED — so credit spent on a frame that never
+// left is gone for the life of the connection. The connection-level window is
+// shared by every stream, so a stream reset mid-body would take a chunk of it
+// down with it: four cancelled downloads at the default 16 KiB frame and 64 KiB
+// connection window are enough to strand every other stream in
+// acquireSendCredits, with nothing reported anywhere.
+//
+// Saturates rather than wraps. onWindowUpdate bounds an incoming grant against
+// the window as it stands, which is already net of any octets debited and not
+// yet written — so a peer may legally bring a window to exactly 2^31-1 while a
+// chunk is outstanding, and adding that chunk back on top overflows int32 to a
+// large negative number. That is the very wedge this function exists to prevent,
+// arrived at from the other side: avail stays ≤ 0 for every stream on the
+// connection and no WINDOW_UPDATE a peer would ever send can lift it out.
+//
+// The excess can only exist because the peer credited octets it never received,
+// which is its own §6.9.1 violation. Saturating keeps this endpoint from sending
+// more than the peer allowed; tearing the connection down instead would punish
+// the peer for arithmetic this endpoint chose to do.
+//
+// Called without sc.wmu held. Lock order is fcOutMu then ss.mu, matching
+// acquireSendCredits.
+func (sc *ServerConn) releaseSendCredits(ss *ServerStream, n int) {
+	if n <= 0 {
+		return
+	}
+	sc.fcOutMu.Lock()
+	sc.peerConnSendWindow = addWindowSaturating(sc.peerConnSendWindow, n)
+	sc.fcOutCond.Broadcast()
+	sc.fcOutMu.Unlock()
+	ss.mu.Lock()
+	ss.sendWindow = addWindowSaturating(ss.sendWindow, n)
+	ss.mu.Unlock()
+}
+
+// addWindowSaturating adds n to a flow-control window, capping at the RFC 9113
+// §6.9.1 maximum of 2^31-1 instead of overflowing int32.
+func addWindowSaturating(win int32, n int) int32 {
+	const maxWindow = int64(1<<31 - 1)
+	v := int64(win) + int64(n)
+	if v > maxWindow {
+		return int32(maxWindow)
+	}
+	return int32(v) //nolint:gosec // G115: bounded above here, and n > 0
 }
 
 // acquireSendCreditsSlow is the slow path that spawns a watchdog goroutine

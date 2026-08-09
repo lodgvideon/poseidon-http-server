@@ -120,6 +120,7 @@ func (ss *ServerStream) SendHeaders(ctx context.Context, fields []hpack.HeaderFi
 // frame via the PRIORITY flag. Pass nil to omit the priority block
 // (equivalent to SendHeaders).
 func (ss *ServerStream) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
+	// Early exit only; authorizeSend inside the write lock is what decides.
 	if !ss.state().Writable() {
 		return ErrStreamClosed
 	}
@@ -139,6 +140,7 @@ func (ss *ServerStream) SendHeadersWithPriority(ctx context.Context, fields []hp
 // outbound flow control (RFC 7540 §6.9). Blocks until enough send-window
 // credit is available.
 func (ss *ServerStream) SendData(ctx context.Context, p []byte, endStream bool) error {
+	// Early exit only; authorizeSend inside the write lock is what decides.
 	if !ss.state().Writable() {
 		return ErrStreamClosed
 	}
@@ -148,6 +150,36 @@ func (ss *ServerStream) SendData(ctx context.Context, p []byte, endStream bool) 
 	if endStream && ss.markLocalEnd() {
 		// Fully closed (both halves ended): release the stream.
 		ss.sc.markStreamDone(ss.id)
+	}
+	return nil
+}
+
+// authorizeSend reports whether a HEADERS or DATA frame may still be put on this
+// stream. It MUST be called with sc.wmu held, immediately before the frame is
+// handed to the framer.
+//
+// Checking earlier is not equivalent, and the gap is not small: SendData can
+// wait in acquireSendCredits for as long as the peer withholds window, and a
+// HEADERS write has an encode step in front of it. A reset arriving in that gap
+// used to produce this interleaving —
+//
+//	reset path: record the reset · take wmu · write RST_STREAM · release wmu
+//	writer:     (already past its check)  ·  take wmu · write DATA
+//
+// — which puts DATA on the wire after RST_STREAM, on a stream RFC 9113 §5.1
+// (rfc9113.txt:1082) has closed: "An endpoint MUST NOT send frames other than
+// PRIORITY on a closed stream." Because every reset path records the reset
+// BEFORE acquiring wmu, a writer that re-reads the state while holding wmu
+// cannot miss one that has already reached the wire.
+//
+// Scoped to HEADERS and DATA on purpose. RST_STREAM, WINDOW_UPDATE and PRIORITY
+// do not pass through here, and must not: the RST_STREAM that closes the stream
+// is written by a path that has just recorded the reset, and gating it on that
+// same state would keep the §6.9.1 FLOW_CONTROL_ERROR and the event-overflow
+// INTERNAL_ERROR resets off the wire entirely.
+func (ss *ServerStream) authorizeSend() error {
+	if !ss.state().Writable() {
+		return ErrStreamClosed
 	}
 	return nil
 }

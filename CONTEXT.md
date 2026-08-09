@@ -37,6 +37,16 @@ stream error or a connection error, depends on it.
 - **closed** — finished or reset. A closed stream is deregistered, so *absence
   from the registry* is not by itself evidence of any one state.
 
+In the code the machine is split across two types, because two of its states are
+not properties of a stream object at all. `conn.streamTable` owns the identifier
+space, and answers *idle* — which means no stream exists, so no per-stream value
+could hold it. `conn.streamState` is the per-stream half: the five independent
+facts the remaining states are made of (request field section received, remote
+half ended, response field section sent, local half ended, reset), packed into
+one word. `advance` returns the state as it was *before* the transition, because
+callers ask about the edge — "was this the first reset", "is this second field
+section a trailer" — not the level. See [ADR-0009](docs/adr/0009-stream-state-as-one-value.md).
+
 ## Frame, field section, field block
 
 **Frame** — the wire unit. **Field section** — what HTTP calls headers or

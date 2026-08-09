@@ -103,6 +103,7 @@ landed on §8.3 as the HTTP/2-native way to state the rule.
 | §5.1 idle, control | Conformance | `TestConformance_RFC9113_Sec51_PriorityOnIdleStreamIsPermitted` |
 | §5.1 half-closed remote (`rfc9113.txt:1044`) | Conformance | `TestConformance_RFC9113_Sec51_HalfClosedRemote_DataAfterEndStream` |
 | §5.1 half-closed remote + HPACK sync | Conformance | `TestConformance_RFC9113_Sec51_HalfClosedRemote_HeadersAfterEndStream` |
+| §5.1 closed (`rfc9113.txt:1082`), write-after-reset window | Conformance | `TestConformance_RFC9113_Sec51_NothingFollowsTheResetOnTheWire` |
 | §5.4 (`rfc9113.txt:1159`), §6.1–§6.9 frame syntax | Conformance | `TestConformance_RFC9113_Sec54_CodecErrorsAreReportedWithAnErrorCode` |
 | §5.4.1 (`rfc9113.txt:1173`) | Conformance | `TestConformance_RFC9113_Sec541_ConnectionErrorClosesTheTransport` |
 | §5.4.2 (`rfc9113.txt:1197`), §5.1 (`:1082`) | Conformance | `TestConformance_RFC9113_Sec542_NoResetInResponseToReset` |
