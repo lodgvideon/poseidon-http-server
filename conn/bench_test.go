@@ -2,7 +2,10 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -420,18 +423,62 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 		// a boundary that had already moved down from the 400000x recorded in
 		// #123 as this host's per-op cost drifted from ~17us to ~21us.
 		//
-		// The correct lifetime for a drain is the connection's, so let the
-		// benchmark's `defer sc.Close()` end it — the same shape
-		// benchParTCPConn already uses. The barrier's deadline must be cleared
-		// first or it would carry into this loop and reimpose the coupling.
-		if err := clientConn.SetReadDeadline(time.Time{}); err != nil {
-			fail("clear read deadline", err)
-			return
-		}
+		// The correct lifetime for a drain is the connection's, so the
+		// benchmark's `defer sc.Close()` ends it — the same shape
+		// benchParTCPConn already uses.
+		//
+		// The deadline that remains is a hang guard, and it is re-armed per read
+		// rather than set once. Removing the one-shot deadline removed the only
+		// thing that terminated a wedged benchmark in this package: `go test
+		// -timeout` does not cover benchmarks, because testing.(*M).Run calls
+		// m.stopAlarm() (src/testing/testing.go:2446) before runBenchmarks
+		// (:2459). Verified on go1.26.6 — the identical infinite block dies with
+		// `panic: test timed out after 10s` inside a Test, and was still running
+		// at 45s inside a Benchmark under the same -timeout=10s. With this
+		// goroutine alive on a socket read the runtime's deadlock detector cannot
+		// fire either, so a wedge would hang until CI kills the job.
+		//
+		// The guard is progress-based, not elapsed-based, so no value of
+		// -benchtime can make it fire on a healthy run: it trips only when the
+		// server has gone silent for benchDrainIdleTimeout *after having produced
+		// output*, i.e. a writing benchmark that stopped writing. A benchmark
+		// that never writes to the socket (AcquireSendCredits, OnWindowUpdate,
+		// OnDataReceived) never arms it and is re-armed past; those cannot wedge
+		// on the socket. The wedge this catches is the one #123 names:
+		// writeServerData blocking in acquireSendCredits' fcOutCond.Wait, whose
+		// context here is Background and so has no cancellation.
+		//
+		// b.Fatal is unavailable here — only the goroutine running the benchmark
+		// may call it — so fail by panicking, which dumps every goroutine stack
+		// (naming the blocked frame) and exits non-zero instead of hanging.
+		progressed := false
 		for {
-			if _, err := clientConn.Read(drain); err != nil {
+			if err := clientConn.SetReadDeadline(time.Now().Add(benchDrainIdleTimeout)); err != nil {
+				fail("arm drain read deadline", err)
 				return
 			}
+			n, err := clientConn.Read(drain)
+			if n > 0 {
+				progressed = true
+			}
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				if progressed {
+					// The useful stack is the wedged benchmark's, not this
+					// goroutine's, and GOTRACEBACK defaults to "single" — which
+					// would dump only the panicking goroutine and hide it.
+					debug.SetTraceback("all")
+					panic("bench harness: the server produced no output for " +
+						benchDrainIdleTimeout.String() + " after this benchmark had been writing — " +
+						"the benchmark goroutine is wedged. `go test -timeout` does not cover " +
+						"benchmarks, so this panic is the only thing that will end the run; the " +
+						"stacks below name the blocked frame.")
+				}
+				continue // a benchmark that never writes: keep the connection up
+			}
+			return // connection closed by the benchmark's defer sc.Close()
 		}
 	}()
 
@@ -459,3 +506,13 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 // of loopback round-trip latency (sub-millisecond here), not of -benchtime: no
 // part of the setup it guards scales with the benchmark's iteration count.
 const benchSetupTimeout = 5 * time.Second
+
+// benchDrainIdleTimeout is the hang guard in the drain loop. It is deliberately
+// NOT a bigger version of the 5s deadline #122 removed, which would only move
+// the cliff: that one bounded total connection life, so it scaled against
+// -benchtime. This one bounds the gap between consecutive server writes, and is
+// a function of the interval at which a progressing writer produces output —
+// ~21us/op for BenchmarkWriteServerData_Small on this host, so 30s is roughly a
+// million times the healthy gap. A run stays valid however long it takes, as
+// long as it is still making progress.
+const benchDrainIdleTimeout = 30 * time.Second
