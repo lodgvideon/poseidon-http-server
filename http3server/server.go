@@ -14,6 +14,23 @@
 // poseidon-http-client's quic.Listener: no Retry / address validation and no
 // per-peer rate limiting, so front this with a rate limiter before exposing it to
 // the internet.
+//
+// # Peer identity
+//
+// http.Request.TLS is populated on every request from the connection's completed
+// handshake, so a handler can read the negotiated TLS version, cipher suite, SNI
+// and ALPN. PeerCertificates is always empty today: a QUIC listener configured to
+// require a client certificate never completes its handshake at all
+// (poseidon-http-client#711), so mTLS is unavailable on HTTP/3 in either role and
+// this field cannot yet carry a peer identity.
+//
+// http.Request.RemoteAddr is NOT populated, and neither is server.PeerAddr on the
+// request context. The transport holds each connection's peer address privately
+// and quic.Conn exposes no accessor for it, so this package has no way to reach
+// it (poseidon-http-client#710). Anything that authorizes or buckets by client
+// address — IP allowlists, per-client rate limiting, abuse logging — is blind on
+// HTTP/3 until that lands; do not read RemoteAddr here and conclude the client is
+// unknown-but-absent, because it is unknown-and-unavailable.
 package http3server
 
 import (
@@ -93,12 +110,36 @@ func (s *Server) serveConn(ctx context.Context, c *quic.Conn) {
 	if err := s.openControlStream(c); err != nil {
 		return
 	}
+
+	// Snapshot the TLS state ONCE per connection, here, before the Poll loop
+	// starts. Three reasons this is the only correct place:
+	//
+	//   - Cost. Every request on the connection shares this one snapshot, so the
+	//     per-request cost is a pointer store. Calling ConnectionState() per
+	//     request would copy a tls.ConnectionState — a certificate chain and a
+	//     signed-certificate-timestamp list among other fields — for each one.
+	//   - Concurrency. quic.Conn is not safe for concurrent use, and this
+	//     goroutine owns it: it drives Poll and nothing else touches the
+	//     connection. Reading the state from the per-request goroutines below
+	//     would race that loop. Taking it before the loop needs no lock, no
+	//     atomic and no handoff — the value is immutable once the handshake is
+	//     complete, which it is by the time Accept returns.
+	//   - Sharing. One *tls.ConnectionState across every request on a connection
+	//     is what net/http and x/net/http2 both do (Server.conn.tlsState,
+	//     http2serverConn.tlsState); handlers read it and must not write it.
+	//
+	// The peer address cannot be attached the same way: quic.Conn exposes no
+	// remote-address accessor, so there is nothing to put on the context here.
+	// See the package doc and poseidon-http-client#710; issue #102 stays open on
+	// the address half.
+	tlsState := c.ConnectionState()
+
 	for {
 		if err := c.Poll(ctx); err != nil {
 			return // the connection ended: idle timeout, peer close, or ctx
 		}
 		for rs := c.AcceptBidiStream(); rs != nil; rs = c.AcceptBidiStream() {
-			go s.serveRequest(ctx, rs)
+			go s.serveRequest(ctx, rs, &tlsState)
 		}
 		// Accept the client's unidirectional streams (its control and QPACK
 		// streams) so they are registered and flow-controlled. Under the
@@ -131,8 +172,9 @@ func (s *Server) openControlStream(c *quic.Conn) error {
 }
 
 // serveRequest reads one request off its stream, runs the handler, and writes the
-// response back on the same stream.
-func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream) {
+// response back on the same stream. tlsState is the connection's TLS state,
+// snapshotted once by serveConn and shared read-only by every request on it.
+func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream, tlsState *tls.ConnectionState) {
 	body, err := readRequestStream(ctx, rs)
 	if err != nil {
 		// The request never arrived whole: the peer reset it, it outgrew the buffer,
@@ -146,6 +188,12 @@ func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream) {
 		return
 	}
 	req = req.WithContext(ctx)
+	// HTTP/3 runs over QUIC, which is TLS 1.3 by construction (RFC 9001): there is
+	// no plaintext HTTP/3, so this is never nil on a served request. Leaving it
+	// nil made every net/http handler that gates on `r.TLS != nil` — HSTS, secure
+	// cookies, mTLS authorization — treat the most-encrypted transport the server
+	// speaks as cleartext, while req.URL.Scheme said "https" three lines away.
+	req.TLS = tlsState
 
 	rw := &responseWriter{header: http.Header{}, status: http.StatusOK}
 	s.handler().ServeHTTP(rw, req)
