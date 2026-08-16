@@ -150,7 +150,7 @@ func (s *Server) serveConn(ctx context.Context, c *quic.Conn) {
 			return // the peer violated the protocol; the connection is closed
 		}
 		for rs := c.AcceptBidiStream(); rs != nil; rs = c.AcceptBidiStream() {
-			go s.serveRequest(ctx, rs, cs)
+			go s.serveRequest(ctx, c, rs, cs)
 		}
 	}
 }
@@ -180,7 +180,20 @@ func (s *Server) openControlStream(c *quic.Conn) error {
 // response back on the same stream. cs is the connection's shared state: the TLS
 // state snapshotted once by serveConn, and the field-section limit the peer's
 // SETTINGS advertised — both read-only here.
-func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream, cs *connState) {
+//
+// # Why this goroutine may close the connection
+//
+// Some frames on a request stream are CONNECTION errors (§7.2), so the verdict has
+// to reach c from here. That is safe, and it is not a hole in "the serveConn
+// goroutine owns the connection": what serveConn owns exclusively is Poll and the
+// unlocked ConnectionState() read taken before the loop. quic.Conn.CloseWithError
+// takes the same connection mutex as the rs.Send / rs.Reset / rs.Recv calls this
+// goroutine already makes, it is idempotent and first-error-wins, and the mutex is
+// explicitly released across Poll's blocking read ("BLOCKING, UNLOCKED — a Do may
+// seal+send here", quic/conn_recv.go), which is how the client's own Do goroutines
+// share a connection with its reader. Closing here therefore takes effect at once
+// and unblocks Poll, rather than waiting for the peer's next packet to arrive.
+func (s *Server) serveRequest(ctx context.Context, c *quic.Conn, rs *quic.Stream, cs *connState) {
 	body, err := readRequestStream(ctx, rs)
 	if err != nil {
 		// The request never arrived whole: the peer reset it, it outgrew the buffer,
@@ -190,6 +203,14 @@ func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream, cs *connStat
 	}
 	req, err := decodeRequest(body)
 	if err != nil {
+		var cfe *connFrameError
+		if errors.As(err, &cfe) {
+			// Not a malformed request but an illegal frame sequence: §7.2 requires
+			// the CONNECTION be closed, so resetting the stream and serving on would
+			// leave the violation unanswered.
+			_ = connError(c, cfe.code)
+			return
+		}
 		_ = rs.Reset(http3.H3MessageError)
 		return
 	}
@@ -239,9 +260,31 @@ func readRequestStream(ctx context.Context, rs *quic.Stream) ([]byte, error) {
 	}
 }
 
+// connFrameError reports a frame whose receipt is a CONNECTION error rather than a
+// stream error (RFC 9114 §8): the offending frame type, and the §8.1 code the
+// connection must be closed with.
+//
+// It exists so decodeRequest can stay a pure function of the peer's bytes — it is
+// the package's top untrusted surface and has a fuzz target — while still reaching
+// a verdict only the connection can act on. Handing the decoder a *quic.Conn would
+// put connection teardown inside the function the fuzzer drives.
+type connFrameError struct {
+	typ  uint64 // the frame type that is not permitted here
+	code uint64 // the HTTP/3 error code to close the connection with (§8.1)
+}
+
+func (e *connFrameError) Error() string {
+	return "http3server: frame type " + strconv.FormatUint(e.typ, 16) +
+		" is not permitted on a request stream (RFC 9114 §7.2)"
+}
+
 // decodeRequest turns a request stream's frames into an http.Request: one HEADERS
 // frame carrying the QPACK field section, then any DATA frames carrying the body
 // (RFC 9114 §4.1).
+//
+// A *connFrameError return means the frame sequence is a connection error, not a
+// malformed request: the caller must close the connection with its code rather than
+// reset the stream.
 func decodeRequest(stream []byte) (*http.Request, error) {
 	var fr http3.FrameReader
 	fr.SetMaxFrameLen(maxRequestBytes)
@@ -271,9 +314,28 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 			}
 		case http3.FrameData:
 			body = append(body, payload...)
+		case http3.FrameSettings, http3.FrameCancelPush, http3.FrameMaxPushID, http3.FramePushPromise,
+			0x02, 0x06, 0x08, 0x09:
+			// Frames that belong on the control stream, plus the HTTP/2-carryover
+			// types that belong nowhere. Each names H3_FRAME_UNEXPECTED here in RFC
+			// 9114 by itself: SETTINGS §7.2.4, CANCEL_PUSH §7.2.3, MAX_PUSH_ID
+			// §7.2.7, PUSH_PROMISE at a server §7.2.5, and 0x02/0x06/0x08/0x09
+			// §7.2.8 ("These frame types MUST NOT be sent, and their receipt MUST be
+			// treated as a connection error of type H3_FRAME_UNEXPECTED"; §11.2.1
+			// Table 2 registers each as Reserved).
+			//
+			// GOAWAY is deliberately absent. §7.2.6 scopes its rule to one role — "A
+			// client MUST treat a GOAWAY frame on a stream other than the control
+			// stream as a connection error of type H3_FRAME_UNEXPECTED" — and this
+			// is the server. Killing a connection the RFC does not say to kill is
+			// the failure mode this switch exists to avoid in the other direction.
+			return nil, &connFrameError{typ: typ, code: http3.H3FrameUnexpected}
 		default:
-			// SETTINGS and friends do not belong on a request stream; ignore the
-			// frame types that are merely unknown or reserved (§7.2.8).
+			// Genuinely unknown types and the GREASE types of §7.2.8 (0x1f*N + 0x21)
+			// are ignored, which §4.1 requires and an interop suite checks: "Frames
+			// of unknown types (Section 9), including reserved frames (Section
+			// 7.2.8) MAY be sent on a request or push stream before, after, or
+			// interleaved with other frames described in this section."
 		}
 	}
 	if !seen {

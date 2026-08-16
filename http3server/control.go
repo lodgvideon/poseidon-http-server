@@ -123,7 +123,45 @@ func (cs *connState) serviceUni(c *quic.Conn) error {
 	}
 	cs.pendingUni = kept
 	cs.drainQPACK()
-	return cs.readControl(c)
+	if err := cs.readControl(c); err != nil {
+		return err
+	}
+	// After readControl, not before: a control stream that opens with the wrong
+	// frame AND is closed in the same pass has violated two rules, and
+	// H3_MISSING_SETTINGS is the more specific verdict on it.
+	return cs.checkCriticalStreams(c)
+}
+
+// checkCriticalStreams reports a connection error if the peer has ended any stream
+// the connection cannot do without: its control stream, or either QPACK
+// instruction stream.
+//
+// RFC 9114 §6.2.1: "The sender MUST NOT close the control stream, and the receiver
+// MUST NOT request that the sender close the control stream. If either control
+// stream is closed at any point, this MUST be treated as a connection error of type
+// H3_CLOSED_CRITICAL_STREAM." RFC 9204 §4.2 says the same of the QPACK encoder and
+// decoder streams: "Closure of either unidirectional stream type MUST be treated as
+// a connection error of type H3_CLOSED_CRITICAL_STREAM."
+//
+// Both endings count, which is why quic.Stream.Finished is the right predicate: it
+// reports a clean FIN or a peer RESET_STREAM, and §8.1 defines the code as "A
+// stream required by the HTTP/3 connection was closed or reset". A stream that is
+// merely open and idle is not finished, so a conforming peer never trips this — the
+// production HTTP/3 client opens all three and keeps them open for the connection's
+// life, and a peer with nothing to say on a QPACK stream is told by §4.2 to not
+// open one at all ("An endpoint MAY avoid creating an encoder stream if it will not
+// be used") rather than to open and close it.
+//
+// A graceful peer teardown does not come through here either: that is a QUIC
+// CONNECTION_CLOSE, which ends Poll before serviceUni runs again, not a FIN on any
+// stream. This mirrors the client's http3.Client.checkCriticalStreams.
+func (cs *connState) checkCriticalStreams(c *quic.Conn) error {
+	for _, s := range [...]*quic.Stream{cs.control, cs.qpackEnc, cs.qpackDec} {
+		if s != nil && s.Finished() {
+			return connError(c, http3.H3ClosedCriticalStream)
+		}
+	}
+	return nil
 }
 
 // routeUni dispatches one identified unidirectional stream by its type (RFC 9114
