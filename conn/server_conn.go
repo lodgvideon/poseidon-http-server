@@ -719,7 +719,7 @@ func (sc *ServerConn) deliverPingAck(payload [8]byte) {
 // from the SETTINGS exchange onward is.
 //
 // maxFrameSize is the value this connection advertises in SETTINGS. The Framer's
-// own read cap defaults to 16,384 regardless, so left unset an operator raising
+// own cap defaults to 16,384 regardless, so left unset an operator raising
 // AdvertisedSettings.MaxFrameSize would make the server reject exactly the
 // frames its own SETTINGS invited (RFC 9113 §4.2).
 // AdvertisedSettings.defaulted() has already clamped it into the legal range.
@@ -728,7 +728,10 @@ func newCountingFramer(nc net.Conn, sc *ServerConn, maxFrameSize uint32) *frame.
 		&countingWriter{w: nc, n: &sc.atomicBytesSent},
 		&countingReader{r: nc, n: &sc.atomicBytesReceived},
 	)
-	fr.SetMaxReadFrameSize(maxFrameSize)
+	// Was SetMaxReadFrameSize, deprecated in the codec for naming half of what
+	// it does: the same limit has always been checked on the write sites too,
+	// and the deprecated name now simply delegates here. Behaviour is identical.
+	fr.SetMaxFrameSize(maxFrameSize)
 	return fr
 }
 
