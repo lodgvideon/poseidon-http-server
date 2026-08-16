@@ -250,7 +250,7 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 // has opted out of the mechanism.
 //
 // Called on the handler goroutine, which already writes under wmu elsewhere.
-// The connection-level window keeps its receipt-time refund: §6.9.1 requires
+// The connection-level window keeps its receipt-time refund: §6.9 requires
 // every flow-controlled frame be counted there whatever becomes of its stream,
 // and gating it on one application's reading would let a single slow handler
 // wedge every other stream on the connection.

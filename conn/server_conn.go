@@ -894,7 +894,7 @@ func (sc *ServerConn) readerLoop() {
 			return
 		}
 
-		// RFC 9113 §6.3 and §6.9.1 scope
+		// RFC 9113 §6.3 and §6.9 scope
 		// two of the codec's rejections to a single stream, not the connection.
 		// Recovering in place is safe because ReadFrame consumes the whole
 		// payload before rejecting either one, so the byte stream is still

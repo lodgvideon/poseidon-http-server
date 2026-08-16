@@ -67,7 +67,7 @@ Credit, in octets, that the peer may spend sending body bytes. There are two
 levels, and they are deliberately asymmetric here:
 
 - the **connection window** is refunded when a frame *arrives*, because RFC 9113
-  §6.9.1 requires every flow-controlled frame be counted whatever becomes of its
+  §6.9 requires every flow-controlled frame be counted whatever becomes of its
   stream;
 - the **per-stream window** is refunded when the application *reads* the bytes,
   because a window refunded on arrival bounds nothing.

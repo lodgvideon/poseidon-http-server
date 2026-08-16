@@ -23,9 +23,9 @@ import (
 //	stream that is in this state, it MUST respond with a stream error (Section
 //	5.4.2) of type STREAM_CLOSED."
 //
-//	§6.9.1 — "A receiver MUST count the padding and the entire
-//	size of a frame ... against its connection-level flow-control window even if
-//	the frame is in error."
+//	§6.9 — "A receiver that receives a flow-controlled frame MUST
+//	always account for its contribution against the connection flow-control
+//	window ... This is necessary even if the frame is in error."
 //
 // Distinguishing idle from closed is the whole difficulty: the streams map holds
 // only live streams, so a lookup miss means idle, closed, reset or refused
@@ -311,7 +311,7 @@ func TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWin
 // TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead pins the split
 // between the two windows, which is not symmetric and must not be made so.
 //
-// The CONNECTION window is refunded on receipt: §6.9.1 requires every
+// The CONNECTION window is refunded on receipt: §6.9 requires every
 // flow-controlled frame be counted there whatever becomes of its stream, and
 // withholding it until some application reads would let one slow handler wedge
 // every other stream on the connection.

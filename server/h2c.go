@@ -282,7 +282,7 @@ func upgradeRequestFields(req *http.Request) []hpack.HeaderField {
 //
 //   - HTTP/1.0 request        RFC 9110 §7.8  — MUST ignore the Upgrade field;
 //     RFC 9110 §15.2 — MUST NOT send 1xx to an HTTP/1.0 client
-//   - no/duplicate/bad Host   RFC 9112 §2.2  — MUST respond 400
+//   - no/duplicate/bad Host   RFC 9112 §3.2  — MUST respond 400
 //   - "h2" token              RFC 7540 §3.2  — MUST ignore it
 //   - no/duplicate            RFC 7540 §3.2.1 — MUST NOT upgrade
 //     HTTP2-Settings
@@ -317,7 +317,7 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 		writeBadRequest(nc, "Only h2c supported")
 		return
 	case req.Host == "":
-		// RFC 9112 §2.2.
+		// RFC 9112 §3.2.
 		writeBadRequest(nc, "Missing Host header field")
 		return
 	case !hasUpgradeToken(req.Header.Values("Upgrade")):

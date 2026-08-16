@@ -23,7 +23,7 @@ import (
 //
 // RFC 7540 defines the h2c Upgrade mechanism (RFC 9113 marks it obsolete but
 // this server implements it, so 7540 is the governing text for this path).
-// RFC 9110 §7.8 and RFC 9112 §2.2 add the generic Upgrade/Host obligations.
+// RFC 9110 §7.8 and RFC 9112 §3.2 add the generic Upgrade/Host obligations.
 
 // upgradeConn dials the test server and returns the connection.
 func upgradeConn(t *testing.T) net.Conn {
@@ -166,7 +166,7 @@ func TestConformance_RFC9112_Sec22_RejectRequestWithoutHost(t *testing.T) {
 
 	line := readStatusLine(t, bufio.NewReader(c))
 	if !strings.Contains(line, "400") {
-		t.Errorf("Host-less HTTP/1.1 request: got %q, want 400 (RFC 9112 §2.2)", line)
+		t.Errorf("Host-less HTTP/1.1 request: got %q, want 400 (RFC 9112 §3.2)", line)
 	}
 }
 

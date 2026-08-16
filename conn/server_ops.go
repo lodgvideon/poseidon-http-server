@@ -308,10 +308,11 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 // onDataReceived debits flow-control windows for an inbound DATA frame.
 //
 // s may be nil: the stream has been reset, refused or has already completed.
-// The connection-level half still runs, and must. RFC 9113 §6.9.1
-// — "A receiver MUST count the padding and the entire size of
-// a frame ... against its connection-level flow-control window even if the
-// frame is in error"; §6.8 says the same of frames on streams discarded
+// The connection-level half still runs, and must. RFC 9113 §6.9 — "A
+// receiver that receives a flow-controlled frame MUST always account for its
+// contribution against the connection flow-control window ... This is
+// necessary even if the frame is in error"; §6.8 says the same of frames on
+// streams discarded
 // after a GOAWAY. The peer has already debited those octets from its own send
 // window, so a receiver that neither counts nor refunds them burns connection
 // credit permanently: repeat it and the peer's window drains to zero and every
@@ -579,7 +580,7 @@ func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode)
 }
 
 // writeRSTStreamID resets a stream by identifier, for the two codec-detected
-// violations RFC 9113 scopes to a stream (§6.3 a wrong-length PRIORITY, §6.9.1 a
+// violations RFC 9113 scopes to a stream (§6.3 a wrong-length PRIORITY, §6.9 a
 // zero-increment WINDOW_UPDATE). Those arrive with nothing but a FrameHeader —
 // the stream may be idle, or may never exist — so writeServerRSTStream's
 // *ServerStream signature cannot serve them.
