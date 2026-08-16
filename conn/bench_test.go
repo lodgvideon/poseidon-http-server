@@ -175,7 +175,7 @@ func BenchmarkOnDataReceived(b *testing.B) {
 	}
 	defer stream.Close()
 
-	// Give the stream a large recv window so we don't trigger refunds.
+	// Seed both receive windows well above the per-iteration debit.
 	stream.mu.Lock()
 	stream.recvWindow = 1 << 20
 	stream.mu.Unlock()
@@ -189,6 +189,18 @@ func BenchmarkOnDataReceived(b *testing.B) {
 		if err := sc.onDataReceived(stream, 100); err != nil {
 			b.Fatal(err)
 		}
+		// Refund the per-stream window, as the send-side siblings above do.
+		// onDataReceived only debits it: the per-stream refund belongs to
+		// ServerStream.creditConsumed, which runs when the application takes
+		// delivery via Recv — a call this benchmark deliberately does not make.
+		// Without this the seed above is a budget of 1<<20/100 = 10485 iterations
+		// and any -benchtime past ~1ms fails, which is what kept `make bench-gate`
+		// (-benchtime=2s -count=10) red on ./conn. The connection window needs no
+		// help; onDataReceived still self-refunds that half at
+		// recvWindowRefundThreshold.
+		stream.mu.Lock()
+		stream.recvWindow += 100
+		stream.mu.Unlock()
 	}
 }
 
