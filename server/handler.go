@@ -287,7 +287,7 @@ func hasField(fields []hpack.HeaderField, name []byte) bool {
 // RFC 9110 §9.3.2 (rfc9110.txt:3987): "The HEAD method is identical to GET
 // except that the server MUST NOT send content in the response." Only the DATA
 // frames are dropped — the header section is left exactly as a GET would have
-// produced it (:3993), and RFC 9113 §8.1.1 (rfc9113.txt:2457) explicitly allows
+// produced it (:3993), and RFC 9113 §8.1.1 explicitly allows
 // the resulting non-zero content-length with no DATA behind it.
 //
 // Hot path: a nil check and a string comparison, no allocation.
@@ -552,7 +552,7 @@ func NewHTTPRequest(req *Request) (*http.Request, error) {
 		httpReq.Body = req.BodyReader
 		httpReq.ContentLength = -1 // unknown length for a stream
 	}
-	// RFC 9113 §8.2.3 (rfc9113.txt:2585): "If there are multiple Cookie header
+	// RFC 9113 §8.2.3: "If there are multiple Cookie header
 	// fields after decompression, these MUST be concatenated into a single octet
 	// string using the two-octet delimiter of 0x3B, 0x20 (the ASCII string '; ')
 	// before being passed into a non-HTTP/2 context, such as an HTTP/1.1

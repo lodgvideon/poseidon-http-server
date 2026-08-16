@@ -11,7 +11,7 @@ import (
 // Conformance tests for the RFC 9113 rules that bind the server/ layer rather
 // than the connection state machine.
 
-// TestConformance_RFC9113_Sec823_CookiesConcatenated pins rfc9113.txt:2585 —
+// TestConformance_RFC9113_Sec823_CookiesConcatenated pins RFC 9113 §8.2.3 —
 // "If there are multiple Cookie header fields after decompression, these MUST be
 // concatenated into a single octet string using the two-octet delimiter of 0x3B,
 // 0x20 (the ASCII string '; ') before being passed into a non-HTTP/2 context."
@@ -75,9 +75,9 @@ func TestConformance_RFC9113_Sec823_SingleCookieUnchanged(t *testing.T) {
 // TestConformance_RFC9113_Sec33_And92_TLSAdmission pins the two conditions
 // RFC 9113 places on HTTP/2 over TLS, both MUST:
 //
-//	§3.3 (rfc9113.txt:437) — "HTTP/2 connections over TLS MUST use protocol
+//	§3.3 — "HTTP/2 connections over TLS MUST use protocol
 //	negotiation in TLS [TLS-ALPN]."
-//	§9.2 (rfc9113.txt:3038) — "Implementations of HTTP/2 MUST use TLS version 1.2
+//	§9.2 — "Implementations of HTTP/2 MUST use TLS version 1.2
 //	[TLS12] or higher for HTTP/2 over TLS."
 //
 // Checked against what was negotiated, not against the configuration: a

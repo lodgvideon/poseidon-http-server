@@ -51,7 +51,7 @@ func transportErr(err error) bool {
 // multiple of 6, a pad length that eats its own payload, a frame carrying a
 // stream identifier the type forbids. It reports each as a plain sentinel
 // carrying no error code, because only the receiver can decide what an error
-// means for its role. RFC 9113 §5.4 (rfc9113.txt:1159) — "If a frame causes a
+// means for its role. RFC 9113 §5.4 — "If a frame causes a
 // connection error, that error MUST be reported" — makes deciding mandatory,
 // and this table is that decision.
 //
@@ -69,7 +69,7 @@ func codecErrCode(err error) (frame.ErrCode, bool) {
 		return 0, false
 	}
 	switch {
-	// RFC 9113 §4.2 (rfc9113.txt:513) — "An endpoint MUST send an error code of
+	// RFC 9113 §4.2 — "An endpoint MUST send an error code of
 	// FRAME_SIZE_ERROR if a frame exceeds the size defined in
 	// SETTINGS_MAX_FRAME_SIZE, exceeds any limit defined for the frame type, or
 	// is too small to contain mandatory frame data."
@@ -97,7 +97,7 @@ func codecErrCode(err error) (frame.ErrCode, bool) {
 
 	// §6.1/§6.2/§6.4/§6.5/§6.7/§6.8/§6.9 each make a frame carrying a stream
 	// identifier its type forbids — or omitting one its type requires — a
-	// connection error of type PROTOCOL_ERROR; §6.1 (rfc9113.txt:1420) says the
+	// connection error of type PROTOCOL_ERROR; §6.1 says the
 	// same of a pad length that is "the length of the frame payload or greater".
 	case errors.Is(err, frame.ErrInvalidStreamID),
 		errors.Is(err, frame.ErrInvalidPadding),

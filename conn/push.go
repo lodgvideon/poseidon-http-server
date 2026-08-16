@@ -31,7 +31,7 @@ var ErrPushDisabled = errors.New("poseidon: server push disabled by client")
 var ErrPushAfterResponse = errors.New("poseidon: push promise after response headers sent")
 
 // ErrPushOnServerStream is returned when Push is called on a stream this server
-// itself initiated. RFC 9113 §6.6 (rfc9113.txt:1899): "PUSH_PROMISE frames MUST
+// itself initiated. RFC 9113 §6.6: "PUSH_PROMISE frames MUST
 // only be sent on a peer-initiated stream that is in either the 'open' or
 // 'half-closed (remote)' state."
 var ErrPushOnServerStream = errors.New("poseidon: push promise on a server-initiated stream")
@@ -43,13 +43,13 @@ var ErrPushOnServerStream = errors.New("poseidon: push promise on a server-initi
 var ErrPushMalformedPromise = errors.New("poseidon: push promise header fields are malformed")
 
 // ErrPushRefused is returned when a push would exceed the peer's advertised
-// SETTINGS_MAX_CONCURRENT_STREAMS. RFC 9113 §5.1.2 (rfc9113.txt:1140): "Endpoints
+// SETTINGS_MAX_CONCURRENT_STREAMS. RFC 9113 §5.1.2: "Endpoints
 // MUST NOT exceed the limit set by their peer." A promised stream counts against
 // that limit from the moment the PUSH_PROMISE is sent.
 var ErrPushRefused = errors.New("poseidon: push would exceed the peer's concurrent stream limit")
 
 // ErrPeerGoAway is returned when the peer has announced a shutdown. RFC 9113
-// §6.8 (rfc9113.txt:1990): "Receivers of a GOAWAY frame MUST NOT open additional
+// §6.8: "Receivers of a GOAWAY frame MUST NOT open additional
 // streams on the connection". Server push is the only way a server opens one.
 var ErrPeerGoAway = errors.New("poseidon: peer has sent GOAWAY; no new streams")
 
@@ -81,7 +81,7 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 	if sc.lookupStream(parent.id) != parent {
 		return nil, ErrStreamClosed
 	}
-	// §5.1.2 (rfc9113.txt:1140): "Endpoints MUST NOT exceed the limit set by their
+	// §5.1.2: "Endpoints MUST NOT exceed the limit set by their
 	// peer." A promised stream counts from the moment the PUSH_PROMISE is sent,
 	// and only server-initiated streams count against that allowance.
 	sc.psMu.RLock()
@@ -97,7 +97,7 @@ func (sc *ServerConn) writePushPromise(_ context.Context, parent *ServerStream, 
 		return nil, ErrHeaderBlockTooLarge
 	}
 
-	// Born half-closed (remote): §5.1 (rfc9113.txt:1032) — the client never sends
+	// Born half-closed (remote): §5.1 — the client never sends
 	// on a pushed stream, so recording it is what lets markLocalEnd complete the
 	// stream when the pushed response ends. The context is bound before the
 	// stream is published, so nothing can find it in the table half-built.

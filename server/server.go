@@ -324,9 +324,9 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn, cfg *tls.Config) {
 // conditions RFC 9113 places on HTTP/2 over TLS. A cleartext connection is not
 // this function's business and is always admitted.
 //
-//	§3.3 (rfc9113.txt:437) — "HTTP/2 connections over TLS MUST use protocol
+//	§3.3 — "HTTP/2 connections over TLS MUST use protocol
 //	negotiation in TLS [TLS-ALPN]."
-//	§9.2 (rfc9113.txt:3038) — "Implementations of HTTP/2 MUST use TLS version 1.2
+//	§9.2 — "Implementations of HTTP/2 MUST use TLS version 1.2
 //	[TLS12] or higher for HTTP/2 over TLS."
 //
 // Both are checked against what was actually negotiated rather than against the
@@ -603,7 +603,7 @@ func (s *Server) buildRequest(headers []hpack.HeaderField, streamID uint32) *Req
 	// §7.2 (rfc9110.txt:2426): "A user agent MUST generate a Host header field
 	// in a request unless it sends that information as an ":authority"
 	// pseudo-header field" — so a request carrying only Host is legal and its
-	// authority must come from there. RFC 9113 §8.3.1 (rfc9113.txt:2649) fixes
+	// authority must come from there. RFC 9113 §8.3.1 fixes
 	// the precedence: "The recipient of an HTTP/2 request MUST NOT use the Host
 	// header field to determine the target URI if ":authority" is present."
 	var hostField string
@@ -863,7 +863,7 @@ var (
 	sExpect100Continue = []byte("100-continue")
 
 	// continue100Headers is the interim response's field section. RFC 9113
-	// §8.3.2 (rfc9113.txt:2723) requires :status "in all responses, including
+	// §8.3.2 requires :status "in all responses, including
 	// interim responses". Package-level and reused, never re-minted (ADR-0001);
 	// nothing writes to it.
 	continue100Headers = []hpack.HeaderField{

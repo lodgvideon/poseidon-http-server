@@ -16,12 +16,12 @@ import (
 //	 value MUST either reject the message or replace each of those characters
 //	 with SP before further processing or forwarding of that message."
 //
-// This server rejects. RFC 9113 §8.1.1 (rfc9113.txt:2463) fixes how:
+// This server rejects. RFC 9113 §8.1.1 fixes how:
 // "Malformed requests or responses that are detected MUST be treated as a
 // stream error (Section 5.4.2) of type PROTOCOL_ERROR" — the offending stream
 // is reset and the connection survives.
 //
-// RFC 9113 §8.2.1 (rfc9113.txt:2503) turns that into four checks a receiver
+// RFC 9113 §8.2.1 turns that into four checks a receiver
 // must perform, "a minimal set of validations":
 //
 //	:2508 "A field name MUST NOT contain characters in the ranges 0x00-0x20,
@@ -94,7 +94,7 @@ var teTrailers = []byte("trailers")
 // isConnectionSpecificName reports whether the field name is one HTTP/2 forbids
 // outright.
 //
-//	RFC 9113 §8.2.2 (rfc9113.txt:2547) — "An endpoint MUST NOT generate an
+//	RFC 9113 §8.2.2 — "An endpoint MUST NOT generate an
 //	HTTP/2 message containing connection-specific header fields. This includes
 //	the Connection header field and those listed as having connection-specific
 //	semantics in Section 7.6.1 of [HTTP] (that is, Proxy-Connection, Keep-Alive,
@@ -131,7 +131,7 @@ func isProhibitedField(name, value []byte, isTrailer bool) bool {
 	if hasProhibitedFieldName(name) || hasProhibitedFieldChar(value) {
 		return true
 	}
-	// RFC 9113 §8.1 (rfc9113.txt:2411) — "Trailers MUST NOT include pseudo-header
+	// RFC 9113 §8.1 — "Trailers MUST NOT include pseudo-header
 	// fields". The name check above has already established the name is non-empty.
 	if isTrailer && name[0] == ':' {
 		return true

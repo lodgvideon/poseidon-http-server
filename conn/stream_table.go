@@ -220,7 +220,7 @@ func (t *streamTable) live() int {
 	return t.nClient + t.nPush
 }
 
-// lastPeerID is the GOAWAY last-stream-id: RFC 9113 §6.8 (rfc9113.txt:2013),
+// lastPeerID is the GOAWAY last-stream-id: RFC 9113 §6.8,
 // "the highest-numbered stream identifier for which the sender of the GOAWAY
 // frame might have taken some action on or might yet take action on" — among
 // streams the PEER initiated. §5.1.1 reserves even identifiers for this server,

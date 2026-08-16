@@ -20,7 +20,7 @@ import (
 //	 request as it would have sent if the request method had been GET."
 //
 // So the DATA frames are suppressed while the header section is left alone.
-// RFC 9113 §8.1.1 (rfc9113.txt:2457) blesses the resulting mismatch
+// RFC 9113 §8.1.1 blesses the resulting mismatch
 // explicitly: "A response that is defined to have no content ... MAY have a
 // non-zero content-length header field, even though no content is included in
 // DATA frames."
@@ -86,7 +86,7 @@ func TestConformance_RFC9110_Sec932_GetStillSendsContent(t *testing.T) {
 }
 
 // TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields pins rfc9110.txt:3993
-// together with rfc9113.txt:2457 — the header section, content-length included,
+// together with RFC 9113 §8.1.1 — the header section, content-length included,
 // survives untouched even though no DATA follows.
 func TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields(t *testing.T) {
 	w, sw := headWriter(http.MethodHead)

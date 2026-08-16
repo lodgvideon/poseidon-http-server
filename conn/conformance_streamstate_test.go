@@ -14,16 +14,16 @@ import (
 // Conformance tests for the stream state machine (RFC 9113 §5.1) and for the
 // connection-level flow-control accounting §6.9 makes unconditional.
 //
-//	§5.1 (rfc9113.txt:1000), idle — "Receiving any frame other than HEADERS or
+//	§5.1, idle — "Receiving any frame other than HEADERS or
 //	PRIORITY on a stream in this state MUST be treated as a connection error
 //	(Section 5.4.1) of type PROTOCOL_ERROR."
 //
-//	§5.1 (rfc9113.txt:1044), half-closed (remote) — "If an endpoint receives
+//	§5.1, half-closed (remote) — "If an endpoint receives
 //	additional frames, other than WINDOW_UPDATE, PRIORITY, or RST_STREAM, for a
 //	stream that is in this state, it MUST respond with a stream error (Section
 //	5.4.2) of type STREAM_CLOSED."
 //
-//	§6.9.1 (rfc9113.txt:2113) — "A receiver MUST count the padding and the entire
+//	§6.9.1 — "A receiver MUST count the padding and the entire
 //	size of a frame ... against its connection-level flow-control window even if
 //	the frame is in error."
 //
@@ -145,7 +145,7 @@ func goodHeaders(path string) []hpack.HeaderField {
 }
 
 // TestConformance_RFC9113_Sec51_IdleStream_NonHeadersFrame_ConnectionError pins
-// rfc9113.txt:1000 and its restatement for RST_STREAM at §6.4 (:1596): "If a
+// RFC 9113 §5.1 and its restatement for RST_STREAM at §6.4: "If a
 // RST_STREAM frame identifying an idle stream is received, the recipient MUST
 // treat this as a connection error (Section 5.4.1) of type PROTOCOL_ERROR."
 //
@@ -198,7 +198,7 @@ func TestConformance_RFC9113_Sec51_PriorityOnIdleStreamIsPermitted(t *testing.T)
 }
 
 // TestConformance_RFC9113_Sec51_HalfClosedRemote_DataAfterEndStream pins
-// rfc9113.txt:1044. The stream stays registered after END_STREAM because the
+// RFC 9113 §5.1. The stream stays registered after END_STREAM because the
 // server has not yet written its response — that is the half-closed (remote)
 // state — and body bytes arriving in it used to be delivered to the handler
 // behind its own EOF.
@@ -267,7 +267,7 @@ func TestConformance_RFC9113_Sec51_HalfClosedRemote_HeadersAfterEndStream(t *tes
 }
 
 // TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWindow
-// pins rfc9113.txt:2113. The stream-level window dies with the stream; the
+// pins RFC 9113 §6.9. The stream-level window dies with the stream; the
 // connection-level one does not, and the peer has already spent those octets
 // from its own send window.
 //

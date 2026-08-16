@@ -259,7 +259,7 @@ func TestDepth_MalformedFrame_WindowUpdateOverflow_StopsServing(t *testing.T) {
 // without crashing, and remains usable for a subsequent legitimate request.
 //
 // This test used to also send RST_STREAM on idle stream 7 and assert tolerance.
-// §6.4 (rfc9113.txt:1596) makes that a connection error of type PROTOCOL_ERROR,
+// §6.4 makes that a connection error of type PROTOCOL_ERROR,
 // so tolerating it was the bug, not the feature; that half now lives in
 // TestConformance_RFC9113_Sec51_IdleStream_NonHeadersFrame_ConnectionError.
 func TestDepth_StrayFrames_Tolerated(t *testing.T) {

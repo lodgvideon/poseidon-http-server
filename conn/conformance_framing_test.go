@@ -18,15 +18,15 @@ import (
 // Governing text, copied verbatim from rfc9113.txt as fetched from
 // rfc-editor.org:
 //
-//	§5.4 (rfc9113.txt:1159) — "If a frame causes a connection error, that error
+//	§5.4 — "If a frame causes a connection error, that error
 //	MUST be reported."
 //
-//	§4.2 (rfc9113.txt:513) — "An endpoint MUST send an error code of
+//	§4.2 — "An endpoint MUST send an error code of
 //	FRAME_SIZE_ERROR if a frame exceeds the size defined in
 //	SETTINGS_MAX_FRAME_SIZE, exceeds any limit defined for the frame type, or is
 //	too small to contain mandatory frame data."
 //
-//	§5.4.1 (rfc9113.txt:1173) — "After sending the GOAWAY frame for an error
+//	§5.4.1 — "After sending the GOAWAY frame for an error
 //	condition, the endpoint MUST close the TCP connection."
 //
 // These are the violations the frame codec itself detects. The codec reports
@@ -129,7 +129,7 @@ func runRawProbe(t *testing.T, opts ServerConnOptions, attack func(cli net.Conn,
 }
 
 // TestConformance_RFC9113_Sec54_CodecErrorsAreReportedWithAnErrorCode pins
-// rfc9113.txt:1159 and rfc9113.txt:513 across every structural violation the
+// RFC 9113 §5.4 and §4.2 across every structural violation the
 // frame codec detects on the read path.
 //
 // Each of these arrives at the reader loop as a plain sentinel error from the
@@ -143,17 +143,17 @@ func TestConformance_RFC9113_Sec54_CodecErrorsAreReportedWithAnErrorCode(t *test
 		frame []byte
 		want  frame.ErrCode
 	}{
-		// §4.2 (rfc9113.txt:513) — "too small to contain mandatory frame data".
+		// §4.2 — "too small to contain mandatory frame data".
 		{"RST_STREAM_length_3", rawFrame(frame.FrameRSTStream, 0, 1, []byte{0, 0, 0}), frame.ErrCodeFrameSizeError},
 		{"PING_length_7", rawFrame(frame.FramePing, 0, 0, make([]byte, 7)), frame.ErrCodeFrameSizeError},
 		{"WINDOW_UPDATE_length_3", rawFrame(frame.FrameWindowUpdate, 0, 0, []byte{0, 0, 1}), frame.ErrCodeFrameSizeError},
 		{"GOAWAY_length_4", rawFrame(frame.FrameGoAway, 0, 0, make([]byte, 4)), frame.ErrCodeFrameSizeError},
 
-		// §6.5 (rfc9113.txt:1795) — "A SETTINGS frame with a length other than a
+		// §6.5 — "A SETTINGS frame with a length other than a
 		// multiple of 6 octets MUST be treated as a connection error (Section
 		// 5.4.1) of type FRAME_SIZE_ERROR."
 		{"SETTINGS_length_3", rawFrame(frame.FrameSettings, 0, 0, []byte{0, 0, 0}), frame.ErrCodeFrameSizeError},
-		// §6.5 (rfc9113.txt:1790) — "Receipt of a SETTINGS frame with the ACK flag
+		// §6.5 — "Receipt of a SETTINGS frame with the ACK flag
 		// set and a length field value other than 0 MUST be treated as a
 		// connection error (Section 5.4.1) of type FRAME_SIZE_ERROR."
 		{"SETTINGS_ACK_with_payload", rawFrame(frame.FrameSettings, frame.FlagSettingsAck, 0, []byte{0}), frame.ErrCodeFrameSizeError},
@@ -167,7 +167,7 @@ func TestConformance_RFC9113_Sec54_CodecErrorsAreReportedWithAnErrorCode(t *test
 		{"GOAWAY_on_stream_1", rawFrame(frame.FrameGoAway, 0, 1, make([]byte, 8)), frame.ErrCodeProtocolError},
 		{"CONTINUATION_on_stream_0", rawFrame(frame.FrameContinuation, frame.FlagContinuationEndHeaders, 0, nil), frame.ErrCodeProtocolError},
 
-		// §6.1 (rfc9113.txt:1420) — "If the length of the padding is the length of
+		// §6.1 — "If the length of the padding is the length of
 		// the frame payload or greater, the recipient MUST treat this as a
 		// connection error (Section 5.4.1) of type PROTOCOL_ERROR."
 		{"DATA_pad_length_eats_payload", rawFrame(frame.FrameData, frame.FlagDataPadded, 1, []byte{0xff, 'a'}), frame.ErrCodeProtocolError},
@@ -189,7 +189,7 @@ func TestConformance_RFC9113_Sec54_CodecErrorsAreReportedWithAnErrorCode(t *test
 }
 
 // TestConformance_RFC9113_Sec42_OversizedFrame_GoAwayFrameSizeError pins
-// rfc9113.txt:513 for the one case the connection cannot survive: the codec
+// RFC 9113 §4.2 for the one case the connection cannot survive: the codec
 // rejects the frame on its header, before the payload has been consumed, so the
 // byte stream is no longer frame-aligned and there is nothing to resynchronise
 // to. The error must still be reported.
@@ -206,7 +206,7 @@ func TestConformance_RFC9113_Sec42_OversizedFrame_GoAwayFrameSizeError(t *testin
 }
 
 // TestConformance_RFC9113_Sec42_AdvertisedMaxFrameSizeIsAccepted reads
-// rfc9113.txt:513 the other way round: a frame is oversized only relative to
+// RFC 9113 §4.2 the other way round: a frame is oversized only relative to
 // "the size defined in SETTINGS_MAX_FRAME_SIZE", which is the value this server
 // advertised. Rejecting what we asked for is the same defect seen from the
 // receiving end.
@@ -231,14 +231,14 @@ func TestConformance_RFC9113_Sec42_AdvertisedMaxFrameSizeIsAccepted(t *testing.T
 }
 
 // TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError pins
-// rfc9113.txt:1519 — "A PRIORITY frame with a length other than 5 octets MUST
+// RFC 9113 §6.3 — "A PRIORITY frame with a length other than 5 octets MUST
 // be treated as a stream error (Section 5.4.2) of type FRAME_SIZE_ERROR."
 //
 // The load-bearing half of this test is the third assertion: §5.4.2 scoping is
 // only meaningful if the rest of the multiplexed connection survives.
 func TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError(t *testing.T) {
 	rc := runRawProbe(t, ServerConnOptions{}, func(cli net.Conn, cliFr *frame.Framer) {
-		// Stream 1 must exist first. §6.4 (rfc9113.txt:1596) forbids sending
+		// Stream 1 must exist first. §6.4 forbids sending
 		// RST_STREAM for an idle stream outright, so the stream-error scoping of
 		// §6.3 can only apply to a stream that has been opened.
 		sendReq(t, cliFr, 1, []hpack.HeaderField{
@@ -261,7 +261,7 @@ func TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError(t *tes
 }
 
 // TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit pins both clauses of
-// rfc9113.txt:2125 — "A receiver MUST treat the receipt of a WINDOW_UPDATE frame
+// RFC 9113 §6.9 — "A receiver MUST treat the receipt of a WINDOW_UPDATE frame
 // with a flow-control window increment of 0 as a stream error (Section 5.4.2) of
 // type PROTOCOL_ERROR; errors on the connection flow-control window MUST be
 // treated as a connection error (Section 5.4.1)."
@@ -310,7 +310,7 @@ func TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit(t *testing.T) {
 // TestConformance_RFC9113_Sec610_MalformedFrameDuringOpenFieldBlock pins §6.10
 // against §6.3: while a field block is open, "any frame other than a
 // CONTINUATION frame on the same stream" is a connection error of type
-// PROTOCOL_ERROR (rfc9113.txt:2263). That outranks §6.3's stream scoping, and
+// PROTOCOL_ERROR (RFC 9113 §6.10). That outranks §6.3's stream scoping, and
 // the codec rejects the malformed PRIORITY on length before guardHeaderBlock can
 // ever see it — so the reader loop is the only place left that can tell the
 // difference.
@@ -345,7 +345,7 @@ func TestConformance_RFC9113_Sec610_MalformedFrameDuringOpenFieldBlock(t *testin
 }
 
 // TestConformance_RFC9113_Sec541_ConnectionErrorClosesTheTransport pins
-// rfc9113.txt:1173 — "After sending the GOAWAY frame for an error condition, the
+// RFC 9113 §5.4.1 — "After sending the GOAWAY frame for an error condition, the
 // endpoint MUST close the TCP connection."
 //
 // Without it the reader goroutine is gone, so nothing is ever read from the

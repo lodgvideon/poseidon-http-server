@@ -16,7 +16,7 @@ import (
 // the call site instead of asking one place.
 
 // TestConformance_RFC9113_Sec68_LastStreamIDNamesAPeerStream pins
-// rfc9113.txt:2013 — the GOAWAY last-stream-id is "the highest-numbered stream
+// RFC 9113 §6.8 — the GOAWAY last-stream-id is "the highest-numbered stream
 // identifier for which the sender of the GOAWAY frame might have taken some
 // action on or might yet take action on", and §5.1.1 reserves even identifiers
 // for the server. A server-initiated stream can therefore never be the answer.
@@ -186,7 +186,7 @@ func TestRegression_ResetReleasesTheStreamEvenWhenTheWriteFails(t *testing.T) {
 }
 
 // TestConformance_RFC9113_Sec92_HandshakeSettingsApplyToPipelinedStreams pins
-// rfc9113.txt:1830 — SETTINGS "applies to the connection, not a single stream"
+// RFC 9113 §6.5 — SETTINGS "applies to the connection, not a single stream"
 // — for the stream that arrives inside the handshake window.
 //
 // A client is allowed to send its preface, SETTINGS and its first HEADERS in one

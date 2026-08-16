@@ -25,7 +25,7 @@ func TestStreamState_ClosedIsClosedWhicheverWay(t *testing.T) {
 		// §5.1 half-closed (remote): the peer is done, this endpoint is not.
 		{"half-closed (remote)", stRecvFields | stRecvEnded, false, true},
 		// §5.1 half-closed (local): this endpoint is done, the peer is not. Not
-		// writable — §5.1 (rfc9113.txt:1069) allows only WINDOW_UPDATE, PRIORITY
+		// writable — §5.1 allows only WINDOW_UPDATE, PRIORITY
 		// and RST_STREAM after END_STREAM, none of which go through SendData.
 		{"half-closed (local)", stSentFields | stSentEnded, false, false},
 		// §5.1 closed, the ordinary way: both halves ended.
@@ -53,7 +53,7 @@ func TestStreamState_ClosedIsClosedWhicheverWay(t *testing.T) {
 // TestStreamState_AdvanceReportsTheEdge pins what every caller actually asks:
 // not "is the stream reset" but "was this the reset that closed it". Close and
 // the event-overflow path both send RST_STREAM only on the first transition,
-// because §5.4.2 (rfc9113.txt:1201) says an endpoint "SHOULD NOT send more than
+// because §5.4.2 says an endpoint "SHOULD NOT send more than
 // one RST_STREAM frame for any stream".
 func TestStreamState_AdvanceReportsTheEdge(t *testing.T) {
 	t.Parallel()

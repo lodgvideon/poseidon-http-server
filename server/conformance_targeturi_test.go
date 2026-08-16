@@ -78,7 +78,7 @@ func TestConformance_RFC9110_Sec72_HostSuppliesAuthority(t *testing.T) {
 }
 
 // TestConformance_RFC9110_Sec72_AuthorityWinsOverHost pins RFC 9113 §8.3.1
-// (rfc9113.txt:2649): "The recipient of an HTTP/2 request MUST NOT use the Host
+// — "The recipient of an HTTP/2 request MUST NOT use the Host
 // header field to determine the target URI if ":authority" is present."
 func TestConformance_RFC9110_Sec72_AuthorityWinsOverHost(t *testing.T) {
 	s := &Server{}
@@ -98,7 +98,7 @@ func TestConformance_RFC9110_Sec72_AuthorityWinsOverHost(t *testing.T) {
 
 // TestConformance_RFC9110_Sec42_NonHTTPSchemeUnaffected guards the boundary:
 // the empty-host rule names the "http" and "https" schemes, and RFC 9113
-// (rfc9113.txt:2643) says ":scheme" is not restricted to those, so a non-HTTP
+// (RFC 9113 §8.3.1) says ":scheme" is not restricted to those, so a non-HTTP
 // scheme must not be dragged into it.
 func TestConformance_RFC9110_Sec42_NonHTTPSchemeUnaffected(t *testing.T) {
 	req := &Request{Method: "GET", Path: "/x", Scheme: "ftp", Authority: "files.example"}

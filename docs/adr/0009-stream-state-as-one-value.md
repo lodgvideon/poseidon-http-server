@@ -58,7 +58,7 @@ about the edge, not the level, and answering them from a separate read is what
 let two of them race.
 
 Having a state made one more obligation checkable, and it was being violated:
-§5.1 (`rfc9113.txt:1082`) forbids sending anything but PRIORITY on a closed
+§5.1 forbids sending anything but PRIORITY on a closed
 stream, but `SendHeaders`/`SendData` checked on entry and wrote much later — a
 DATA write waits in `acquireSendCredits` for as long as the peer withholds
 window. `authorizeSend` re-reads the state inside the `wmu` write-lock critical
