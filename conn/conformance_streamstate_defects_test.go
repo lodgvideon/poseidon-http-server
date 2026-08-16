@@ -225,6 +225,14 @@ func TestRegression_CodecRecoveryResetReleasesTheStream(t *testing.T) {
 			defer cancel()
 
 			sent := make(chan struct{})
+			// Closed once the application has taken delivery of stream 1. The
+			// malformed frame must not be written before that: it makes the server
+			// reset stream 1, and as of #133 AcceptStream skips streams reset while
+			// they sit in the accept queue, so this test raced over whether it got a
+			// stream handle at all. What it asserts — that the recovery reset
+			// RELEASES the stream — is about a stream the application already holds.
+			// No assertion below changed.
+			accepted := make(chan struct{})
 			go func() {
 				pipeClient(t, cli, func(cliFr *frame.Framer) {
 					go func() {
@@ -235,6 +243,12 @@ func TestRegression_CodecRecoveryResetReleasesTheStream(t *testing.T) {
 						}
 					}()
 					sendReq(t, cliFr, 1, goodHeaders("/"), false) // stays open
+					select {
+					case <-accepted:
+					case <-time.After(5 * time.Second):
+						t.Error("server never accepted stream 1")
+						return
+					}
 					_, _ = cli.Write(tc.frame)
 					close(sent)
 					time.Sleep(500 * time.Millisecond)
@@ -249,8 +263,10 @@ func TestRegression_CodecRecoveryResetReleasesTheStream(t *testing.T) {
 
 			stream, err := sc.AcceptStream(ctx)
 			if err != nil {
+				close(accepted)
 				t.Fatalf("AcceptStream: %v", err)
 			}
+			close(accepted)
 			<-sent
 
 			deadline := time.Now().Add(2 * time.Second)

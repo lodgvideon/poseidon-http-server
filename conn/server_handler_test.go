@@ -30,8 +30,17 @@ func TestServerConn_OnPriority(t *testing.T) {
 				return
 			}
 			// Then open a real stream to verify connection is still alive.
+			//
+			// ":scheme" added for #133. This request used to carry only ":method"
+			// and ":path", which RFC 9113 §8.3.1 makes malformed — the server
+			// answered it with RST_STREAM(PROTOCOL_ERROR) and never delivered it to
+			// a handler. The AcceptStream below still returned the stream, because
+			// registerStream queues it before the field section is validated and
+			// nothing revalidated it at delivery, so "verify connection is still
+			// alive" was passing on a request the server had already rejected.
 			sendReq(t, cliFr, 3, []hpack.HeaderField{
 				{Name: []byte(":method"), Value: []byte("GET")},
+				{Name: []byte(":scheme"), Value: []byte("https")},
 				{Name: []byte(":path"), Value: []byte("/priority-test")},
 			}, true)
 		})
