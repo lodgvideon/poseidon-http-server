@@ -81,10 +81,18 @@ const fieldEntryOverhead = 32
 // fieldSpan records one decoded field's extent inside serverConnHandler.fieldBuf.
 // Lengths rather than slices: fieldBuf reallocates as it grows, which would
 // invalidate any slice taken before the growth.
+//
+// indexing carries the literal representation the peer chose (RFC 7541 §6.2),
+// not merely whether the field was never-indexed. It was a bool until the codec
+// replaced HeaderField.Sensitive with a three-valued IndexingMode; keeping the
+// mode verbatim means a field that arrived as "literal without indexing"
+// (§6.2.2) is not silently re-reported as "incremental" (§6.2.1), which a round
+// trip through a bool would do. hpack.IndexingMode is a uint8, so the struct is
+// the size it always was.
 type fieldSpan struct {
-	nameLen   int
-	valLen    int
-	sensitive bool
+	nameLen  int
+	valLen   int
+	indexing hpack.IndexingMode
 }
 
 // serverConnHandler bridges frame.Handler into per-ServerStream events.
@@ -420,9 +428,9 @@ func (h *serverConnHandler) ownedCopy() []hpack.HeaderField {
 		slab = append(slab, f.Value...)
 		endOff := len(slab)
 		copied[i] = hpack.HeaderField{
-			Name:      slab[nameOff:valOff:valOff],
-			Value:     slab[valOff:endOff:endOff],
-			Sensitive: f.Sensitive,
+			Name:     slab[nameOff:valOff:valOff],
+			Value:    slab[valOff:endOff:endOff],
+			Indexing: f.Indexing,
 		}
 	}
 	return copied
@@ -461,7 +469,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		if !oversized {
 			h.fieldBuf = append(h.fieldBuf, f.Name...)
 			h.fieldBuf = append(h.fieldBuf, f.Value...)
-			h.spans = append(h.spans, fieldSpan{nameLen: len(f.Name), valLen: len(f.Value), sensitive: f.Sensitive})
+			h.spans = append(h.spans, fieldSpan{nameLen: len(f.Name), valLen: len(f.Value), indexing: f.Indexing})
 		}
 		return nil
 	})
@@ -472,9 +480,9 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		nameEnd := off + sp.nameLen
 		valEnd := nameEnd + sp.valLen
 		h.scratch = append(h.scratch, hpack.HeaderField{
-			Name:      h.fieldBuf[off:nameEnd:nameEnd],
-			Value:     h.fieldBuf[nameEnd:valEnd:valEnd],
-			Sensitive: sp.sensitive,
+			Name:     h.fieldBuf[off:nameEnd:nameEnd],
+			Value:    h.fieldBuf[nameEnd:valEnd:valEnd],
+			Indexing: sp.indexing,
 		})
 		off = valEnd
 	}

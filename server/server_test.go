@@ -403,9 +403,9 @@ func (h *headerCapture) OnHeaders(_ frame.FrameHeader, hb frame.HeaderBlock, _ *
 	var result []hpack.HeaderField
 	err := dec.DecodeBlock(hb, hpack.FieldVisitor(func(f hpack.HeaderField) error {
 		cp := hpack.HeaderField{
-			Name:      make([]byte, len(f.Name)),
-			Value:     make([]byte, len(f.Value)),
-			Sensitive: f.Sensitive,
+			Name:     make([]byte, len(f.Name)),
+			Value:    make([]byte, len(f.Value)),
+			Indexing: f.Indexing,
 		}
 		copy(cp.Name, f.Name)
 		copy(cp.Value, f.Value)
