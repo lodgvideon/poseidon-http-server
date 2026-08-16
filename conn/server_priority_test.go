@@ -420,7 +420,7 @@ func TestServerConn_PriorityIsSetBeforeAccept(t *testing.T) {
 		defer close(clientDone)
 		pipeClient(t, cli, func(cliFr *frame.Framer) {
 			enc := hpack.NewEncoder()
-			for i := 0; i < priorityRaceStreams; i++ {
+			for i := range priorityRaceStreams {
 				if _, ok := <-ready; !ok {
 					return
 				}
@@ -464,7 +464,7 @@ func TestServerConn_PriorityIsSetBeforeAccept(t *testing.T) {
 	defer sc.Close()
 
 	nilAt := make([]uint32, 0, 8)
-	for i := 0; i < priorityRaceStreams; i++ {
+	for i := range priorityRaceStreams {
 		select {
 		case ready <- struct{}{}:
 		case <-clientDone:
