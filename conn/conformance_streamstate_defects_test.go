@@ -338,3 +338,117 @@ func TestRegression_CodecRecoveryResetReleasesTheStream(t *testing.T) {
 		})
 	}
 }
+
+// TestRegression_ReaderTeardownCancelsAbandonedStreamContexts pins the third
+// clause of the contract ServerStream.Context states — cancelled "when the
+// stream is reset by the client (RST_STREAM), completes, or the underlying
+// connection closes" — on the path that did not honour it (issue #139).
+//
+// The reader goroutine ends a connection by calling shutdownStreams and
+// returning, from both of its exits. shutdownStreams drained the table and
+// signalled each stream over its event channel, and that was the whole of it:
+// connCancel, the one thing that cancels every per-stream context, was invoked
+// from exactly two places, Close and abortHandshake, and neither reader-loop
+// exit is one of them. A handler waiting on stream.Context().Done() rather than
+// inside Recv was therefore never released when the peer's socket died.
+//
+// markStreamDone cannot repair it afterwards, which is what makes the
+// cancellation lost rather than merely late: it cancels only the stream
+// streamTable.release hands back, and release returns nil for one that teardown
+// has already drained. Both release paths dropped it, so nothing short of the
+// connection's parent context ever fired.
+//
+// THE BARRIER IS sc.readerDone, NOT A SLEEP. readerLoop closes it in a defer,
+// so this receive completes strictly after shutdownStreams has returned: by
+// then teardown has either cancelled the context or it never will, and the
+// check needs no wall-clock budget. A budget here could only be a guess about
+// another goroutine, which is exactly what #115 turned out to be — and a probe
+// of this defect still failed at an 8s one.
+func TestRegression_ReaderTeardownCancelsAbandonedStreamContexts(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer cli.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Closed once the stream has been accepted and counted, so the stream is
+	// provably live when teardown begins. The client returns from its callback at
+	// that point and pipeClient's own deferred cli.Close ends the reader loop —
+	// the "underlying connection closes" case, arranged rather than waited for.
+	accepted := make(chan struct{})
+	go func() {
+		pipeClient(t, cli, func(cliFr *frame.Framer) {
+			// Keep draining, so no server write can block on an unread pipe.
+			go func() {
+				for {
+					if _, err := cliFr.ReadFrame(context.Background(), &fieldRSTCapture{}); err != nil {
+						return
+					}
+				}
+			}()
+			sendReq(t, cliFr, 1, goodHeaders("/"), false) // no END_STREAM: stays open
+			<-accepted
+		})
+	}()
+
+	sc, err := NewServerConn(ctx, srv, ServerConnOptions{}.defaulted())
+	if err != nil {
+		t.Fatalf("NewServerConn: %v", err)
+	}
+	defer sc.Close()
+
+	stream, err := sc.AcceptStream(ctx)
+	if err != nil {
+		close(accepted)
+		t.Fatalf("AcceptStream: %v", err)
+	}
+	streamCtx := stream.Context()
+
+	// Pin the arrangement before reading anything into the result. A run that
+	// reached teardown with no live stream, or with this one already cancelled,
+	// never exercised the path under test and must not be allowed to pass for it.
+	if got := sc.ActiveStreams(); got != 1 {
+		close(accepted)
+		t.Fatalf("ActiveStreams before teardown = %d, want 1", got)
+	}
+	select {
+	case <-streamCtx.Done():
+		close(accepted)
+		t.Fatal("stream context already cancelled before the connection ended: this run " +
+			"never reached the teardown path under test")
+	default:
+	}
+
+	close(accepted) // the client returns and closes its end
+
+	select {
+	case <-sc.readerDone:
+	case <-ctx.Done():
+		t.Fatalf("reader goroutine never exited: %v", ctx.Err())
+	}
+
+	if got := sc.ActiveStreams(); got != 0 {
+		t.Errorf("ActiveStreams after reader teardown = %d, want 0: teardown is supposed to "+
+			"have drained the table by the time readerDone closes", got)
+	}
+	select {
+	case <-streamCtx.Done():
+	default:
+		t.Error("stream context still live on return from the reader goroutine's teardown: " +
+			"the stream was removed from the table without being cancelled, so a handler " +
+			"selecting on stream.Context().Done() waits forever on a connection that is " +
+			"already gone — and markStreamDone can no longer cancel it either, because " +
+			"streamTable.release returns nil for a stream teardown has already drained")
+	}
+
+	// The two release paths can both reach the same stream; teardown just won.
+	// The loser must be harmless — no panic, no second cancellation attempt on a
+	// stream it no longer owns, and the cancellation already performed stands.
+	sc.markStreamDone(stream.ID())
+	select {
+	case <-streamCtx.Done():
+	default:
+		t.Error("stream context live after markStreamDone followed teardown onto the same " +
+			"stream: the two release paths must not be able to undo each other")
+	}
+}
