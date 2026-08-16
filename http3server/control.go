@@ -225,8 +225,16 @@ func (cs *connState) readControl(c *quic.Conn) error {
 		// §7.2.4.2 has each endpoint act on initial values "before the peer's
 		// SETTINGS frame has arrived, as packets carrying the settings can be lost
 		// or delayed", so a request that overtakes the control stream is served
-		// with the defaults rather than refused. Nothing here bounds how long a
-		// peer may go without opening one — see issue #143.
+		// with the defaults rather than refused.
+		//
+		// Nothing HERE bounds how long a peer may go without opening one, and
+		// deliberately so: the bound is QUIC's max_idle_timeout, which #168 made this
+		// server advertise and which reaps a peer that opens no stream at all on
+		// exactly its advertised schedule (measured; pinned by
+		// TestServer_PeerWithNoControlStreamIsIdleClosed). RFC 9114 names no code and
+		// no deadline for a control stream that never arrives, and a locally-invented
+		// timer could only mis-fire on the conforming-but-delayed client §7.2.4.2
+		// anticipates — which is why issue #143 was closed without one.
 		return nil
 	}
 	if data := cs.control.Recv(); len(data) > 0 {

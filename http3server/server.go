@@ -38,6 +38,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -57,6 +58,36 @@ const (
 	maxFieldSection uint64 = 1 << 16
 	maxStreamsBidi  uint64 = 100 // concurrent requests a client may have in flight
 	maxStreamsUni   uint64 = 4   // client control + QPACK encoder/decoder, with slack
+)
+
+// h3RequestIncomplete is H3_REQUEST_INCOMPLETE, RFC 9114 §8.1: "The client's stream
+// terminated without containing a fully formed request."
+//
+// It is spelled out here rather than taken from http3 because poseidon-http-client
+// v0.13.0's §8.1 table does not define it. That table is otherwise the source for
+// every code this package sends, so the omission is the dependency's, not a local
+// preference — see poseidon-http-client#775, which also covers the other three §8.1
+// codes missing from it (H3_GENERAL_PROTOCOL_ERROR 0x0101, H3_CONNECT_ERROR 0x010f,
+// H3_VERSION_FALLBACK 0x0110). Replace this constant with http3.H3RequestIncomplete
+// once that lands.
+const h3RequestIncomplete uint64 = 0x010d
+
+// Request-stream failures that carry a different verdict to the peer. RFC 9114 names
+// a distinct reset code per condition (§4.1, §4.1.1), so the conditions have to stay
+// distinguishable all the way from where they are detected to where the stream is
+// aborted; before issue #180 they were all funnelled into one code at the call site.
+var (
+	// errRequestTooLarge: the request outgrew maxRequestBytes. Not a reset at all —
+	// §4.1's "abort reading the request stream, send a complete response" path.
+	errRequestTooLarge = errors.New("http3server: request exceeds the buffered-request limit")
+	// errRequestIncomplete: the stream ended without a fully formed request, either
+	// because the peer reset it mid-message or because it carried no HEADERS frame.
+	errRequestIncomplete = errors.New("http3server: request stream ended without a complete message")
+	// errRequestAbandoned: this server stopped waiting — its context was cancelled or
+	// the connection ended — while the request was still arriving. Wrapped around the
+	// underlying transport error rather than replacing it, so the cause survives for a
+	// reader while requestAbortCode can still classify it.
+	errRequestAbandoned = errors.New("http3server: the connection ended before the request did")
 )
 
 // defaultIdleTimeout is the QUIC max_idle_timeout this server advertises when
@@ -261,9 +292,12 @@ func (s *Server) openControlStream(c *quic.Conn) error {
 func (s *Server) serveRequest(ctx context.Context, c *quic.Conn, rs *quic.Stream, cs *connState) {
 	body, err := readRequestStream(ctx, rs)
 	if err != nil {
-		// The request never arrived whole: the peer reset it, it outgrew the buffer,
-		// or the connection is going away.
-		_ = rs.Reset(http3.H3RequestCancelled)
+		if errors.Is(err, errRequestTooLarge) {
+			// Answered rather than aborted: see refuseOversizeRequest (issue #179).
+			s.refuseOversizeRequest(rs, cs)
+			return
+		}
+		_ = rs.Reset(requestAbortCode(err))
 		return
 	}
 	req, err := decodeRequest(body)
@@ -276,7 +310,7 @@ func (s *Server) serveRequest(ctx context.Context, c *quic.Conn, rs *quic.Stream
 			_ = connError(c, cfe.code)
 			return
 		}
-		_ = rs.Reset(http3.H3MessageError)
+		_ = rs.Reset(requestAbortCode(err))
 		return
 	}
 	req = req.WithContext(ctx)
@@ -298,8 +332,138 @@ func (s *Server) serveRequest(ctx context.Context, c *quic.Conn, rs *quic.Stream
 	_, _ = rs.Send(resp, true) // FIN: the response ends the stream
 }
 
+// requestAbortCode is the RFC 9114 error code a request stream is aborted with when
+// err ended it before a handler could answer. Three conditions, three codes, and
+// before issue #180 all three were sent as H3_REQUEST_CANCELLED or H3_MESSAGE_ERROR:
+//
+//   - The stream ended without a fully formed request — the peer reset it mid-message,
+//     or it carried no HEADERS frame at all. §4.1: "If a client-initiated stream
+//     terminates without enough of the HTTP message to provide a complete response,
+//     the server SHOULD abort its response stream with the error code
+//     H3_REQUEST_INCOMPLETE." §8.1 defines that code as "The client's stream
+//     terminated without containing a fully formed request".
+//   - The server gave up on it: the connection's context was cancelled, or the
+//     transport ended the connection. §4.1.1: "When the server cancels a request
+//     without performing any application processing, the request is considered
+//     'rejected'. The server SHOULD abort its response stream with the error code
+//     H3_REQUEST_REJECTED." No processing happened — §4.1.1 defines "processed" as
+//     "some data from the stream was passed to some higher layer of software that
+//     might have taken some action as a result", and the handler has not been reached
+//     at either call site. That also earns the peer the retry licence the next
+//     sentence grants: "The client can treat requests rejected by the server as though
+//     they had never been sent at all, thereby allowing them to be retried later."
+//     H3_REQUEST_CANCELLED, sent here before, is scoped by the sentence after that to
+//     the opposite case: "When a server abandons a response after partial processing".
+//   - Anything else reaching here is a message the decoder understood and refused —
+//     a bad field section or an illegal pseudo-header. §4.1.2: "Malformed requests or
+//     responses that are detected MUST be treated as a stream error of type
+//     H3_MESSAGE_ERROR."
+//
+// errRequestTooLarge is deliberately not a case: that request is answered with a 413
+// rather than aborted (refuseOversizeRequest), so a code for it here would name a
+// RESET_STREAM that is never sent. serveRequest handles it before calling this.
+//
+// Pure, so the mapping is pinned by a unit test rather than by four live connections.
+func requestAbortCode(err error) uint64 {
+	switch {
+	case errors.Is(err, errRequestIncomplete):
+		return h3RequestIncomplete
+	case errors.Is(err, errRequestAbandoned):
+		return http3.H3RequestRejected
+	default:
+		return http3.H3MessageError
+	}
+}
+
+// refuseOversizeRequest answers a request that outgrew maxRequestBytes instead of
+// abandoning it (issue #179).
+//
+// # What went wrong before
+//
+// The oversize branch used to do one thing: rs.Reset. A RESET_STREAM aborts the
+// SERVER's send direction (RFC 9000 §3.2) and says nothing to the peer's send
+// direction, so the client kept writing. Meanwhile nothing called rs.Recv again, and
+// consuming received bytes is the only thing that grants receive-flow-control credit
+// (quic/stream.go recvLocked → onStreamConsumed), so the client ran out of credit and
+// parked in WaitSendable. The reset did wake it — the transport signals the stream on
+// receipt — but quic.Stream.Send returns ErrStreamReset only for the LOCAL send side,
+// which a peer's RESET_STREAM does not touch, so the woken sender re-checked the same
+// predicate and parked again. Measured: the peer's Do returned after 30.2s with "quic:
+// idle timeout" and never learned the request was refused. On a peer advertising no
+// max_idle_timeout, before #168, that was indefinite.
+//
+// STOP_SENDING is the frame that ends the peer's send direction (RFC 9000 §3.5), and
+// it is what RFC 9114 §4.1 prescribes here: "When the server does not need to receive
+// the remainder of the request, it MAY abort reading the request stream, send a
+// complete response, and cleanly close the sending part of the stream. The error code
+// H3_NO_ERROR SHOULD be used when requesting that the client stop sending on the
+// request stream." The three steps below are those three, in that order.
+//
+// # Why a response and not a reset
+//
+// §4.1.1 opens with "When possible, it is RECOMMENDED that servers send an HTTP
+// response with an appropriate status code rather than cancelling a request", and RFC
+// 9110 §15.5.14 supplies the status: "The 413 (Content Too Large) status code
+// indicates that the server is refusing to process a request because the request
+// content is larger than the server is willing or able to process. The server MAY
+// terminate the request, if the protocol version in use allows it" — HTTP/3 does, via
+// the STOP_SENDING above. §4.1 also guarantees the response survives the abrupt end:
+// "Clients MUST NOT discard complete responses as a result of having their request
+// terminated abruptly."
+//
+// The alternatives are each wrong for a reason worth keeping:
+//
+//   - H3_REQUEST_REJECTED (0x010b) would be the correct code IF this cancelled the
+//     request, and it is what the ctx-cancelled branch above sends. But §4.1.1's
+//     retry licence — "The client can treat requests rejected by the server as though
+//     they had never been sent at all, thereby allowing them to be retried later" —
+//     invites the peer to resend the same oversize body forever. A 413 tells it why.
+//   - H3_REQUEST_CANCELLED (0x010c), the code this branch used to send, is scoped by
+//     §4.1.1 to the opposite case: "When a server abandons a response after partial
+//     processing". No application processing happens here — the handler never runs.
+//   - H3_EXCESSIVE_LOAD (0x0107) is a CONNECTION-scope verdict on a peer's behaviour
+//     ("its peer is exhibiting a behavior that might be generating excessive load"),
+//     and this package uses it that way already (control.go). One request larger than
+//     one buffer is not a behaviour, and killing the connection would take every other
+//     in-flight request on it with no §8.1 basis.
+//
+// A failure to encode or send the 413 falls back to H3_REQUEST_REJECTED: the peer
+// then gets a cancellation with the code §4.1.1 gives an unprocessed request, rather
+// than the silence this function exists to remove.
+func (s *Server) refuseOversizeRequest(rs *quic.Stream, cs *connState) {
+	// 1. Abort reading the request stream. This is the step whose absence was the bug:
+	//    it is what unblocks a peer parked on flow control.
+	_ = rs.StopSending(http3.H3NoError)
+
+	// 2. Send a complete response. Built here rather than through the handler — §4.1.1
+	//    counts passing "some data from the stream ... to some higher layer of software"
+	//    as processing, and this request is refused before any of it is understood.
+	rw := &responseWriter{header: http.Header{}, status: http.StatusRequestEntityTooLarge}
+	rw.header.Set("Content-Type", "text/plain; charset=utf-8")
+	rw.header.Set("Content-Length", strconv.Itoa(len(oversizeBody)))
+	_, _ = rw.body.Write(oversizeBody)
+	resp, err := encodeResponse(rw, cs.peerMaxFieldSection.Load())
+	if err != nil {
+		_ = rs.Reset(http3.H3RequestRejected)
+		return
+	}
+	// 3. Cleanly close the sending part of the stream (the FIN).
+	if _, err := rs.Send(resp, true); err != nil {
+		_ = rs.Reset(http3.H3RequestRejected)
+	}
+}
+
+// oversizeBody is the 413's content. Its length is what the Content-Length above
+// states, so the two cannot drift: §4.1.2 makes a response whose Content-Length
+// disagrees with the DATA frames malformed.
+var oversizeBody = []byte("request body exceeds the server's limit\n")
+
 // readRequestStream buffers a whole request. The connection's Poll loop feeds the
 // stream; this waits on its readiness until the client signals the end with a FIN.
+//
+// The three ways it fails are three different verdicts to the peer (RFC 9114 §4.1,
+// §4.1.1), so they are returned as three distinguishable errors rather than as one
+// "it did not arrive" — see serveRequest, and issues #179 and #180.
 func readRequestStream(ctx context.Context, rs *quic.Stream) ([]byte, error) {
 	var buf []byte
 	for {
@@ -311,16 +475,19 @@ func readRequestStream(ctx context.Context, rs *quic.Stream) ([]byte, error) {
 		finished, reset, _ := rs.RecvState()
 		buf = append(buf, rs.Recv()...)
 		if reset {
-			return nil, io.ErrUnexpectedEOF
+			return nil, errRequestIncomplete // the peer aborted mid-message
 		}
 		if uint64(len(buf)) > maxRequestBytes {
-			return nil, io.ErrShortBuffer
+			return nil, errRequestTooLarge
 		}
 		if finished {
 			return buf, nil
 		}
 		if err := rs.WaitReadable(ctx); err != nil {
-			return nil, err
+			// ctx cancelled, or the connection ended. Wrapped, not replaced: the code
+			// this becomes is §4.1.1's H3_REQUEST_REJECTED whatever the cause, and the
+			// cause is still worth carrying.
+			return nil, fmt.Errorf("%w: %w", errRequestAbandoned, err)
 		}
 	}
 }
@@ -446,7 +613,16 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 		}
 	}
 	if !seen {
-		return nil, http3.ErrH3Message
+		// No header section arrived, so there is no message to call malformed. §4.1:
+		// "If a client-initiated stream terminates without enough of the HTTP message
+		// to provide a complete response, the server SHOULD abort its response stream
+		// with the error code H3_REQUEST_INCOMPLETE" — §8.1 defines that code as "The
+		// client's stream terminated without containing a fully formed request", which
+		// is this and not §4.1.2's H3_MESSAGE_ERROR (issue #180). Every other way to
+		// reach here without a HEADERS frame — DATA first, a control-stream frame — is
+		// already a connection error above, so what is left is an empty stream, one
+		// carrying only unknown/GREASE frames, or one cut off mid-frame.
+		return nil, errRequestIncomplete
 	}
 	return buildRequest(fields, body)
 }
