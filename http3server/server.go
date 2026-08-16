@@ -111,6 +111,8 @@ func (s *Server) serveConn(ctx context.Context, c *quic.Conn) {
 		return
 	}
 
+	cs := newConnState()
+
 	// Snapshot the TLS state ONCE per connection, here, before the Poll loop
 	// starts. Three reasons this is the only correct place:
 	//
@@ -132,20 +134,23 @@ func (s *Server) serveConn(ctx context.Context, c *quic.Conn) {
 	// remote-address accessor, so there is nothing to put on the context here.
 	// See the package doc and poseidon-http-client#710; issue #102 stays open on
 	// the address half.
-	tlsState := c.ConnectionState()
+	cs.tlsState = c.ConnectionState()
 
 	for {
 		if err := c.Poll(ctx); err != nil {
 			return // the connection ended: idle timeout, peer close, or ctx
 		}
-		for rs := c.AcceptBidiStream(); rs != nil; rs = c.AcceptBidiStream() {
-			go s.serveRequest(ctx, rs, &tlsState)
+		// Service the client's unidirectional streams — its control stream above
+		// all — BEFORE accepting request streams. When one Poll pass delivers the
+		// client's SETTINGS and its first request together, this ordering applies
+		// the settings before the request goroutine that reads them exists. The
+		// other order is not a race in the data sense (peerMaxFieldSection is an
+		// atomic) but it would answer that request under the wrong limit.
+		if err := cs.serviceUni(c); err != nil {
+			return // the peer violated the protocol; the connection is closed
 		}
-		// Accept the client's unidirectional streams (its control and QPACK
-		// streams) so they are registered and flow-controlled. Under the
-		// static-table profile there is nothing to read from them.
-		for us := c.AcceptUniStream(); us != nil; us = c.AcceptUniStream() {
-			_ = us
+		for rs := c.AcceptBidiStream(); rs != nil; rs = c.AcceptBidiStream() {
+			go s.serveRequest(ctx, rs, cs)
 		}
 	}
 }
@@ -172,9 +177,10 @@ func (s *Server) openControlStream(c *quic.Conn) error {
 }
 
 // serveRequest reads one request off its stream, runs the handler, and writes the
-// response back on the same stream. tlsState is the connection's TLS state,
-// snapshotted once by serveConn and shared read-only by every request on it.
-func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream, tlsState *tls.ConnectionState) {
+// response back on the same stream. cs is the connection's shared state: the TLS
+// state snapshotted once by serveConn, and the field-section limit the peer's
+// SETTINGS advertised — both read-only here.
+func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream, cs *connState) {
 	body, err := readRequestStream(ctx, rs)
 	if err != nil {
 		// The request never arrived whole: the peer reset it, it outgrew the buffer,
@@ -193,12 +199,12 @@ func (s *Server) serveRequest(ctx context.Context, rs *quic.Stream, tlsState *tl
 	// nil made every net/http handler that gates on `r.TLS != nil` — HSTS, secure
 	// cookies, mTLS authorization — treat the most-encrypted transport the server
 	// speaks as cleartext, while req.URL.Scheme said "https" three lines away.
-	req.TLS = tlsState
+	req.TLS = &cs.tlsState
 
 	rw := &responseWriter{header: http.Header{}, status: http.StatusOK}
 	s.handler().ServeHTTP(rw, req)
 
-	resp, err := encodeResponse(rw)
+	resp, err := encodeResponse(rw, cs.peerMaxFieldSection.Load())
 	if err != nil {
 		_ = rs.Reset(http3.H3InternalError)
 		return
@@ -343,7 +349,15 @@ func buildRequest(fields []hpack.HeaderField, body []byte) (*http.Request, error
 
 // encodeResponse builds the response stream: a HEADERS frame with the QPACK field
 // section, then a DATA frame with the body (RFC 9114 §4.1).
-func encodeResponse(rw *responseWriter) ([]byte, error) {
+//
+// fieldSectionLimit is the limit the field section is held to: the peer's
+// SETTINGS_MAX_FIELD_SECTION_SIZE once its control stream has delivered one, and
+// this server's own constant until then. §4.2.2 makes the peer's value advice to a
+// sender — "An implementation that has received this parameter SHOULD NOT send an
+// HTTP message header that exceeds the indicated size, as the peer will likely
+// refuse to process it" — so a response over the limit is refused here rather than
+// sent for the peer to discard.
+func encodeResponse(rw *responseWriter, fieldSectionLimit uint64) ([]byte, error) {
 	fields := make([]hpack.HeaderField, 0, len(rw.header)+1)
 	// :status leads the field section (RFC 9114 §4.3.2).
 	fields = append(fields, hpack.HeaderField{
@@ -358,11 +372,20 @@ func encodeResponse(rw *responseWriter) ([]byte, error) {
 			})
 		}
 	}
-	section := qpack.NewEncoder().EncodeFieldSection(nil, fields)
-	if uint64(len(section)) > maxFieldSection {
+	// The size §4.2.2 bounds is "calculated based on the uncompressed size of
+	// fields, including the length of the name and value in bytes plus an overhead
+	// of 32 bytes for each field" — NOT the length of the QPACK block on the wire,
+	// which is smaller by however well the field section happened to compress and
+	// so admits sections the peer will refuse. Summed on uint64 so a handler
+	// setting a huge header cannot overflow it.
+	var size uint64
+	for i := range fields {
+		size += uint64(len(fields[i].Name)) + uint64(len(fields[i].Value)) + fieldLineOverhead
+	}
+	if size > fieldSectionLimit {
 		return nil, http3.ErrFieldSectionTooLarge
 	}
-	out := http3.AppendHeaders(nil, section)
+	out := http3.AppendHeaders(nil, qpack.NewEncoder().EncodeFieldSection(nil, fields))
 	if rw.body.Len() > 0 {
 		out = http3.AppendData(out, rw.body.Bytes())
 	}
