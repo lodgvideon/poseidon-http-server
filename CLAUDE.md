@@ -61,6 +61,38 @@ just advertised. Concretely:
 - **Any new hot-path feature must ship with a benchmark**, or it can silently
   erode the baseline.
 
+## Locks cost more than allocations — read alongside the alloc contract
+
+Allocations are evil; **locks are worse.** When a design trades a lock for an
+allocation, take the allocation. When ordering performance work, rank contention
+above allocation count.
+
+Why: an allocation is a steady tax the GC amortises, and `make bench-gate`
+already measures it. Lock contention is superlinear in core count and appears
+only under concurrency — where, today, **no gate looks at all**. A connection-wide
+write mutex serialises every stream on that connection no matter how many cores
+are idle, so the allocation contract can be perfect and the server still not
+scale.
+
+Rules that follow:
+
+- **Every new hot-path design must state what it does *instead* of taking a
+  lock** — atomics, per-stream or per-P sharding, a single-owner goroutine, an
+  immutable snapshot, or a lock-free queue. "It takes a mutex" is an answer that
+  needs a reason next to it.
+- **Every hot-path benchmark needs a `RunParallel` variant.** A single-goroutine
+  `ns/op` says nothing about a lock. As of 2026-08-15 the repo had 27 benchmarks
+  and zero parallel ones, which is why this section exists.
+- This rule is **in tension with ADR-0003**, which records "every write is
+  serialised under one mutex" (`conn.ServerConn.wmu`) as a deliberate choice, and
+  with `CONTEXT.md`'s connection entry. Changing that needs a superseding ADR and
+  a measurement, not a quiet edit — see issue #95, which exists to produce the
+  measurement first.
+- Known sites to weigh against this rule: `wmu` (15 call sites, all writes),
+  `fcOutCond.Broadcast()` (6 sites, O(N) wakeups per WINDOW_UPDATE),
+  `Server.mu` (taken per stream in `spawnStream`), `MetricsCollector.mu`
+  (four map lookups per request).
+
 ## Conventions
 
 - **Commits:** Conventional Commits (`feat:`/`fix:`/`test:`/`deps:`/`chore:` …) —
@@ -87,10 +119,51 @@ A green Release run with **no tag** and the PR stuck on `autorelease: pending` i
 this quirk, not a build failure. Latest released line: **v0.4.x** (client pinned
 at v0.7.1 in go.mod).
 
+## Code discovery: two graphs, and which one answers what
+
+Both are indexed. They are not redundant — reach for them in this order.
+
+**CodeGraph (`codegraph_explore`) — default first stop.** One call answers "how
+does X work", "how does X reach Y", or "survey this area", returning verbatim
+source grouped by file plus the call paths and a blast-radius summary. It
+**auto-syncs** via a file watcher (~2s debounce), so it is current as you edit,
+and it prepends a staleness banner naming the files it has not yet re-read —
+believe that banner and read those files directly.
+
+**codebase-memory (`query_graph`) — for the questions CodeGraph cannot ask.** Its
+Cypher surface carries per-function complexity and hot-path properties that
+matter specifically here: `alloc_in_loop`, `linear_scan_in_loop`,
+`transitive_loop_depth`, `loop_depth`, `recursive`. Those are the zero-allocation
+contract and the contention work expressed as a query — e.g. find every function
+that allocates inside a loop on a path reachable from the write path. CodeGraph
+has no equivalent. It does **not** auto-sync: re-index after a batch lands, and
+check the `head_sha` it is stamped with against your current HEAD before trusting
+a line number.
+
+Either way, prefer a graph over `grep` for anything structural. Use `grep` for
+text, configs, and non-code files, and always `Read` a file before editing it.
+
+## Worktrees
+
+Worktrees live in **`.claude/worktrees/<name>/`** — that is the project's
+convention, so the `using-git-worktrees` skill should use it without asking. The
+directory is ignored in `.gitignore` (not only in `.git/info/exclude`), so the
+protection survives a fresh clone.
+
+**Each worktree needs its own CodeGraph index.** Run `codegraph init` once inside
+a new worktree; the root index does not cover it, and `codegraph.json` explicitly
+excludes `.claude/worktrees/**` from the root project. That exclusion is not
+tidiness: the four worktrees present when this was written held **576 `.go` files
+against the root's 155**, so indexing them together would report every symbol
+five times and make the graph worse than no graph.
+
+Querying from the wrong index is the same failure as a stale ticket premise —
+plausible answers with line numbers that moved. Confirm which project path you
+are querying before trusting an offset.
+
 ## Working here
 
-- Prefer the **codebase-memory** MCP graph tools for code discovery
-  (`search_graph`, `trace_path`, `get_code_snippet`) before grep — the repo is
-  indexed.
+- Code discovery goes through a graph, not `grep` — see the section above for
+  which of the two answers what.
 - CI = `ci.yml` (build/test/race/lint) + `security.yml` + `fuzz.yml` + `release.yml`;
   all Actions are pinned to commit SHAs (keep it that way for Dependabot).
