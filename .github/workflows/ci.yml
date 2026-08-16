@@ -15,7 +15,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       - name: Download dependencies
         run: go mod download
@@ -36,7 +36,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       - name: Download dependencies
         run: go mod download
@@ -64,7 +64,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       - name: Check coverage (library packages, examples/cmd excluded)
         run: |
@@ -79,7 +79,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       # Guards docs/RFC_COVERAGE.md: every required RFC tag must still have a
       # passing conformance suite, and no suite may exist untagged (an untagged
@@ -97,7 +97,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       # Smoke-run every benchmark once to catch broken benches, panics, and build
       # breaks. True regression-gating (same-runner before/after via benchstat) is a
