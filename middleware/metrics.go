@@ -125,12 +125,24 @@ type MetricsConfig struct {
 	SeriesIdleTTL time.Duration
 
 	// PathLabel maps a request to the value used for the "path" label. It is
-	// the hook routers use to label by route template rather than by concrete
-	// path — e.g. with chi:
+	// the hook to label by route template rather than by concrete path —
+	// collapse the path onto the template yourself:
 	//
 	//	PathLabel: func(req *server.Request) string {
-	//		return chi.RouteContext(req.Context()).RoutePattern()
+	//		if strings.HasPrefix(req.Path, "/users/") {
+	//			return "/users/{id}"
+	//		}
+	//		return req.Path
 	//	}
+	//
+	// A router's own matched pattern is NOT reachable from here, and this
+	// doc comment used to claim otherwise with a chi example that did not
+	// compile. Two things stop it. [server.Request] has no Context method —
+	// a [server.Handler] takes ctx as a separate parameter, so there is no
+	// req.Context() to pass. And Metrics is a [server.Middleware], which
+	// Options.resolvedHandler chains ON TOP OF FromHTTPHandler: this hook
+	// runs before the router does, so even a reachable context would not
+	// yet hold the route pattern chi fills in inside its own ServeHTTP.
 	//
 	// Returning a template collapses /users/1, /users/2, … onto /users/{id},
 	// which keeps the label set small enough that the cap is never reached.
