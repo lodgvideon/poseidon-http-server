@@ -450,39 +450,88 @@ func readOneFrame(ctx context.Context, fr *frame.Framer, h frame.Handler) error 
 // AcceptStream blocks until a new client-initiated stream arrives
 // (HEADERS frame on an idle stream ID). Returns the stream with
 // initial headers ready to read via Recv.
+//
+// Streams that died while they waited in the queue are skipped rather than
+// delivered; see deliverable. The loop is bounded by the queue depth — every
+// iteration consumes exactly one queued stream, and an empty queue parks in the
+// blocking select — so it cannot spin.
 func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 	if sc.closed.Load() {
 		return nil, ErrConnClosed
 	}
-	// Drain what is already queued before considering the connection over. Both
-	// channels can be ready at once — acceptCh is buffered and the reader
-	// registers a stream before it exits — and select would then pick uniformly
-	// at random, silently discarding requests that were already accepted and
-	// counted. Same reason ServerStream.Recv checks its buffer first.
-	select {
-	case ss, ok := <-sc.acceptCh:
-		if !ok {
-			return nil, ErrConnClosed
+	for {
+		// Drain what is already queued before considering the connection over. Both
+		// channels can be ready at once — acceptCh is buffered and the reader
+		// registers a stream before it exits — and select would then pick uniformly
+		// at random, silently discarding requests that were already accepted and
+		// counted. Same reason ServerStream.Recv checks its buffer first.
+		select {
+		case ss, ok := <-sc.acceptCh:
+			if !ok {
+				return nil, ErrConnClosed
+			}
+			if !ss.deliverable() {
+				continue
+			}
+			return ss, nil
+		default:
 		}
-		return ss, nil
-	default:
-	}
-	select {
-	case ss, ok := <-sc.acceptCh:
-		if !ok {
+		select {
+		case ss, ok := <-sc.acceptCh:
+			if !ok {
+				return nil, ErrConnClosed
+			}
+			if !ss.deliverable() {
+				// Back to waiting, not back to the caller: returning here would hand
+				// out a nil stream with a nil error, which server.acceptLoop passes
+				// straight into spawnStream.
+				continue
+			}
+			return ss, nil
+		case <-sc.readerDone:
+			// The reader goroutine has exited — the connection is finished, whether it
+			// ended cleanly or on a protocol error. acceptCh is never closed, so without
+			// this the owner would block here until its own context expired, and with
+			// IdleTimeout disabled that is forever.
 			return nil, ErrConnClosed
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		return ss, nil
-	case <-sc.readerDone:
-		// The reader goroutine has exited — the connection is finished, whether it
-		// ended cleanly or on a protocol error. acceptCh is never closed, so without
-		// this the owner would block here until its own context expired, and with
-		// IdleTimeout disabled that is forever.
-		return nil, ErrConnClosed
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 }
+
+// deliverable reports whether a stream just taken off the accept queue is still
+// worth handing to the application.
+//
+// The accept queue is a Go channel of *ServerStream, so a stream that dies while
+// it waits there cannot be taken back out: a channel offers FIFO enqueue and
+// dequeue and no removal. Every path that kills a stream therefore leaves the
+// pointer in the queue — a client RST_STREAM runs OnRSTStream -> markStreamDone,
+// which does streamTable.release and cancels the stream's context and never
+// touches acceptCh; ServerStream.push does the same when a queued stream's event
+// buffer overflows. Dequeue is the one moment at which the structure permits an
+// eviction at all, so it is the only place this check can live (issue #133).
+//
+// Delivering such a stream is not merely wasted work: the application spawns a
+// goroutine, runs a handler, and writes a response to a stream the peer has
+// abandoned — RFC 9113 §5.1: "An endpoint MUST NOT send frames other than
+// PRIORITY on a closed stream". authorizeSend refuses the write so it fails
+// safely, but only after the handler has run, and the only advance warning is a
+// cancelled context handlers are not obliged to check.
+//
+// streamState.Terminal is exactly §5.1's "closed" — "A stream enters the
+// 'closed' state after an endpoint both sends and receives a frame with an
+// END_STREAM flag set. A stream also enters the 'closed' state after an endpoint
+// either sends or receives a RST_STREAM frame." That existing predicate is asked
+// rather than a second flag invented, per ADR-0009: the state is already one
+// atomic word, and a separate source of truth for "is this stream dead" is
+// precisely what that ADR exists to prevent. On a stream that has not been
+// delivered yet this coincides with WasReset — only the handler's own writes set
+// stSentEnded — but Terminal is the question actually being asked.
+//
+// One atomic load and a mask: no lock, no allocation, and nothing added to the
+// frame reader's path.
+func (ss *ServerStream) deliverable() bool { return !ss.state().Terminal() }
 
 // Close sends GOAWAY(NO_ERROR) and closes the underlying connection.
 // Idempotent.

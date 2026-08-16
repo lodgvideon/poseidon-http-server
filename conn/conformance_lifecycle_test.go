@@ -244,10 +244,23 @@ func TestConformance_RFC9113_Sec542_NoResetInResponseToReset(t *testing.T) {
 	seen := &fieldRSTCapture{}
 	rstCount := make(chan int, 1)
 	done := make(chan struct{})
+	// Closed once the application has taken delivery of stream 1. The reset must
+	// not be written before that: as of #133 AcceptStream skips streams that were
+	// reset while they sat in the accept queue, so a RST_STREAM racing the accept
+	// decided whether a handler existed to react to it at all. The rule under
+	// test is about what a HANDLER does on a reset, so the handler has to have the
+	// stream first. No assertion below changed.
+	accepted := make(chan struct{})
 	go func() {
 		defer close(done)
 		pipeClient(t, cli, func(cliFr *frame.Framer) {
 			sendReq(t, cliFr, 1, goodHeaders("/"), false)
+			select {
+			case <-accepted:
+			case <-time.After(5 * time.Second):
+				t.Error("server never accepted stream 1")
+				return
+			}
 			w := make(chan error, 1)
 			go func() { w <- cliFr.WriteRSTStream(1, frame.ErrCodeCancel) }()
 			<-w
@@ -274,8 +287,10 @@ func TestConformance_RFC9113_Sec542_NoResetInResponseToReset(t *testing.T) {
 
 	stream, err := sc.AcceptStream(ctx)
 	if err != nil {
+		close(accepted)
 		t.Fatalf("AcceptStream: %v", err)
 	}
+	close(accepted)
 	// Drain until the reset arrives, then do what a handler does on a reset.
 	for {
 		ev, rerr := stream.Recv(ctx)
