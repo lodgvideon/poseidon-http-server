@@ -116,8 +116,8 @@ stream 1 from outside the package. So this cannot be patched surgically:
   disappear, the smuggling primitive disappears, ~40 lines are deleted.
   RFC 9113 — the current HTTP/2 spec — supports this: *"This revision of HTTP/2
   marks the HTTP2-Settings header field and the h2c upgrade token, both defined
-  in [RFC7540], as obsolete"* (`rfc9113.txt:3613`), and *"never widely deployed
-  and is deprecated by this document"* (`rfc9113.txt:355`). Requires superseding
+  in [RFC7540], as obsolete"* (RFC 9113 §11), and *"never widely deployed
+  and is deprecated by this document"* (RFC 9113 §3.1). Requires superseding
   ADR-0005 and is a **visible behaviour change** to `Options.H2C`.
 
 B is what the current specification asks for; A implements a mechanism its

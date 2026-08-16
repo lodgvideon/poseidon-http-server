@@ -9,7 +9,7 @@ import (
 
 // Conformance tests for the PUSH_PROMISE field set.
 //
-// RFC 9113 §8.4 (rfc9113.txt:2811):
+// RFC 9113 §8.4:
 //
 //	"The header fields in PUSH_PROMISE and any subsequent CONTINUATION frames
 //	 MUST be a valid and complete set of request header fields (Section 8.3.1).
@@ -84,7 +84,7 @@ func TestConformance_RFC9113_Sec84_PushPromiseCallerAuthorityWins(t *testing.T) 
 	got, n := pseudoValue(stream.headerSets[0], ":authority")
 	if n != 1 {
 		t.Fatalf(":authority appeared %d times, want exactly 1 (a repeated "+
-			"pseudo-header name is malformed, rfc9113.txt:2624)", n)
+			"pseudo-header name is malformed, RFC 9113 §8.3)", n)
 	}
 	if got != "caller.example" {
 		t.Errorf(":authority = %q, want the caller-supplied value", got)
@@ -105,7 +105,7 @@ func TestConformance_RFC9113_Sec84_PushRefusedWithoutAuthority(t *testing.T) {
 	if err == nil || errors.Is(err, errMockPushNotUsed) {
 		t.Fatal("Push succeeded with no authority available; the promised request " +
 			"would have an empty host (RFC 9110 §4.2) and a conformant client MUST " +
-			"reset the promised stream (rfc9113.txt:2815)")
+			"reset the promised stream (RFC 9113 §8.4)")
 	}
 	if len(stream.headerSets) != 0 {
 		t.Errorf("emitted %d PUSH_PROMISE field sets despite refusing; want 0", len(stream.headerSets))

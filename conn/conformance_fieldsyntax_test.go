@@ -10,17 +10,17 @@ import (
 // Conformance tests for RFC 9113 §8.2.1 field validation and §8.2.2's ban on
 // connection-specific fields.
 //
-//	§8.2.1 (rfc9113.txt:2503) — "implementations MUST perform the following
+//	§8.2.1 — "implementations MUST perform the following
 //	minimal validation of field names and values"
 //	  :2508 names must avoid 0x00-0x20, 0x41-0x5a (uppercase) and 0x7f-0xff
 //	  :2513 names must not include a colon, except a single leading one
 //	  :2517 values must not contain NUL, LF or CR at any position
 //	  :2521 values must not start or end with SP or HTAB
 //
-//	§8.2.2 (rfc9113.txt:2547) — "Any message containing connection-specific
+//	§8.2.2 — "Any message containing connection-specific
 //	header fields MUST be treated as malformed."
 //
-//	§8.1.1 (rfc9113.txt:2463) fixes the reaction: a stream error of type
+//	§8.1.1 fixes the reaction: a stream error of type
 //	PROTOCOL_ERROR, so the connection and its sibling streams survive.
 //
 // Only the value half of :2517 was implemented. A field name went entirely
@@ -38,7 +38,7 @@ func reqWith(extra ...hpack.HeaderField) []hpack.HeaderField {
 }
 
 // TestConformance_RFC9113_Sec821_MalformedFieldSyntax_StreamError pins the four
-// checks of rfc9113.txt:2503 and §8.2.2's field ban, each as a stream error.
+// checks of RFC 9113 §8.2.1 and §8.2.2's field ban, each as a stream error.
 func TestConformance_RFC9113_Sec821_MalformedFieldSyntax_StreamError(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

@@ -13,7 +13,7 @@ import (
 // TestConformance_RFC9113_Sec521_WindowBoundsUnconsumedData pins the point of
 // flow control, which the server had opted out of.
 //
-//	§5.2.1 (rfc9113.txt:1274) — "The sender of a flow-controlled frame MUST NOT
+//	§5.2.1 — "The sender of a flow-controlled frame MUST NOT
 //	send more than the receiver allows."
 //
 // A receiver that returns credit the moment a DATA frame ARRIVES, rather than

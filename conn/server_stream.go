@@ -192,7 +192,7 @@ func (ss *ServerStream) SendData(ctx context.Context, p []byte, endStream bool) 
 //	writer:     (already past its check)  ·  take wmu · write DATA
 //
 // — which puts DATA on the wire after RST_STREAM, on a stream RFC 9113 §5.1
-// (rfc9113.txt:1082) has closed: "An endpoint MUST NOT send frames other than
+// has closed: "An endpoint MUST NOT send frames other than
 // PRIORITY on a closed stream." Because every reset path records the reset
 // BEFORE acquiring wmu, a writer that re-reads the state while holding wmu
 // cannot miss one that has already reached the wire.
@@ -244,7 +244,7 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 // DATA frame arrived handed the peer fresh credit for bytes that were only
 // buffered, so the window bounded nothing and a fast uploader could outrun a
 // briefly descheduled handler until the per-stream event channel overflowed and
-// the stream was reset. RFC 9113 §5.2.1 (rfc9113.txt:1274) is explicit that this
+// the stream was reset. RFC 9113 §5.2.1 is explicit that this
 // is what the window is for: "The sender of a flow-controlled frame MUST NOT
 // send more than the receiver allows", and a receiver that always allows more
 // has opted out of the mechanism.
@@ -312,7 +312,7 @@ func (ss *ServerStream) markLocalEnd() bool {
 //
 // A received RST_STREAM closes the stream in both directions, not merely the
 // remote half. Recording that is what stops the server answering a reset with a
-// reset: RFC 9113 §5.1 (rfc9113.txt:1082) — "An endpoint MUST NOT send frames
+// reset: RFC 9113 §5.1 — "An endpoint MUST NOT send frames
 // other than PRIORITY on a closed stream" — and §5.4.2 (:1197) — "To avoid
 // looping, an endpoint MUST NOT send a RST_STREAM in response to a RST_STREAM
 // frame." Called before the EventReset is pushed, so no handler can observe the
@@ -324,7 +324,7 @@ func (ss *ServerStream) markRemoteEndReset() (wasOpen bool) {
 // push delivers an event from the reader goroutine. Non-blocking; on overflow
 // it drops the stream and resets it.
 //
-// INTERNAL_ERROR, not REFUSED_STREAM. RFC 9113 §8.7 (rfc9113.txt:2977) makes
+// INTERNAL_ERROR, not REFUSED_STREAM. RFC 9113 §8.7 makes
 // REFUSED_STREAM a promise: "The REFUSED_STREAM error code can be included in a
 // RST_STREAM frame to indicate that the stream is being closed prior to any
 // processing having occurred. Any request that was sent on the reset stream can

@@ -49,47 +49,47 @@ func TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError(t *testing
 		{
 			"missing_method",
 			[]hpack.HeaderField{hf(":scheme", "https"), hf(":path", "/")},
-			"rfc9113.txt:2710 — :method is mandatory",
+			"RFC 9113 §8.3.1 — :method is mandatory",
 		},
 		{
 			"missing_scheme",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":path", "/")},
-			"rfc9113.txt:2710 — :scheme is mandatory",
+			"RFC 9113 §8.3.1 — :scheme is mandatory",
 		},
 		{
 			"missing_path",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "https")},
-			"rfc9113.txt:2710 — :path is mandatory",
+			"RFC 9113 §8.3.1 — :path is mandatory",
 		},
 		{
 			"empty_path",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "https"), hf(":path", "")},
-			"rfc9113.txt:2699 — :path MUST NOT be empty for http/https URIs",
+			"RFC 9113 §8.3.1 — :path MUST NOT be empty for http/https URIs",
 		},
 		{
 			"duplicate_method",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":method", "POST"), hf(":scheme", "https"), hf(":path", "/")},
-			"rfc9113.txt:2624 — a repeated pseudo-header name is malformed",
+			"RFC 9113 §8.3 — a repeated pseudo-header name is malformed",
 		},
 		{
 			"duplicate_path",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "https"), hf(":path", "/a"), hf(":path", "/b")},
-			"rfc9113.txt:2624 — a repeated pseudo-header name is malformed",
+			"RFC 9113 §8.3 — a repeated pseudo-header name is malformed",
 		},
 		{
 			"undefined_pseudo_header",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "https"), hf(":path", "/"), hf(":protocol-x", "y")},
-			"rfc9113.txt:2614 — an undefined pseudo-header is malformed",
+			"RFC 9113 §8.3 — an undefined pseudo-header is malformed",
 		},
 		{
 			"pseudo_after_regular_field",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "https"), hf("x-early", "1"), hf(":path", "/")},
-			"rfc9113.txt:2619 — pseudo-headers MUST precede all regular field lines",
+			"RFC 9113 §8.3 — pseudo-headers MUST precede all regular field lines",
 		},
 		{
 			"authority_with_userinfo",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "https"), hf(":path", "/"), hf(":authority", "user@example.com")},
-			"rfc9113.txt:2690 — :authority MUST NOT include userinfo for http/https",
+			"RFC 9113 §8.3.1 — :authority MUST NOT include userinfo for http/https",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError(t *testing
 				t.Fatalf("no RST_STREAM: %s (goaway=%v code=%v)", tc.why, rc.sawGoAway, rc.goAwayCode)
 			}
 			if rc.rstCode != frame.ErrCodeProtocolError {
-				t.Errorf("RST_STREAM code = %v, want PROTOCOL_ERROR (rfc9113.txt:2463); %s", rc.rstCode, tc.why)
+				t.Errorf("RST_STREAM code = %v, want PROTOCOL_ERROR (RFC 9113 §8.1.1); %s", rc.rstCode, tc.why)
 			}
 			if rc.sawGoAway {
 				t.Errorf("GOAWAY(%v): a malformed request is a STREAM error, not a connection error", rc.goAwayCode)
@@ -126,17 +126,17 @@ func TestConformance_RFC9113_Sec83_ValidRequestsAccepted(t *testing.T) {
 		{
 			"asterisk_form_options",
 			[]hpack.HeaderField{hf(":method", "OPTIONS"), hf(":scheme", "https"), hf(":path", "*")},
-			"rfc9113.txt:2703 — asterisk-form OPTIONS carries :path '*'",
+			"RFC 9113 §8.3.1 — asterisk-form OPTIONS carries :path '*'",
 		},
 		{
 			"connect_omits_scheme_and_path",
 			[]hpack.HeaderField{hf(":method", "CONNECT"), hf(":authority", "example.com:443")},
-			"rfc9113.txt:2710 — the mandatory-pseudo-header rule exempts CONNECT",
+			"RFC 9113 §8.3.1 — the mandatory-pseudo-header rule exempts CONNECT",
 		},
 		{
 			"non_http_scheme",
 			[]hpack.HeaderField{hf(":method", "GET"), hf(":scheme", "ftp"), hf(":path", "/x"), hf(":authority", "example.com")},
-			"rfc9113.txt:2643 — \":scheme\" is not restricted to http and https",
+			"RFC 9113 §8.3.1 — \":scheme\" is not restricted to http and https",
 		},
 		{
 			"authority_with_port",
@@ -165,7 +165,7 @@ func TestConformance_RFC9113_Sec83_ValidRequestsAccepted(t *testing.T) {
 //
 // So "HTTPS" is the same scheme as "https", not a different one. The scheme
 // comparison decides whether the http/https-specific rules of §8.3 apply — the
-// non-empty :path rule (rfc9113.txt:2699) and the userinfo prohibition
+// non-empty :path rule (RFC 9113 §8.3.1) and the userinfo prohibition
 // (:2690) — so a case-sensitive comparison lets a client opt out of both by
 // uppercasing a single header value.
 func TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive(t *testing.T) {

@@ -34,7 +34,7 @@ const (
 	stSentEnded
 	// stReset: RST_STREAM crossed in either direction. The stream is closed in
 	// BOTH directions whatever the other bits say, and nothing further may be
-	// sent on it — §5.1 (rfc9113.txt:1082) "An endpoint MUST NOT send frames
+	// sent on it — §5.1 "An endpoint MUST NOT send frames
 	// other than PRIORITY on a closed stream", and §5.4.2 (:1197) "To avoid
 	// looping, an endpoint MUST NOT send a RST_STREAM in response to a RST_STREAM
 	// frame."
@@ -47,8 +47,7 @@ func (s streamState) RecvdFields() bool { return s&stRecvFields != 0 }
 
 // RemoteEnded reports whether the peer has ended its half — §5.1's "half-closed
 // (remote)" or beyond. A frame other than WINDOW_UPDATE, PRIORITY or RST_STREAM
-// arriving while this holds is a STREAM_CLOSED stream error (§5.1
-// rfc9113.txt:1044).
+// arriving while this holds is a STREAM_CLOSED stream error (§5.1).
 func (s streamState) RemoteEnded() bool { return s&stRecvEnded != 0 }
 
 // SentFields reports whether the response field section is already on the wire.

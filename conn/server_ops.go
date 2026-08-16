@@ -264,14 +264,14 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		sc.fcOutMu.Unlock()
 		return nil
 	}
-	// §5.1 (rfc9113.txt:1000): WINDOW_UPDATE is not one of the two frames an idle
+	// §5.1: WINDOW_UPDATE is not one of the two frames an idle
 	// stream accepts.
 	if sc.isIdleStream(streamID) {
 		return connError{code: frame.ErrCodeProtocolError, msg: "WINDOW_UPDATE on an idle stream"}
 	}
 	s := sc.lookupStream(streamID)
 	if s == nil {
-		// §6.9 (rfc9113.txt:2093) carves this out explicitly: a WINDOW_UPDATE for a
+		// §6.9 carves this out explicitly: a WINDOW_UPDATE for a
 		// stream the receiver has already closed "MUST NOT be treated as an error"
 		// — the peer cannot have known in time.
 		return nil
@@ -283,7 +283,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		// Record the reset BEFORE the event is pushed. The EventReset below reaches
 		// the handler before writeServerRSTStream puts the frame on the wire, so a
 		// handler that reacts by calling Close would otherwise emit a second
-		// RST_STREAM — which RFC 9113 §5.4.2 (rfc9113.txt:1201) asks endpoints to
+		// RST_STREAM — which RFC 9113 §5.4.2 asks endpoints to
 		// avoid: "An endpoint SHOULD NOT send more than one RST_STREAM frame for
 		// any stream."
 		s.advance(stReset)
@@ -309,7 +309,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 //
 // s may be nil: the stream has been reset, refused or has already completed.
 // The connection-level half still runs, and must. RFC 9113 §6.9.1
-// (rfc9113.txt:2113) — "A receiver MUST count the padding and the entire size of
+// — "A receiver MUST count the padding and the entire size of
 // a frame ... against its connection-level flow-control window even if the
 // frame is in error"; §6.8 (:2044) says the same of frames on streams discarded
 // after a GOAWAY. The peer has already debited those octets from its own send
@@ -541,7 +541,7 @@ func (sc *ServerConn) peerMaxFrameSize() int {
 // writeServerRSTStream sends RST_STREAM for a server stream.
 //
 // Resetting a stream closes it, so the transition is recorded here rather than
-// left to each caller: §5.1 (rfc9113.txt:1082) forbids sending anything but
+// left to each caller: §5.1 forbids sending anything but
 // PRIORITY afterwards, and a later ServerStream.Close on the same stream must be
 // the no-op it already is for a stream that ended normally.
 func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
@@ -549,7 +549,7 @@ func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode)
 	// this stream gates its writes on the reset bit alone, so any window between
 	// the RST_STREAM reaching the wire and the bit being set is a window in which
 	// it can answer on a stream the server has just reset — what RFC 9113 §5.1
-	// (rfc9113.txt:1082) forbids.
+	// forbids.
 	ss.advance(stReset)
 	if sc.closed.Load() {
 		// Connection already gone: release here, since no write will follow.
@@ -569,7 +569,7 @@ func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode)
 	// takes wmu and then tests registry identity to decide whether the parent is
 	// still live, so a window in which wmu is free while the reset stream is
 	// still registered is a window in which PUSH_PROMISE goes out on a stream
-	// this endpoint has already reset (§6.6, and §5.1 rfc9113.txt:1082).
+	// this endpoint has already reset (§6.6, and §5.1 ).
 	defer sc.markStreamDone(ss.id)
 	if err := sc.fr.WriteRSTStream(ss.id, code); err != nil {
 		return err
@@ -584,8 +584,11 @@ func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode)
 // the stream may be idle, or may never exist — so writeServerRSTStream's
 // *ServerStream signature cannot serve them.
 //
-// Deliberately does not call markStreamDone: a malformed PRIORITY naming an idle
-// stream must not evict a live sibling's registry entry.
+// Calls markStreamDone only when the identifier resolves to a live stream (#67):
+// a malformed PRIORITY naming an idle or unknown id must not evict a live
+// sibling's registry entry. For an id that does resolve, this is equivalent to
+// writeServerRSTStream — the difference between the two is what the caller
+// knows, not what happens to a stream they can both see.
 func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	if sc.closed.Load() {
 		return ErrConnClosed
@@ -593,7 +596,7 @@ func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	// If the identifier does name a live stream, close it for writing before the
 	// reset goes out. A handler goroutine holding that *ServerStream gates its
 	// writes on the reset bit alone, so without this it would answer on a stream
-	// the server has just reset — RFC 9113 §5.1 (rfc9113.txt:1082) forbids sending
+	// the server has just reset — RFC 9113 §5.1 forbids sending
 	// anything but PRIORITY there.
 	live := false
 	if ss := sc.lookupStream(id); ss != nil {
@@ -788,7 +791,7 @@ func (sc *ServerConn) writeWindowUpdate(streamID, increment uint32) error {
 // setPeerSetting merges a SETTINGS pair into params.
 //
 // Identifiers this server does not implement are dropped rather than stored.
-// RFC 9113 §6.5.2 (rfc9113.txt:1888): "An endpoint that receives a SETTINGS frame
+// RFC 9113 §6.5.2: "An endpoint that receives a SETTINGS frame
 // with any unknown or unsupported identifier MUST ignore that setting."
 // Storing them was not merely untidy: SettingsParams holds a fixed 16 pairs, so a
 // peer sending sixteen invented identifiers filled the array and every real

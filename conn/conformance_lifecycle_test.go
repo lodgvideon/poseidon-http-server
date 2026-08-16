@@ -13,21 +13,21 @@ import (
 
 // Conformance tests for connection and stream shutdown.
 //
-//	§6.8 (rfc9113.txt:2029) — "Endpoints MUST NOT increase the value they send in
+//	§6.8 — "Endpoints MUST NOT increase the value they send in
 //	the last stream identifier, since the peers might already have retried
 //	unprocessed requests on another connection."
 //
-//	§6.8 (rfc9113.txt:1990) — "Receivers of a GOAWAY frame MUST NOT open
+//	§6.8 — "Receivers of a GOAWAY frame MUST NOT open
 //	additional streams on the connection".
 //
-//	§5.4.2 (rfc9113.txt:1197) — "To avoid looping, an endpoint MUST NOT send a
+//	§5.4.2 — "To avoid looping, an endpoint MUST NOT send a
 //	RST_STREAM in response to a RST_STREAM frame."
 //
-//	§8.7 (rfc9113.txt:2977) — REFUSED_STREAM means "the stream is being closed
+//	§8.7 — REFUSED_STREAM means "the stream is being closed
 //	prior to any processing having occurred. Any request that was sent on the
 //	reset stream can be safely retried."
 //
-//	§6.6 (rfc9113.txt:1899) — "PUSH_PROMISE frames MUST only be sent on a
+//	§6.6 — "PUSH_PROMISE frames MUST only be sent on a
 //	peer-initiated stream that is in either the 'open' or 'half-closed (remote)'
 //	state."
 
@@ -44,7 +44,7 @@ func (g *goAwayLog) OnGoAway(_ frame.FrameHeader, lastID uint32, code frame.ErrC
 	return nil
 }
 
-// TestConformance_RFC9113_Sec68_GracefulShutdownIsTwoPhase pins rfc9113.txt:2035
+// TestConformance_RFC9113_Sec68_GracefulShutdownIsTwoPhase pins RFC 9113 §6.8
 // and :2029 together, because the second only makes sense once the first holds.
 //
 //	:2035 — "A server that is attempting to gracefully shut down a connection
@@ -109,7 +109,7 @@ func TestConformance_RFC9113_Sec68_GracefulShutdownIsTwoPhase(t *testing.T) {
 }
 
 // TestConformance_RFC9113_Sec68_PushRefusedAfterPeerGoAway pins
-// rfc9113.txt:1990. Server push is the only way a server opens a stream, so it
+// RFC 9113 §6.8. Server push is the only way a server opens a stream, so it
 // is the only thing this rule can bind here.
 func TestConformance_RFC9113_Sec68_PushRefusedAfterPeerGoAway(t *testing.T) {
 	cli, srv := net.Pipe()
@@ -161,7 +161,7 @@ func TestConformance_RFC9113_Sec68_PushRefusedAfterPeerGoAway(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9113_Sec66_PushPreconditions pins rfc9113.txt:1899 and the
+// TestConformance_RFC9113_Sec66_PushPreconditions pins RFC 9113 §6.6 and the
 // §8.4 requirement that a promise carry a complete, well-formed request.
 func TestConformance_RFC9113_Sec66_PushPreconditions(t *testing.T) {
 	withStream := func(t *testing.T, body func(*ServerStream, context.Context)) {
@@ -229,7 +229,7 @@ func TestConformance_RFC9113_Sec66_PushPreconditions(t *testing.T) {
 	})
 }
 
-// TestConformance_RFC9113_Sec542_NoResetInResponseToReset pins rfc9113.txt:1197
+// TestConformance_RFC9113_Sec542_NoResetInResponseToReset pins RFC 9113 §5.4.2
 // and, with it, §5.1's "An endpoint MUST NOT send frames other than PRIORITY on
 // a closed stream" (:1082).
 //

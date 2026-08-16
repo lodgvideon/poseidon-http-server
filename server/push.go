@@ -73,12 +73,12 @@ func (w *responseWriter) pusher() (pushableStream, bool) {
 // without an ":authority": neither the originating request nor the caller
 // supplied one.
 //
-// RFC 9113 §8.4 (rfc9113.txt:2811): "The header fields in PUSH_PROMISE and any
+// RFC 9113 §8.4: "The header fields in PUSH_PROMISE and any
 // subsequent CONTINUATION frames MUST be a valid and complete set of request
 // header fields (Section 8.3.1)." Without an authority the promised request's
 // target URI has an empty host, which RFC 9110 §4.2 forbids a sender from
 // generating — and a conformant client "MUST respond on the promised stream
-// with a stream error ... of type PROTOCOL_ERROR" (rfc9113.txt:2815). Refusing
+// with a stream error ... of type PROTOCOL_ERROR" (RFC 9113 §8.4). Refusing
 // locally is strictly better than emitting a promise guaranteed to be reset.
 var ErrPushNoAuthority = errors.New("poseidon: cannot push without an :authority; promised request would have an empty host")
 
@@ -88,7 +88,7 @@ var ErrPushNoAuthority = errors.New("poseidon: cannot push without an :authority
 // belongs to the same origin as the request that triggered it. A caller-supplied
 // ":authority" overrides it and is hoisted into the pseudo-header block, because
 // pseudo-headers "MUST appear in a field block before all regular field lines"
-// (rfc9113.txt:2619) and must not repeat (:2624).
+// (RFC 9113 §8.3) and must not repeat (§8.3).
 func (w *responseWriter) promiseFields(promisePath, promiseScheme string, promiseHeaders []hpack.HeaderField) ([]hpack.HeaderField, error) {
 	if promiseScheme == "" {
 		promiseScheme = schemeHTTPS

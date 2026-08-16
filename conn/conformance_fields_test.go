@@ -21,12 +21,12 @@ import (
 //	replace each of those characters with SP before further processing or
 //	forwarding of that message."
 //
-//	RFC 9113 §8.2.1 (rfc9113.txt:2497) — "HTTP/2 implementations SHOULD validate
+//	RFC 9113 §8.2.1 — "HTTP/2 implementations SHOULD validate
 //	field names and values according to their definitions in Sections 5.1 and
 //	5.5 of [HTTP], respectively, and treat messages that contain prohibited
 //	characters as malformed (Section 8.1.1)."
 //
-//	RFC 9113 §8.1.1 (rfc9113.txt:2463) — "Malformed requests or responses that
+//	RFC 9113 §8.1.1 — "Malformed requests or responses that
 //	are detected MUST be treated as a stream error (Section 5.4.2) of type
 //	PROTOCOL_ERROR."
 //
@@ -127,7 +127,7 @@ func runRSTProbe(t *testing.T, attack func(cliFr *frame.Framer)) fieldRSTCapture
 }
 
 // TestConformance_RFC9110_Sec55_FieldValueCRLFNUL_StreamError pins
-// rfc9110.txt:1606 together with the reaction mandated by rfc9113.txt:2463.
+// rfc9110.txt:1606 together with the reaction mandated by RFC 9113 §8.1.1.
 //
 // A field value carrying CR, LF, or NUL must not reach the handler. Left
 // unvalidated it is a header-injection primitive: the value is copied verbatim

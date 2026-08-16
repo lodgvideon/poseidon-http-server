@@ -97,9 +97,9 @@ Corrected, with a `TestConformance_*` test per rule (see
 
 The h2c Upgrade mechanism is **obsolete** in the current HTTP/2 specification:
 RFC 9113 *"marks the HTTP2-Settings header field and the h2c upgrade token, both
-defined in [RFC7540], as obsolete"* (`rfc9113.txt:3613`) and describes the usage
+defined in [RFC7540], as obsolete"* (RFC 9113 §11) and describes the usage
 as *"never widely deployed and ... deprecated by this document"*
-(`rfc9113.txt:355`). Keeping the path — correctly implemented — was chosen over
+(RFC 9113 §3.1). Keeping the path — correctly implemented — was chosen over
 removing it so existing upgrading clients keep working. If it is ever removed,
 drop the `RFC7540` tag from `scripts/rfc-coverage-gate.sh` in the same commit
 that deletes the tests.

@@ -721,7 +721,7 @@ func (sc *ServerConn) deliverPingAck(payload [8]byte) {
 // maxFrameSize is the value this connection advertises in SETTINGS. The Framer's
 // own read cap defaults to 16,384 regardless, so left unset an operator raising
 // AdvertisedSettings.MaxFrameSize would make the server reject exactly the
-// frames its own SETTINGS invited (RFC 9113 §4.2, rfc9113.txt:513).
+// frames its own SETTINGS invited (RFC 9113 §4.2).
 // AdvertisedSettings.defaulted() has already clamped it into the legal range.
 func newCountingFramer(nc net.Conn, sc *ServerConn, maxFrameSize uint32) *frame.Framer {
 	fr := frame.NewFramer(
@@ -755,7 +755,7 @@ const maxStreamID = 1<<31 - 1
 // clampGoAwayID returns the last-stream-id for the next GOAWAY, never larger
 // than one already sent.
 //
-//	RFC 9113 §6.8 (rfc9113.txt:2029) — "Endpoints MUST NOT increase the value
+//	RFC 9113 §6.8 — "Endpoints MUST NOT increase the value
 //	they send in the last stream identifier, since the peers might already have
 //	retried unprocessed requests on another connection."
 //
@@ -773,7 +773,7 @@ func (sc *ServerConn) clampGoAwayID(id uint32) uint32 {
 // GoAwayGraceful sends the advance-warning GOAWAY of RFC 9113 §6.8's two-phase
 // shutdown.
 //
-//	rfc9113.txt:2035 — "A server that is attempting to gracefully shut down a
+//	RFC 9113 §6.8 — "A server that is attempting to gracefully shut down a
 //	connection SHOULD send an initial GOAWAY frame with the last stream
 //	identifier set to 2^31-1 and a NO_ERROR code. This signals to the client
 //	that a shutdown is imminent and that initiating further requests is
@@ -856,7 +856,7 @@ func (sc *ServerConn) readerLoop() {
 	h := sc.handler
 	for {
 		fh, err := sc.fr.ReadFrame(context.Background(), h)
-		// RFC 9113 §5.5 (rfc9113.txt:1230): "extension frames that appear in the
+		// RFC 9113 §5.5: "extension frames that appear in the
 		// middle of a field block (Section 4.3) are not permitted; these MUST be
 		// treated as a connection error (Section 5.4.1) of type PROTOCOL_ERROR."
 		// The codec correctly discards frame types it does not recognise before
@@ -871,7 +871,7 @@ func (sc *ServerConn) readerLoop() {
 			continue
 		}
 
-		// §6.10 (rfc9113.txt:2263) outranks whatever the codec objected to: while
+		// §6.10 outranks whatever the codec objected to: while
 		// a field block is open, "any other type of frame or a frame on a
 		// different stream" is a connection error of type PROTOCOL_ERROR. A
 		// malformed PRIORITY is rejected on length before guardHeaderBlock runs,
@@ -891,7 +891,7 @@ func (sc *ServerConn) readerLoop() {
 			return
 		}
 
-		// RFC 9113 §6.3 (rfc9113.txt:1519) and §6.9.1 (rfc9113.txt:2125) scope
+		// RFC 9113 §6.3 and §6.9.1 scope
 		// two of the codec's rejections to a single stream, not the connection.
 		// Recovering in place is safe because ReadFrame consumes the whole
 		// payload before rejecting either one, so the byte stream is still
@@ -899,7 +899,7 @@ func (sc *ServerConn) readerLoop() {
 		// non-CONTINUATION frame there a connection error whatever it was, and
 		// the codec rejects the malformed frame before guardHeaderBlock can run.
 		//
-		// Nor on an idle stream. §6.4 (rfc9113.txt:1596) is flatly the other way:
+		// Nor on an idle stream. §6.4 is flatly the other way:
 		// "RST_STREAM frames MUST NOT be sent for a stream in the 'idle' state. If
 		// a RST_STREAM frame identifying an idle stream is received, the recipient
 		// MUST treat this as a connection error ... of type PROTOCOL_ERROR."
@@ -921,7 +921,7 @@ func (sc *ServerConn) readerLoop() {
 		// Reset ENHANCE_YOUR_CALM trip) carries its own code. Everything else
 		// that is a protocol violation arrives as a codec sentinel and is mapped
 		// by codecErrCode. Either way RFC 9113 §5.4 requires the error be
-		// reported, and §5.4.1 (rfc9113.txt:1173) requires the transport be
+		// reported, and §5.4.1 requires the transport be
 		// closed afterwards: "After sending the GOAWAY frame for an error
 		// condition, the endpoint MUST close the TCP connection." Not sc.Close(),
 		// which waits on readerDone and would deadlock here.
@@ -1050,7 +1050,7 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 		// range window (and the int32 recv-window seed derived from it stays valid).
 		s.InitialWindowSize = 1<<31 - 1
 	}
-	// RFC 9113 §6.5.2 (rfc9113.txt:1876): SETTINGS_MAX_FRAME_SIZE — "The initial
+	// RFC 9113 §6.5.2: SETTINGS_MAX_FRAME_SIZE — "The initial
 	// value is 2^14 (16,384) octets. The value advertised by an endpoint MUST be
 	// between this initial value and the maximum allowed frame size (2^24-1 or
 	// 16,777,215 octets), inclusive." The clamp binds this server as a sender:
@@ -1091,7 +1091,7 @@ type settingsRecorder struct {
 	fr *frame.Framer
 	// apply, when set, publishes the peer's SETTINGS to the connection the
 	// instant they are processed — before any later frame in the same batch is
-	// dispatched. RFC 9113 §6.5 (rfc9113.txt:1830): SETTINGS "applies to the
+	// dispatched. RFC 9113 §6.5: SETTINGS "applies to the
 	// connection, not a single stream". A client may pipeline preface, SETTINGS
 	// and its first HEADERS into one segment, and the handshake forwards that
 	// HEADERS to the real handler, so a stream can register mid-handshake; if the
@@ -1129,7 +1129,7 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 		r.ackSeen = true
 		return nil
 	}
-	// Merge, never replace. RFC 9113 §6.5.3 (rfc9113.txt:1866): "The values in the
+	// Merge, never replace. RFC 9113 §6.5.3: "The values in the
 	// SETTINGS frame MUST be processed in the order they appear" — a second
 	// SETTINGS frame updates the parameters it names and leaves the rest alone.
 	// Assigning the frame wholesale silently reverted every parameter it omitted.

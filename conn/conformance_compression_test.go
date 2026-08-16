@@ -9,7 +9,7 @@ import (
 
 // Conformance tests for HPACK decoding failures.
 //
-//	RFC 9113 §4.3 (rfc9113.txt:668) — "A decoding error in a field block MUST be
+//	RFC 9113 §4.3 — "A decoding error in a field block MUST be
 //	treated as a connection error (Section 5.4.1) of type COMPRESSION_ERROR."
 //
 // The rule is absolute for a reason that is easy to miss: field blocks are
@@ -19,7 +19,7 @@ import (
 // thing as containing the damage to one stream.
 
 // TestConformance_RFC9113_Sec43_HPACKDecodeError_IsAConnectionError pins
-// rfc9113.txt:668. A corrupt field block must produce GOAWAY(COMPRESSION_ERROR),
+// RFC 9113 §4.3. A corrupt field block must produce GOAWAY(COMPRESSION_ERROR),
 // never RST_STREAM.
 //
 // The distinction is not cosmetic. RST_STREAM(CANCEL) is what this server used

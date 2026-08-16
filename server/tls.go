@@ -24,7 +24,7 @@ func (s *Server) ListenAndServeTLS(ctx context.Context, certFile, keyFile string
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{"h2"},
 		MinVersion:   tls.VersionTLS12,
-		// RFC 9113 §9.2.2 (rfc9113.txt:3067): "A deployment of HTTP/2 over TLS 1.2
+		// RFC 9113 §9.2.2: "A deployment of HTTP/2 over TLS 1.2
 		// SHOULD NOT use any of the cipher suites that are listed in Appendix A."
 		// Appendix A is a denylist of several hundred entries; the tractable way to
 		// honour it is to name the allowed suites instead. These six are the

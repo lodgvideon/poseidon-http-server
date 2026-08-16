@@ -24,7 +24,7 @@ import (
 // h2c (HTTP/2 Cleartext) support — RFC 7540 §3.2, §3.4
 //
 // RFC 9113 marks the h2c upgrade token and the HTTP2-Settings header field as
-// obsolete (rfc9113.txt:3613), so RFC 7540 remains the governing text for the
+// obsolete (RFC 9113 §11), so RFC 7540 remains the governing text for the
 // Upgrade path implemented here. Conformance tests: server/conformance_h2c_test.go.
 // ---------------------------------------------------------------------------
 

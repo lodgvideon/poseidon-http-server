@@ -48,7 +48,7 @@ func (l *frameOrderLog) OnRSTStream(frame.FrameHeader, frame.ErrCode) error {
 }
 
 // TestConformance_RFC9113_Sec51_NothingFollowsTheResetOnTheWire pins
-// rfc9113.txt:1082 — "An endpoint MUST NOT send frames other than PRIORITY on a
+// RFC 9113 §5.1 — "An endpoint MUST NOT send frames other than PRIORITY on a
 // closed stream" — against the window between deciding to write and writing.
 //
 // SendHeaders and SendData check the stream's state on entry, but the write
@@ -130,7 +130,7 @@ func TestConformance_RFC9113_Sec51_NothingFollowsTheResetOnTheWire(t *testing.T)
 	}
 	for _, ft := range types[rst+1:] {
 		if ft == frame.FrameData || ft == frame.FrameHeaders {
-			t.Fatalf("%v reached the wire after RST_STREAM (frames: %v); §5.1 (rfc9113.txt:1082) "+
+			t.Fatalf("%v reached the wire after RST_STREAM (frames: %v); §5.1 "+
 				"forbids sending anything but PRIORITY on a closed stream", ft, types)
 		}
 	}

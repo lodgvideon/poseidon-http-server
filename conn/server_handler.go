@@ -186,7 +186,7 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 		return err
 	}
 	// A client may never send DATA on a server-initiated (even) stream, in any
-	// state. RFC 9113 §5.1 (rfc9113.txt:1020), reserved (local) — which is where a
+	// state. RFC 9113 §5.1, reserved (local) — which is where a
 	// pushed stream begins and the only side the client ever sees: "Receiving any
 	// type of frame other than RST_STREAM, PRIORITY, or WINDOW_UPDATE on a stream
 	// in this state MUST be treated as a connection error (Section 5.4.1) of type
@@ -199,7 +199,7 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	if fh.StreamID%2 == 0 {
 		return connError{code: frame.ErrCodeProtocolError, msg: "client DATA on a server-initiated stream"}
 	}
-	// §5.1 (rfc9113.txt:1000): in the idle state "receiving any frame other than
+	// §5.1: in the idle state "receiving any frame other than
 	// HEADERS or PRIORITY ... MUST be treated as a connection error of type
 	// PROTOCOL_ERROR". Checked before the debit: an idle stream ends the
 	// connection, so there is no window left to keep books for.
@@ -220,15 +220,17 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 		// rather than escalated.
 		return nil
 	}
-	// §5.1 (rfc9113.txt:1044): in half-closed (remote), "if an endpoint receives
+	// §5.1: in half-closed (remote), "if an endpoint receives
 	// additional frames, other than WINDOW_UPDATE, PRIORITY, or RST_STREAM, for a
 	// stream that is in this state, it MUST respond with a stream error of type
 	// STREAM_CLOSED". Left unenforced, body bytes sent after END_STREAM reached
 	// the handler behind its own EOF.
 	if s.remoteHalfEnded() {
-		// writeServerRSTStream, not writeRSTStreamID: it calls markStreamDone itself,
-		// so the handler goroutine holding this *ServerStream is released rather than
-		// left waiting on events that will never come.
+		// writeServerRSTStream, not writeRSTStreamID: this site holds the
+		// *ServerStream, so it uses the entry point that takes one. Since #67 both
+		// close the stream for writing and call markStreamDone for a live id, so
+		// they are equivalent here — writeRSTStreamID exists for the callers that
+		// have only a FrameHeader and must tolerate an idle or unknown id.
 		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeStreamClosed)
 		return nil
 	}
@@ -271,7 +273,7 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 	// subsequent stream on the connection.
 	refused := false
 	if isNew {
-		// RFC 9113 §5.1.1 (rfc9113.txt:1113): "The identifier of a newly
+		// RFC 9113 §5.1.1: "The identifier of a newly
 		// established stream MUST be numerically greater than all streams that the
 		// initiating endpoint has opened or reserved... An endpoint that receives
 		// an unexpected stream identifier MUST respond with a connection error
@@ -477,7 +479,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		off = valEnd
 	}
 	if err != nil {
-		// RFC 9113 §4.3 (rfc9113.txt:668): "A decoding error in a field block MUST
+		// RFC 9113 §4.3: "A decoding error in a field block MUST
 		// be treated as a connection error (Section 5.4.1) of type
 		// COMPRESSION_ERROR." Not a stream error, and the reason is structural
 		// rather than a matter of severity: the dynamic table this block was being
@@ -493,7 +495,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		h.respondFieldsTooLarge(s)
 		return nil
 	}
-	// §5.1 (rfc9113.txt:1044) — a field section arriving after the client already
+	// §5.1 — a field section arriving after the client already
 	// ended its half is a stream error of type STREAM_CLOSED. Without this the
 	// block was classified as trailers (the request field section has already been
 	// received) and delivered to the handler after its EOF: a second, unannounced field section
@@ -503,8 +505,9 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// shared HPACK decoder or the connection's dynamic table falls a step behind
 	// the client's encoder and every later stream decodes corruption.
 	if s.remoteHalfEnded() {
-		// See OnData: writeServerRSTStream also closes the stream for writing, so
-		// the handler cannot answer on a stream this just reset.
+		// See OnData: this site holds the *ServerStream, and writeServerRSTStream
+		// closes it for writing, so the handler cannot answer on a stream this
+		// just reset.
 		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeStreamClosed)
 		return nil
 	}
@@ -514,7 +517,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	if !isTrailer && !validRequestPseudoHeaders(h.scratch) {
 		malformed = true
 	}
-	// RFC 9113 §8.1 (rfc9113.txt:2415) — a trailer section is the end of the
+	// RFC 9113 §8.1 — a trailer section is the end of the
 	// message: "The last frame in the sequence bears an END_STREAM flag". A
 	// trailer HEADERS without it leaves the request open behind a field section
 	// that claimed to close it.
@@ -530,8 +533,13 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		// failure here means the connection is already going away. Do NOT
 		// s.Close() first — that emits its own RST_STREAM(CANCEL), which would
 		// reach the peer ahead of the PROTOCOL_ERROR the RFC calls for.
-		// writeServerRSTStream calls markStreamDone, cancelling the stream
-		// context, which is what releases the accept side.
+		// writeServerRSTStream records stReset and calls markStreamDone, which
+		// releases the registry entry and cancels the stream context. It does not
+		// touch acceptCh — registerStream queued this stream before the field
+		// section was validated, deliberately, so the shared HPACK dynamic table
+		// stays in step. What keeps it from the application is AcceptStream, which
+		// drops any dequeued stream whose state is terminal: a channel has no
+		// removal, so dequeue is the only eviction point (see deliverable, #133).
 		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeProtocolError)
 		return nil
 	}
@@ -567,7 +575,7 @@ func (h *serverConnHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
-	// §5.1 (rfc9113.txt:1000) — RST_STREAM is not one of the two frames an idle
+	// §5.1 — RST_STREAM is not one of the two frames an idle
 	// stream accepts, and §6.4 (:1596) restates it: "If a RST_STREAM frame
 	// identifying an idle stream is received, the recipient MUST treat this as a
 	// connection error of type PROTOCOL_ERROR." Checking it also stops these
@@ -631,7 +639,7 @@ func (h *serverConnHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, [
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
-	// RFC 9113 §6.8 (rfc9113.txt:1990): "Once sent, the sender will ignore frames
+	// RFC 9113 §6.8: "Once sent, the sender will ignore frames
 	// sent on streams initiated by the receiver if the stream has an identifier
 	// higher than the included last stream identifier. Receivers of a GOAWAY frame
 	// MUST NOT open additional streams on the connection". For a server the only
