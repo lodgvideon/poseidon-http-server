@@ -21,8 +21,36 @@ import (
 // response afterwards — putting HEADERS on the wire behind an RST_STREAM, the
 // exact §5.1 violation the guard exists to prevent.
 //
-// Resetting by identifier alone cannot close the stream for writing, which is
-// why these paths must go through writeServerRSTStream.
+// What closes the stream for writing is ss.advance(stReset), which both reset
+// paths now perform — writeServerRSTStream unconditionally, writeRSTStreamID
+// whenever the identifier resolves to a live stream. (The line that stood here,
+// "resetting by identifier alone cannot close the stream for writing", stopped
+// being true in #67, the change that introduced the reset bit; a mutation
+// swapping this call site for writeRSTStreamID is now a no-op, which is how it
+// was noticed.)
+//
+// THE ORDER IS THE TEST, and it used to be a race (issue #153). The property
+// only exists for a handler that is ALREADY holding the stream when the reset
+// lands, so the DATA frame that provokes the reset must not be written until
+// AcceptStream has handed the stream over. Writing it immediately after the
+// HEADERS, as this test did, let the reader loop reset stream 1 while it was
+// still sitting in the accept queue; AcceptStream then correctly refused to
+// deliver a stream that was already dead (deliverable(), issue #133) and blocked
+// until the 5s budget expired. 36 of 500 runs under -race on Linux, every one of
+// them failing at exactly 5.00s on the AcceptStream setup line rather than on
+// anything this test exists to check, and none with a DATA RACE to show for it.
+//
+// The wait on the reset is likewise a signal and not a budget. markStreamDone
+// cancels the stream context, writeServerRSTStream defers it, and that call sets
+// stReset before anything goes on the wire — so a cancelled context means the
+// reset is recorded, whereas "the client wrote the DATA frame" only meant the
+// server had not necessarily looked at it yet. That weaker signal is what forced
+// the old 2s poll-until-it-fails loop, and the loop is what cost this test its
+// teeth: SendHeaders was called with endStream=true, so its FIRST call closed
+// the stream for writing by itself, and the second returned ErrStreamClosed
+// whether or not the reset had any part in it. With ss.advance(stReset) deleted
+// from writeServerRSTStream — the one line this test names in its own comment —
+// the old test passed 30 of 30.
 func TestRegression_ResetStreamIsClosedForWriting(t *testing.T) {
 	cli, srv := net.Pipe()
 	defer cli.Close()
@@ -30,18 +58,34 @@ func TestRegression_ResetStreamIsClosedForWriting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sentData := make(chan struct{})
+	// Closed once AcceptStream has delivered stream 1, which is the moment a real
+	// handler would be holding it. Until then the client must not provoke the
+	// reset, or there is no handler for the property to be about.
+	accepted := make(chan struct{})
+	// Closed when the assertions are done, so the client holds the connection open
+	// for exactly as long as the test needs it. Without this, pipeClient's deferred
+	// Close tears the connection down, and connection teardown cancels stream
+	// contexts too (issue #139) — the test would then be waiting on a signal that
+	// no longer means "reset".
+	held := make(chan struct{})
+	defer close(held)
+
 	go func() {
 		pipeClient(t, cli, func(cliFr *frame.Framer) {
+			// Drain first: net.Pipe is synchronous, so the RST_STREAM below would
+			// otherwise park the server's reader goroutine on an unread pipe.
+			go func() {
+				for {
+					if _, err := cliFr.ReadFrame(context.Background(), &fieldRSTCapture{}); err != nil {
+						return
+					}
+				}
+			}()
 			sendReq(t, cliFr, 1, goodHeaders("/"), true) // END_STREAM
+			<-accepted
 			// DATA after END_STREAM: the server must reset the stream.
 			_, _ = cli.Write(rawFrame(frame.FrameData, 0, 1, []byte("x")))
-			close(sentData)
-			for {
-				if _, err := cliFr.ReadFrame(context.Background(), &fieldRSTCapture{}); err != nil {
-					return
-				}
-			}
+			<-held
 		})
 	}()
 
@@ -55,20 +99,25 @@ func TestRegression_ResetStreamIsClosedForWriting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptStream: %v", err)
 	}
-	<-sentData
+	close(accepted)
 
-	// The handler now tries to respond, as a real one would. Once the reader has
-	// reset the stream the write must be refused.
-	deadline := time.Now().Add(2 * time.Second)
-	var werr error
-	for time.Now().Before(deadline) {
-		werr = stream.SendHeaders(ctx, []hpack.HeaderField{
-			{Name: []byte(":status"), Value: []byte("200")},
-		}, true)
-		if werr != nil {
-			break
-		}
+	// Wait for the reset to be RECORDED, not merely provoked. ctx.Done here is a
+	// failsafe against a hang, never part of the passing path: if it fires, the
+	// server did not reset a stream that received DATA after END_STREAM, which is
+	// a §5.1 failure in its own right and says so.
+	select {
+	case <-stream.Context().Done():
+	case <-ctx.Done():
+		t.Fatalf("stream context still live: the server never reset stream 1 after DATA " +
+			"arrived on it past END_STREAM, which §5.1 requires as a STREAM_CLOSED stream error")
 	}
+
+	// The handler now tries to respond, as a real one would, exactly once.
+	// endStream=false on purpose: a write that succeeds must not be able to close
+	// the stream by itself and so disguise itself as the refusal being asserted.
+	werr := stream.SendHeaders(ctx, []hpack.HeaderField{
+		{Name: []byte(":status"), Value: []byte("200")},
+	}, false)
 	if !errors.Is(werr, ErrStreamClosed) {
 		t.Errorf("SendHeaders on a stream the server had just reset returned %v, want "+
 			"ErrStreamClosed; §5.1 forbids sending anything but PRIORITY on a closed stream", werr)
