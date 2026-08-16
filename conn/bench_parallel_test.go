@@ -31,10 +31,13 @@ package conn
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -454,6 +457,21 @@ func benchParTCPConn(b *testing.B, nStreams int) (*ServerConn, []*ServerStream) 
 	script := benchClientScript(nStreams)
 	drain := make([]byte, 1<<16)
 
+	// armed gates the hang guard in the drain loop below. It is set at the very
+	// end of this helper, once setup is complete, and it is what makes the guard
+	// safe for a benchmark that legitimately writes nothing.
+	//
+	// The drain loop here consumes the server's HANDSHAKE output — the SETTINGS
+	// and SETTINGS ACK NewServerConn writes — because unlike the sibling harness
+	// in conn/bench_test.go this one has no framer-driven credit barrier reading
+	// those bytes first. So without this gate the guard is armed before the
+	// caller has run a single iteration, and "this benchmark produced output" is
+	// true for a benchmark that never touches the socket at all. Measured, with
+	// the gate stubbed to true from byte one: a TCP-harness benchmark doing
+	// write-free work (onWindowUpdate in a loop) panicked at 30.0s claiming a
+	// wedge, having written nothing it could wedge on.
+	var armed atomic.Bool
+
 	scCh := make(chan *ServerConn, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -485,13 +503,66 @@ func benchParTCPConn(b *testing.B, nStreams int) (*ServerConn, []*ServerStream) 
 		if _, werr := clientConn.Write(script); werr != nil {
 			return
 		}
-		// Drain forever. The existing conn/bench_test.go harness sets a 5s read
-		// deadline here, which silently stops draining part-way through a long
-		// benchmark and lets the socket buffer become the thing being measured.
+		// Drain server output for as long as the connection lives. The lifetime
+		// is still the connection's — the b.Cleanup above closes clientConn and
+		// sc.Close() closes the server end, either of which ends this loop — and
+		// the reason is still the one this loop was written with: the 5s
+		// one-shot read deadline conn/bench_test.go used to set here silently
+		// stopped draining part-way through a long benchmark and let the socket
+		// buffer become the thing being measured (#122).
+		//
+		// What that shape had no answer for is a WEDGE (#159). `go test
+		// -timeout` does not cover benchmarks: testing.(*M).Run calls
+		// m.stopAlarm() (src/testing/testing.go:2446) before runBenchmarks
+		// (:2459). Verified on go1.26.6 — the identical infinite block dies with
+		// `panic: test timed out after 10s` inside a Test and was still running
+		// at 45s inside a Benchmark under the same -test.timeout=10s. With THIS
+		// goroutine parked in a socket read the runtime's deadlock detector
+		// cannot fire either, which is exactly the difference between this
+		// file's two transports: a wedged benchScriptConn benchmark still dies
+		// with "all goroutines are asleep" (see benchParCreditRefreshMask), a
+		// wedged TCP one hangs until CI kills the job. Measured before this
+		// guard existed: the wedge below ran the full 60s under
+		// -test.timeout=10s and had to be SIGKILLed.
+		//
+		// The guard is the one #123 landed in the sibling harness: re-arm the
+		// read deadline PER READ, and trip only on silence that FOLLOWS observed
+		// output. It bounds the gap between consecutive server writes, not total
+		// connection life, so no value of -benchtime can make it fire on a
+		// healthy run — both TCP benchmarks write every iteration, microseconds
+		// apart, against a 30s constant.
+		//
+		// b.Fatal is unavailable here (only the goroutine running the benchmark
+		// may call it), and b.Error is unusable too because this goroutine can
+		// outlive the benchmark, at which point logging panics. So every
+		// non-guard error path simply returns and the guard panics — after
+		// debug.SetTraceback("all"), because GOTRACEBACK defaults to "single"
+		// and would dump only this goroutine, hiding the wedged one that is the
+		// entire point of the dump.
+		progressed := false
 		for {
-			if _, rerr := clientConn.Read(drain); rerr != nil {
-				return
+			if derr := clientConn.SetReadDeadline(time.Now().Add(benchDrainIdleTimeout)); derr != nil {
+				return // closed by a b.Cleanup
 			}
+			n, rerr := clientConn.Read(drain)
+			if n > 0 && armed.Load() {
+				progressed = true
+			}
+			if rerr == nil {
+				continue
+			}
+			if errors.Is(rerr, os.ErrDeadlineExceeded) {
+				if progressed {
+					debug.SetTraceback("all")
+					panic("bench harness (conn/bench_parallel_test.go): the server produced no output for " +
+						benchDrainIdleTimeout.String() + " after this benchmark had been writing — the " +
+						"benchmark goroutine is wedged. `go test -timeout` does not cover benchmarks, so " +
+						"this panic is the only thing that will end the run; the stacks below name the " +
+						"blocked frame.")
+				}
+				continue // a benchmark that never writes: keep the connection up
+			}
+			return // connection closed
 		}
 	}()
 
@@ -516,6 +587,10 @@ func benchParTCPConn(b *testing.B, nStreams int) (*ServerConn, []*ServerStream) 
 		streams = append(streams, ss)
 	}
 	benchParWaitCredit(b, sc, streams)
+
+	// Setup is done: every byte the drain sees from here on was produced by the
+	// caller's own iterations, so from here on silence means the caller stopped.
+	armed.Store(true)
 	return sc, streams
 }
 
