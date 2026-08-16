@@ -380,3 +380,114 @@ func (h *captureAllHandler) OnPushPromise(frame.FrameHeader, uint32, frame.Heade
 }
 func (h *captureAllHandler) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (h *captureAllHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+
+// priorityRaceStreams is how many independent requests
+// TestServerConn_PriorityIsSetBeforeAccept puts through the accept handoff. Each
+// one is a trial of the same instant, so the count is what turns a rare lost
+// race into a test that fails.
+const priorityRaceStreams = 2000
+
+// TestServerConn_PriorityIsSetBeforeAccept pins the publication order in
+// serverConnHandler.OnHeaders: a stream must already carry the priority block
+// its HEADERS frame delivered by the time AcceptStream hands it back.
+//
+// It is the same contract TestServerConn_AcceptsPriorityInHeaders states, read
+// at the one instant that can catch it being broken. That test accepts a single
+// request and so loses the race only occasionally — issue #140 recorded three
+// failures across two 24-run campaigns of the whole package. This one
+// rendezvouses with the accepting goroutine before every request, so one lost
+// race out of priorityRaceStreams fails the run.
+//
+// The rendezvous is an ordering, not a delay: the client writes HEADERS only
+// after the accepting goroutine has committed to accepting, and net.Pipe is
+// synchronous, so the reader goroutine reaches the acceptCh send with the
+// accepter already parked on it — the case in which the channel hands the
+// stream straight over and the reader goroutine runs on concurrently. No sleep
+// decides anything.
+func TestServerConn_PriorityIsSetBeforeAccept(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer cli.Close()
+
+	want := &frame.Priority{StreamDep: 0, Exclusive: true, Weight: 200}
+
+	// ready carries one token per request from the accepting goroutine to the
+	// client goroutine. Unbuffered: the HEADERS write cannot start until the
+	// accepter is on its way into AcceptStream.
+	ready := make(chan struct{})
+	clientDone := make(chan struct{})
+
+	go func() {
+		defer close(clientDone)
+		pipeClient(t, cli, func(cliFr *frame.Framer) {
+			enc := hpack.NewEncoder()
+			for i := range priorityRaceStreams {
+				if _, ok := <-ready; !ok {
+					return
+				}
+				block := enc.EncodeBlock(nil, []hpack.HeaderField{
+					{Name: []byte(":method"), Value: []byte("GET")},
+					{Name: []byte(":path"), Value: []byte("/p")},
+					{Name: []byte(":scheme"), Value: []byte("https")},
+					{Name: []byte(":authority"), Value: []byte("x")},
+				})
+				if err := cliFr.WriteHeaders(frame.WriteHeadersParams{
+					StreamID:      uint32(2*i + 1), //nolint:gosec // G115: bounded by priorityRaceStreams
+					BlockFragment: block,
+					EndHeaders:    true,
+					EndStream:     true,
+					Priority:      want,
+				}); err != nil {
+					t.Logf("WriteHeaders(%d): %v", 2*i+1, err)
+					return
+				}
+			}
+		})
+	}()
+	// Registered before the ones below so it runs after them: close(ready) frees
+	// a client goroutine still waiting for a token, and only then is it safe to
+	// wait for that goroutine to finish logging.
+	defer func() { <-clientDone }()
+	defer close(ready)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// A concurrency limit large enough that no request is refused: each one is
+	// left half-closed (remote) rather than answered, so they all stay live for
+	// the length of the run.
+	sc, err := NewServerConn(ctx, srv, ServerConnOptions{
+		AdvertisedSettings: AdvertisedSettings{MaxConcurrentStreams: 2 * priorityRaceStreams},
+	}.defaulted())
+	if err != nil {
+		t.Fatalf("NewServerConn: %v", err)
+	}
+	defer sc.Close()
+
+	nilAt := make([]uint32, 0, 8)
+	for i := range priorityRaceStreams {
+		select {
+		case ready <- struct{}{}:
+		case <-clientDone:
+			t.Fatalf("client goroutine stopped after %d/%d requests", i, priorityRaceStreams)
+		}
+		stream, err := sc.AcceptStream(ctx)
+		if err != nil {
+			t.Fatalf("AcceptStream(%d/%d): %v", i, priorityRaceStreams, err)
+		}
+		// First statement after the handoff. Anything run in between would stop
+		// this measuring the instant the application actually sees.
+		got := stream.Priority()
+		if got == nil {
+			nilAt = append(nilAt, stream.ID())
+			continue
+		}
+		if got.StreamDep != want.StreamDep || got.Exclusive != want.Exclusive || got.Weight != want.Weight {
+			t.Fatalf("stream %d: Priority() = %+v, want %+v", stream.ID(), got, want)
+		}
+	}
+	if len(nilAt) > 0 {
+		t.Fatalf("Priority() = nil on %d of %d accepted streams (ids %v): the stream reached "+
+			"AcceptStream before OnHeaders recorded the priority block its HEADERS carried",
+			len(nilAt), priorityRaceStreams, nilAt)
+	}
+}

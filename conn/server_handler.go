@@ -289,15 +289,26 @@ func (h *serverConnHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock
 			return err
 		}
 		s = newServerStream(fh.StreamID, h.eventBuf, nil, h.recvWindowSeed)
+		// RFC 7540 §5.3: the priority block rides only on the first HEADERS frame
+		// of a stream, so it is captured once, here, before any CONTINUATION.
+		//
+		// Recorded BEFORE registerStream, because registerStream publishes the
+		// stream — it puts it on acceptCh, from which AcceptStream returns it to
+		// the application. Setting the priority afterwards left a window in which
+		// the application held a stream whose Priority() had not been written yet,
+		// and read nil for a request whose HEADERS carried a priority block
+		// (issue #140). No lock and no extra synchronisation closes that: the
+		// store is already atomic, and the acceptCh send/receive is the
+		// happens-before edge that publishes it. Same discipline as
+		// streamTable.reservePush — "Finish the stream BEFORE publishing it".
+		//
+		// Unconditional: setPriority ignores a nil block, and a stream refused by
+		// registerStream is reset and never reaches the application, so there is
+		// nothing to be gained by asking first.
+		s.setPriority(prio)
 		if !h.streams.registerStream(fh.StreamID, s) {
 			refused = true
 		}
-	}
-
-	// RFC 7540 §5.3: priority block is sent only on the first HEADERS
-	// frame. Capture it once, before any CONTINUATION frames.
-	if isNew && !refused && prio != nil {
-		s.setPriority(prio)
 	}
 
 	if !endHeaders {
