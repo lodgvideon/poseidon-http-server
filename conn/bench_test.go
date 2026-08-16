@@ -59,6 +59,21 @@ func BenchmarkWriteServerData_Small(b *testing.B) {
 		if err := sc.writeServerData(context.Background(), stream, payload, false); err != nil {
 			b.Fatal(err)
 		}
+		// Refund windows to avoid exhaustion, as the two siblings below do.
+		// A seeded send window is a budget, not a watermark: RFC 9113 §6.9.1
+		// replenishes it only from the peer's WINDOW_UPDATE, and the harness
+		// client sends exactly two, both before this loop starts. Unrefunded,
+		// 100 octets per iteration exhausts the 65535+2^30 it grants at
+		// b.N = 10738074, where writeServerData blocks forever in
+		// acquireSendCredits' fcOutCond.Wait — the context is Background, so
+		// there is no cancellation to break it, and `go test -timeout` does not
+		// cover benchmarks (testing.M.Run stops the alarm before runBenchmarks).
+		sc.fcOutMu.Lock()
+		sc.peerConnSendWindow += 100
+		stream.mu.Lock()
+		stream.sendWindow += 100
+		stream.mu.Unlock()
+		sc.fcOutMu.Unlock()
 	}
 }
 
@@ -243,6 +258,19 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 		b.Fatalf("dial: %v", err)
 	}
 
+	// The drain buffer belongs to the goroutine below, but is allocated here so
+	// that it cannot be charged to the caller's benchmark. Go measures benchmark
+	// allocations off runtime.ReadMemStats — a whole-process counter that
+	// B.ResetTimer snapshots — so a heap allocation on ANY goroutine inside the
+	// measured region lands in B/op; there is no per-goroutine attribution to
+	// move it out of. At its point of use it is sequenced after the HEADERS
+	// write that releases the caller's AcceptStream, so it raced b.ResetTimer
+	// and was charged to roughly a third of all samples as 1048576/N B/op with
+	// 0 allocs/op — noise a benchstat gate reads as an unbounded 0 → 8 swing.
+	// Allocated here it happens-before the select at the end of this function,
+	// hence before every caller's b.ResetTimer.
+	drain := make([]byte, 1<<20)
+
 	go func() {
 		defer clientConn.Close()
 
@@ -283,7 +311,6 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 
 		// Keep reading to drain server output.
 		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		drain := make([]byte, 1<<20)
 		for {
 			_, err := clientConn.Read(drain)
 			if err != nil {
