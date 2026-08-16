@@ -22,14 +22,15 @@ import (
 //
 // The resolved IP is stored in the request context and retrieved with
 // [ClientIP]. The immediate peer address is sourced from the context via
-// [PeerAddr]; the server populates it per-connection (see [WithPeerAddr]),
-// which also lets tests drive the middleware without a live connection.
+// [PeerAddr]; server.Serve populates it per-connection from
+// net.Conn.RemoteAddr, which also lets tests drive the middleware without a
+// live connection (see [WithPeerAddr]).
 
-// realIPCtxKey and peerAddrCtxKey are distinct from middleware.ctxKey so the
-// integer values cannot collide with the RequestID key.
+// realIPCtxKey is distinct from middleware.ctxKey so the integer values cannot
+// collide with the RequestID key. The peer-address key is NOT defined here: it
+// belongs to the server package, which must be able to set the value this
+// middleware reads and cannot import middleware.
 type realIPCtxKey struct{}
-
-type peerAddrCtxKey struct{}
 
 // Trusted-proxy forwarding headers, lower-cased to match HPACK field names.
 const (
@@ -75,19 +76,17 @@ func ClientIP(ctx context.Context) string {
 }
 
 // WithPeerAddr returns a copy of ctx carrying the immediate peer's network
-// address (host:port form as from net.Conn.RemoteAddr().String()). The server
-// sets this per request; RealIP reads it via [PeerAddr].
+// address (host:port form as from net.Conn.RemoteAddr().String()). It is an
+// alias for [server.WithPeerAddr], which is what the server itself calls once
+// per accepted connection; RealIP reads it back via [PeerAddr].
 func WithPeerAddr(ctx context.Context, addr string) context.Context {
-	return context.WithValue(ctx, peerAddrCtxKey{}, addr)
+	return server.WithPeerAddr(ctx, addr)
 }
 
 // PeerAddr returns the immediate peer address previously set with
-// [WithPeerAddr], or "" if none was set.
+// [WithPeerAddr] (or by the server), or "" if none was set.
 func PeerAddr(ctx context.Context) string {
-	if v, ok := ctx.Value(peerAddrCtxKey{}).(string); ok {
-		return v
-	}
-	return ""
+	return server.PeerAddr(ctx)
 }
 
 // resolveClientIP implements the trust decision. peer is the raw peer address
