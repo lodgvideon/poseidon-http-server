@@ -108,6 +108,31 @@ func (ss *ServerStream) Context() context.Context {
 	return ss.ctx
 }
 
+// cancelCtx cancels the stream's context, releasing whoever is waiting on
+// Context().Done().
+//
+// This is the second half of leaving the stream table, and it is one method
+// rather than three lines repeated at each exit because there are two exits —
+// markStreamDone for a single stream, shutdownStreams for all of them at
+// connection teardown — and for a while only one of them did it. A stream
+// drained by teardown left the table with its context still live, and
+// markStreamDone could not repair it afterwards: streamTable.release returns nil
+// for a stream that is already gone, so it returned without cancelling too. The
+// cancellation was lost by both paths rather than merely delayed (issue #139).
+//
+// Safe to call more than once, and from either goroutine: context.CancelFunc is
+// idempotent. cancel is nil only for a stream published into the table before
+// registerStream bound its context, which is the window markStreamDone's own nil
+// check has always covered.
+func (ss *ServerStream) cancelCtx() {
+	ss.mu.Lock()
+	cancel := ss.cancel
+	ss.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // SendHeaders sends a response HEADERS frame with the given fields.
 // The first call on a stream seeds the per-stream send window from
 // the peer's SETTINGS_INITIAL_WINDOW_SIZE. Always sets END_HEADERS.

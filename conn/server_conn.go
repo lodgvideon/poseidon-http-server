@@ -963,6 +963,23 @@ func (sc *ServerConn) sendGoAway(code frame.ErrCode) {
 	sc.wmu.Unlock()
 }
 
+// shutdownStreams ends every stream still live when the connection does. It is
+// the bulk form of markStreamDone and owes each stream the same two things: the
+// final event, and then the cancellation of its context.
+//
+// It used to owe only the first. ServerStream.Context promises cancellation
+// "when the stream is reset by the client (RST_STREAM), completes, or the
+// underlying connection closes", and this is the third clause — but the two
+// reader-loop exits reach here and return, and connCancel, which cancels every
+// per-stream context at once, is called only by Close and abortHandshake. A
+// handler blocked in Recv was released by close(s.events); one selecting on
+// Context().Done() was not, and markStreamDone could not rescue it later because
+// streamTable.release finds nothing to release once drain has run (issue #139).
+//
+// Cancelling here rather than routing teardown through release keeps the cancel
+// outside the table lock, which is what release's contract asks of every caller:
+// it hands the stream back precisely so the caller can cancel unlocked. The only
+// lock taken per stream is the stream's own leaf mutex, for one pointer load.
 func (sc *ServerConn) shutdownStreams(_ error) {
 	for _, s := range sc.tbl.drain() {
 		select {
@@ -970,6 +987,11 @@ func (sc *ServerConn) shutdownStreams(_ error) {
 		default:
 		}
 		close(s.events)
+		// After the event, never before — the ordering OnData documents for
+		// markStreamDone. Recv prefers a buffered event to cancellation, but a
+		// handler already parked in its blocking select would take the ctx.Done arm
+		// and never see the reset this loop just queued.
+		s.cancelCtx()
 	}
 }
 

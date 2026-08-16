@@ -125,14 +125,12 @@ func (sc *ServerConn) notePeerGoAway() { sc.peerGoAway.Store(true) }
 func (sc *ServerConn) markStreamDone(id uint32) {
 	s := sc.tbl.release(id)
 	if s == nil {
+		// Not live: either never registered, or already released — including by the
+		// connection teardown that drains the whole table, which is why teardown has
+		// to cancel for itself. Nothing left here can do it (issue #139).
 		return
 	}
-	s.mu.Lock()
-	cancel := s.cancel
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel() // cancel the handler's context on stream completion/reset
-	}
+	s.cancelCtx() // cancel the handler's context on stream completion/reset
 }
 
 // writeSettingsAck sends a SETTINGS ACK.
