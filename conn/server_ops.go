@@ -584,8 +584,11 @@ func (sc *ServerConn) writeServerRSTStream(ss *ServerStream, code frame.ErrCode)
 // the stream may be idle, or may never exist — so writeServerRSTStream's
 // *ServerStream signature cannot serve them.
 //
-// Deliberately does not call markStreamDone: a malformed PRIORITY naming an idle
-// stream must not evict a live sibling's registry entry.
+// Calls markStreamDone only when the identifier resolves to a live stream (#67):
+// a malformed PRIORITY naming an idle or unknown id must not evict a live
+// sibling's registry entry. For an id that does resolve, this is equivalent to
+// writeServerRSTStream — the difference between the two is what the caller
+// knows, not what happens to a stream they can both see.
 func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	if sc.closed.Load() {
 		return ErrConnClosed

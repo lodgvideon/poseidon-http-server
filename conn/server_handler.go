@@ -226,9 +226,11 @@ func (h *serverConnHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) erro
 	// STREAM_CLOSED". Left unenforced, body bytes sent after END_STREAM reached
 	// the handler behind its own EOF.
 	if s.remoteHalfEnded() {
-		// writeServerRSTStream, not writeRSTStreamID: it calls markStreamDone itself,
-		// so the handler goroutine holding this *ServerStream is released rather than
-		// left waiting on events that will never come.
+		// writeServerRSTStream, not writeRSTStreamID: this site holds the
+		// *ServerStream, so it uses the entry point that takes one. Since #67 both
+		// close the stream for writing and call markStreamDone for a live id, so
+		// they are equivalent here — writeRSTStreamID exists for the callers that
+		// have only a FrameHeader and must tolerate an idle or unknown id.
 		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeStreamClosed)
 		return nil
 	}
@@ -503,8 +505,9 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// shared HPACK decoder or the connection's dynamic table falls a step behind
 	// the client's encoder and every later stream decodes corruption.
 	if s.remoteHalfEnded() {
-		// See OnData: writeServerRSTStream also closes the stream for writing, so
-		// the handler cannot answer on a stream this just reset.
+		// See OnData: this site holds the *ServerStream, and writeServerRSTStream
+		// closes it for writing, so the handler cannot answer on a stream this
+		// just reset.
 		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeStreamClosed)
 		return nil
 	}
@@ -530,8 +533,13 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 		// failure here means the connection is already going away. Do NOT
 		// s.Close() first — that emits its own RST_STREAM(CANCEL), which would
 		// reach the peer ahead of the PROTOCOL_ERROR the RFC calls for.
-		// writeServerRSTStream calls markStreamDone, cancelling the stream
-		// context, which is what releases the accept side.
+		// writeServerRSTStream records stReset and calls markStreamDone, which
+		// releases the registry entry and cancels the stream context. It does not
+		// touch acceptCh — registerStream queued this stream before the field
+		// section was validated, deliberately, so the shared HPACK dynamic table
+		// stays in step. What keeps it from the application is AcceptStream, which
+		// drops any dequeued stream whose state is terminal: a channel has no
+		// removal, so dequeue is the only eviction point (see deliverable, #133).
 		_ = h.streams.writeServerRSTStream(s, frame.ErrCodeProtocolError)
 		return nil
 	}

@@ -34,7 +34,7 @@ make test           # go test -count=1 ./...
 make test-race      # go test -race -count=1 ./...   (CI runs with -race)
 make coverage-gate  # race coverage + scripts/coverage-gate.sh (min 80%, COVERAGE_MIN)
 make bench          # benchmarks, -benchmem
-make bench-gate     # scripts/bench-gate.sh — fails on allocation/latency regression
+make bench-gate     # scripts/bench-gate.sh — per-metric gate, see below
 make lint           # go vet ./... + golangci-lint run
 make tidy           # go mod tidy
 ```
@@ -45,8 +45,9 @@ Fuzz targets exist in `conn/`, `server/`, `grpcserver/` (nightly via
 
 ## The zero-allocation contract (ADR-0001) — read before touching hot paths
 
-Hot paths achieve **0 allocs/op** and this is enforced by `make bench-gate`, not
-just advertised. Concretely:
+Hot paths achieve **0 allocs/op**. `make bench-gate` enforces that count
+*exactly* — but only that one, and only locally. Read the last bullet below
+before quoting a green gate as proof of anything else. Concretely:
 
 - `statusBytes` (`server/handler.go`) and the gRPC header slices
   (`grpcserver/service.go`) are **package-level `[]byte` constants that are
@@ -60,6 +61,17 @@ just advertised. Concretely:
   **intentionally allocate** — don't chase allocs there.
 - **Any new hot-path feature must ship with a benchmark**, or it can silently
   erode the baseline.
+- **What the gate actually checks (#138).** `scripts/bench-gate.sh` treats the
+  three metrics differently, because they are not equally measurable:
+  `allocs/op` is **exact** (any increase benchstat calls significant fails,
+  including 0 → N); `sec/op` is gated at **+50%** (`BENCH_THRESHOLD`), a floor
+  set above the drift byte-identical code shows on a shared host, so a smaller
+  latency regression is invisible to it; `B/op` is **reported and not gated**
+  (`BENCH_GATE_BYTES=0`, pending #99). Two further limits: there is **no
+  committed baseline** in `testdata/benchmarks/`, so a first run records one
+  and passes without comparing (#101); and **CI does not run this gate** —
+  `ci.yml`'s `bench` job only smoke-runs the benchmarks once. It is a local
+  tool, not a merge gate.
 
 ## Locks cost more than allocations — read alongside the alloc contract
 
@@ -141,8 +153,9 @@ gh release create vX.Y.Z --target <release-PR-merge-commit>
 ```
 
 A green Release run with **no tag** and the PR stuck on `autorelease: pending` is
-this quirk, not a build failure. Latest released line: **v0.4.x** (client pinned
-at v0.7.1 in go.mod).
+this quirk, not a build failure. Latest released line: **v0.7.x** (v0.7.1). The
+client is pinned at **v0.11.0** in go.mod — check `go.mod` rather than this line,
+which has been wrong before: the two versions are unrelated and drift apart.
 
 ## Code discovery: two graphs, and which one answers what
 
