@@ -1,16 +1,43 @@
 # CLAUDE.md
 
 Guidance for AI agents working in **poseidon-http-server** — a zero-allocation
-HTTP/2 + gRPC server for Go, built on the `poseidon-http-client` codec
-(`frame` + `hpack`). Drop-in `http.Handler` replacement (chi/echo/gin/net/http).
+HTTP/2 + HTTP/3 + gRPC server for Go, built on the `poseidon-http-client`
+codec. Drop-in `http.Handler` replacement (chi/echo/gin/net/http).
 
 ## Project shape
 
 - **Language:** Go 1.25, single module `github.com/lodgvideon/poseidon-http-server`.
-- **Dependencies:** exactly **one** runtime dep — `poseidon-http-client` (see go.mod).
-  The server links only its `frame` and `hpack` packages. Do **not** add
-  third-party runtime deps without a strong reason; "no other deps" is a
-  documented selling point (README).
+- **Dependencies:** one **direct** requirement — `poseidon-http-client` (see
+  go.mod). Do **not** add third-party runtime deps without a strong reason; "no
+  other deps" is a documented selling point (README).
+
+  **Which client packages get linked is measured here, not listed.** This file
+  used to assert "the server links only its `frame` and `hpack` packages". That
+  sentence has been wrong twice — most recently since the HTTP/3 server landed
+  (#47) — because a fixed list cannot survive the next package being added. Ask
+  the toolchain instead:
+
+  ```sh
+  # every client package linked, transitively
+  go list -deps ./... | grep poseidon-http-client
+  # which of our packages imports which, directly
+  go list -f '{{$p := .ImportPath}}{{range .Imports}}{{$p}} -> {{.}}
+  {{end}}' ./... | grep poseidon-http-client | sort -u
+  # third-party MODULES a given package drags in
+  go list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./server | sort -u
+  ```
+
+  What that returned on 2026-08-17 (yours wins if it differs): 7 client packages
+  imported directly, 12 linked transitively. `server`, `conn`, `grpcserver`,
+  `middleware` and the `poseidon-server` binary each link exactly one
+  third-party module, the client — the selling point holds for them.
+  `http3server` links three (`+ golang.org/x/crypto`, `golang.org/x/sys`), and
+  `loadtest/loadgen` five. See `docs/HTTP3_SERVER_GUIDE.md#dependencies`.
+
+  This is load-bearing for upgrade risk, not tidiness. A client bump was cleared
+  once on the reasoning "the server links only client `frame`/`hpack`,
+  unchanged". That reasoning is dead: a client release touching `quic`, `http3`
+  or `qpack` now reaches this repo's code. Run the commands; do not quote a list.
 
 ## Package map
 
@@ -19,6 +46,7 @@ HTTP/2 + gRPC server for Go, built on the `poseidon-http-client` codec
 | `conn/` | HTTP/2 connection + stream state machine — frame loop, flow control, HPACK sync, Rapid-Reset accounting. The performance-critical core. |
 | `server/` | High-level `http.Handler`-compatible server: h2c, `/healthz`+`/readyz`, body limits, graceful drain. |
 | `grpcserver/` | gRPC framing, status trailers, health check, reflection. |
+| `http3server/` | HTTP/3 over QUIC (RFC 9114). The only package with a wider dependency footprint — see `docs/HTTP3_SERVER_GUIDE.md`. |
 | `middleware/` | gzip, metrics (Prometheus), ratelimit, realip, security headers, slog access log, tracing. |
 | `cmd/poseidon-server/` | The 12-factor `poseidon-server` binary. |
 | `examples/` | Runnable example servers (http, tls, secure, h2c, grpc, push, observability). |
@@ -136,10 +164,15 @@ Rules that follow:
   the CHANGELOG and versioning are driven by release-please.
 - **Coverage floor:** 80% (`COVERAGE_MIN`). Untrusted-input paths are held to
   higher coverage — see `conn/server_untrusted_coverage_test.go`.
-- **ADRs are authoritative.** 8 ADRs cover the alloc contract, goroutine model,
-  gRPC framing, h2c, ResponseWriter interface, Rapid-Reset mitigation, and the
-  tagged-module consumption of the client codec. Cite/update them when changing
-  a decision.
+- **ADRs are authoritative.** `docs/adr/` is the index; take the count from
+  `ls docs/adr/[0-9]*.md`, not from this file — the number written here said 8
+  while there were 9, which is what a count in prose does. They cover the alloc
+  contract, the goroutine model, gRPC framing, h2c, the `ResponseWriter`
+  interface, Rapid-Reset mitigation, the tagged-module consumption of the client
+  codec, and **stream state as one value** (ADR-0009 — the record behind
+  `streamState`/`streamTable` and the four rounds of stream-lifecycle defects
+  that produced them; the one an agent touching `conn/` needs first).
+  Cite/update them when changing a decision.
 
 ## Releasing (has a known gotcha)
 
@@ -153,9 +186,10 @@ gh release create vX.Y.Z --target <release-PR-merge-commit>
 ```
 
 A green Release run with **no tag** and the PR stuck on `autorelease: pending` is
-this quirk, not a build failure. Latest released line: **v0.7.x** (v0.7.1). The
-client is pinned at **v0.11.0** in go.mod — check `go.mod` rather than this line,
-which has been wrong before: the two versions are unrelated and drift apart.
+this quirk, not a build failure. For the released line ask `gh release list -L 1`,
+and for the client pin read `go.mod` — both numbers used to be written out here
+and both went stale (the client line said v0.11.0 after #184 moved it to
+v0.13.0). They are unrelated versions and they drift apart.
 
 ## Code discovery: two graphs, and which one answers what
 
