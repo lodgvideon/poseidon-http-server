@@ -175,6 +175,37 @@ const defaultStreamEventBuffer = 8
 // a reasonable burst of legitimate cancellations.
 const rapidResetFloor = 100
 
+// maxAcceptQueueDepth caps how large acceptQueueDepth will size the accept
+// queue. The queue is allocated eagerly, once per connection during the
+// handshake, so its depth is memory an idle connection pays for before it has
+// carried a single request — and MaxConcurrentStreams is a uint32 an operator
+// may set arbitrarily high, which handed straight to make() would allocate tens
+// of gigabytes per connection. Above the cap the queue stops tracking the
+// advertised limit and overflow becomes reachable again; that is answered
+// correctly, with RST_STREAM(REFUSED_STREAM), rather than silently.
+const maxAcceptQueueDepth = 1024
+
+// acceptQueueDepth is how many admitted-but-not-yet-delivered streams the
+// connection can hold for AcceptStream.
+//
+// Derived from the advertised SETTINGS_MAX_CONCURRENT_STREAMS rather than being
+// a number of its own. The two used to be independent literals — a 64-slot
+// channel against an advertised 100 — so a client that took the server at its
+// word lost every stream past the 64th, and lost it to RST_STREAM(CANCEL),
+// which forbids a retry (issue #119). The advertised limit is the promise the
+// peer acts on, so it is the only number allowed to govern how many streams the
+// connection must be able to hold.
+//
+// A zero MaxConcurrentStreams means "no advertised limit" (streamTable.admitClient
+// treats it that way); an unbounded queue is not on offer, so the cap applies.
+func (o ServerConnOptions) acceptQueueDepth() int {
+	n := o.AdvertisedSettings.MaxConcurrentStreams
+	if n == 0 || n > maxAcceptQueueDepth {
+		return maxAcceptQueueDepth
+	}
+	return int(n)
+}
+
 func (o ServerConnOptions) defaulted() ServerConnOptions {
 	// Always fully default the advertised settings (idempotent: only zero fields
 	// change). Gating this on MaxConcurrentStreams==0 used to leave
@@ -290,7 +321,7 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		dec:                hpack.NewDecoder(),
 		opts:               opts,
 		readerDone:         make(chan struct{}),
-		acceptCh:           make(chan *ServerStream, 64),
+		acceptCh:           make(chan *ServerStream, opts.acceptQueueDepth()),
 		pingWaiters:        make(map[[8]byte]chan struct{}),
 		connRecvWindow:     opts.effectiveConnRecvWindow(),
 		peerConnSendWindow: int32(connInitialRecvWindow),

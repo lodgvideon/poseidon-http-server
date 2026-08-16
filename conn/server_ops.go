@@ -30,6 +30,12 @@ func (sc *ServerConn) lookupStream(id uint32) *ServerStream { return sc.tbl.look
 // RST_STREAM(REFUSED_STREAM) (RFC 9113 §5.1.2) and the function returns false
 // without registering it. REFUSED_STREAM signals the request was not processed,
 // so the client may safely retry it on a fresh connection.
+//
+// A full accept queue is refused the same way and for the same reason: both are
+// "this server will not process the request", which is what §8.7 reserves
+// REFUSED_STREAM for. Returning false suppresses event delivery on both paths
+// while OnHeaders still decodes the field block, so the shared HPACK dynamic
+// table stays in step with the client's encoder.
 func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	s.sc = sc
 	// Admission seeds the send window and consumes the identifier under the
@@ -48,13 +54,38 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	s.mu.Lock()
 	s.ctx, s.cancel = context.WithCancel(sc.connCtx)
 	s.mu.Unlock()
-	sc.atomicStreamsAccepted.Add(1)
-
+	// Non-blocking, and it has to stay that way. This runs on the single frame
+	// reader goroutine, so blocking here would stop PING, SETTINGS, WINDOW_UPDATE
+	// and RST_STREAM for the whole connection — including the frames whose
+	// processing is what lets the application make progress and drain the queue.
+	// Stalling every stream on the connection to avoid refusing one is the worse
+	// trade, so a full queue is refused rather than waited on.
+	//
+	// The queue is sized from the same advertised MaxConcurrentStreams enforced
+	// above (ServerConnOptions.acceptQueueDepth), so a peer that honours the limit
+	// it was given does not reach this branch. It is still reachable and so must
+	// still be correct: a stream the client resets leaves the table
+	// (OnRSTStream -> markStreamDone) but keeps its queue slot until the
+	// application takes delivery, so the queue can be full with the table empty.
+	//
+	// REFUSED_STREAM, not CANCEL, for the same reason as the concurrency-limit
+	// branch above. RFC 9113 §8.7: "The REFUSED_STREAM error code can be included
+	// in a RST_STREAM frame to indicate that the stream is being closed prior to
+	// any processing having occurred. Any request that was sent on the reset
+	// stream can be safely retried." Nothing here processed the request, and
+	// CANCEL — what ServerStream.Close sends — promises the peer nothing of the
+	// kind, so a non-idempotent request refused with it cannot be replayed and is
+	// simply lost.
 	select {
 	case sc.acceptCh <- s:
 	default:
-		_ = s.Close()
+		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
+		return false
 	}
+	// Counted only once delivery is certain: a refused stream was never accepted,
+	// and ConnStats.StreamsAccepted is the number the operator's dashboards
+	// reconcile against requests actually served.
+	sc.atomicStreamsAccepted.Add(1)
 	return true
 }
 
