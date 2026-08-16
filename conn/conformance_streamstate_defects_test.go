@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -88,20 +89,50 @@ func TestConformance_RFC9113_Sec68_LastStreamIDNamesAPeerStream(t *testing.T) {
 // never released, ActiveStreams() over-reported, and because push concurrency is
 // counted by scanning the map, the peer's push allowance leaked. All seven
 // callers discard the error, so nothing downstream could compensate.
+//
+// HOW THE WRITE IS BROKEN, and why not by closing the client end (issue #115).
+// Closing the client end does break the write, but it also ends the server's
+// reader goroutine, and that goroutine's teardown drains the whole stream table
+// on its own — releasing this stream without cancelling its context, because it
+// signals streams over their event channel instead. Two paths could therefore
+// release the entry, and whichever reached the table first decided what the test
+// saw. When teardown won, ActiveStreams was 0 (drained) and the context was
+// still live (never cancelled), which reads exactly like the defect this test
+// exists to catch: 65 of 3600 attempts under -race on a loaded host, every one
+// of them expiring at exactly the 1s budget the check used to carry, none of
+// them with a DATA RACE to show for it. Failing the write alone leaves the
+// reader goroutine running and exactly one path able to release this stream —
+// the one under test.
 func TestRegression_ResetReleasesTheStreamEvenWhenTheWriteFails(t *testing.T) {
 	cli, srv := net.Pipe()
+	defer cli.Close()
+	failing := &failWritesConn{Conn: srv}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Closed when the assertions are done. The client then holds the connection
+	// open for exactly as long as the test needs it, instead of for a guessed
+	// number of seconds that can expire mid-assertion.
+	held := make(chan struct{})
+	defer close(held)
+
 	go func() {
 		pipeClient(t, cli, func(cliFr *frame.Framer) {
+			// Keep draining, so no server write can block on an unread pipe.
+			go func() {
+				for {
+					if _, err := cliFr.ReadFrame(context.Background(), &fieldRSTCapture{}); err != nil {
+						return
+					}
+				}
+			}()
 			sendReq(t, cliFr, 1, goodHeaders("/"), false)
-			time.Sleep(2 * time.Second)
+			<-held
 		})
 	}()
 
-	sc, err := NewServerConn(ctx, srv, ServerConnOptions{}.defaulted())
+	sc, err := NewServerConn(ctx, failing, ServerConnOptions{}.defaulted())
 	if err != nil {
 		t.Fatalf("NewServerConn: %v", err)
 	}
@@ -115,21 +146,42 @@ func TestRegression_ResetReleasesTheStreamEvenWhenTheWriteFails(t *testing.T) {
 		t.Fatalf("ActiveStreams before reset = %d, want 1", got)
 	}
 
-	// Break the transport so the RST_STREAM write cannot succeed. This is the
-	// ordinary case of a client that vanished, not an exotic one.
-	_ = cli.Close()
+	// From here every frame this server writes fails, and nothing else about the
+	// connection changes. This is the ordinary case of a client that vanished,
+	// narrowed to the half of it this function has to survive.
+	failing.fail.Store(true)
 
-	_ = sc.writeServerRSTStream(stream, frame.ErrCodeProtocolError)
+	rstErr := sc.writeServerRSTStream(stream, frame.ErrCodeProtocolError)
+	// Pin the arrangement before reading anything into the result: a run in which
+	// the write succeeded, or which took the already-closed branch instead, never
+	// exercised the failed-write path and must not be allowed to pass for it.
+	if rstErr == nil {
+		t.Fatal("writeServerRSTStream returned nil: the RST_STREAM write succeeded " +
+			"although every write was arranged to fail, so this run never reached " +
+			"the path under test")
+	}
+	if errors.Is(rstErr, ErrConnClosed) {
+		t.Fatalf("writeServerRSTStream returned %v: it took the already-closed early "+
+			"return, not the failed-write path this test exists for", rstErr)
+	}
 
 	if got := sc.ActiveStreams(); got != 0 {
 		t.Errorf("ActiveStreams after a failed reset = %d, want 0: the stream was marked "+
 			"closed but never released, so its handler goroutine is stranded and the "+
 			"registry keeps counting it", got)
 	}
+	// No budget, because there is nothing to wait for. writeServerRSTStream is
+	// documented to call markStreamDone itself, markStreamDone cancels the stream
+	// context before it returns, and that call has returned — so the context is
+	// cancelled by the time this line runs, or it never will be. A wall-clock
+	// budget here could only be a guess about another goroutine, which is what
+	// #115 turned out to be.
 	select {
 	case <-stream.Context().Done():
-	case <-time.After(time.Second):
-		t.Error("stream context still live after reset; markStreamDone never ran")
+	default:
+		t.Error("stream context still live on return from writeServerRSTStream: the reset " +
+			"marked the stream closed but never released it, so its handler goroutine is " +
+			"stranded with a context nothing will cancel until the connection ends")
 	}
 }
 
