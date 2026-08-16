@@ -42,6 +42,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-client/http3"
@@ -58,6 +59,13 @@ const (
 	maxStreamsUni   uint64 = 4   // client control + QPACK encoder/decoder, with slack
 )
 
+// defaultIdleTimeout is the QUIC max_idle_timeout this server advertises when
+// Server.IdleTimeout is zero. It matches server.defaultIdleTimeout, this repo's
+// secure default for the HTTP/2 server, and RFC 4787's REQ-5 — quoted by RFC 9000
+// §10.1.2 as recommending "a 2-minute timeout interval" for UDP NAT mappings, past
+// which the path is likely gone regardless of what either endpoint keeps in memory.
+const defaultIdleTimeout = 120 * time.Second
+
 // Server serves HTTP/3 requests to Handler.
 type Server struct {
 	// Handler answers requests. A nil Handler serves http.DefaultServeMux.
@@ -65,15 +73,66 @@ type Server struct {
 	// TLSConfig must carry the server's certificate(s). ALPN "h3" is filled in
 	// when NextProtos is unset.
 	TLSConfig *tls.Config
+
+	// IdleTimeout is the QUIC max_idle_timeout this server advertises (RFC 9000
+	// §18.2, §10.1): after this long with no packet received, the connection is
+	// silently closed and its state discarded.
+	//
+	//   0  => secure default (defaultIdleTimeout)
+	//   <0 => advertise none (the parameter is omitted)
+	//   >0 => explicit timeout
+	//
+	// The effective timeout is the minimum of the two advertised values (§10.1),
+	// so this is a ceiling, not a floor: a peer asking for less gets less.
+	//
+	// <0 is the pre-#168 behaviour and is unsafe on an open network — with a peer
+	// that also advertises none, §10.1 leaves the idle timeout disabled entirely
+	// and one handshake buys an attacker a connection this package will never
+	// reap. It exists for closed deployments that keep connections alive by other
+	// means.
+	IdleTimeout time.Duration
+}
+
+// transportParams are the QUIC transport parameters this server advertises. Every
+// path that builds a listener for a Server must use it, so no caller can quietly
+// drop max_idle_timeout the way ListenAndServe did before #168.
+func (s *Server) transportParams() quic.ServerTransportParams {
+	return quic.ServerTransportParams{
+		MaxStreamsBidi: maxStreamsBidi,
+		MaxStreamsUni:  maxStreamsUni,
+		MaxIdleTimeout: s.idleTimeoutMillis(),
+	}
+}
+
+// idleTimeoutMillis renders IdleTimeout as the millisecond integer the transport
+// parameter carries: "The maximum idle timeout is a value in milliseconds that is
+// encoded as an integer" (RFC 9000 §18.2).
+//
+// Zero is not a small timeout but the absence of one — "Idle timeout is disabled
+// when both endpoints omit this transport parameter or specify a value of 0" (§18.2)
+// — so a positive IdleTimeout below a millisecond is raised to 1ms rather than
+// rounded down into that hole. The transport floors the effective period at three
+// PTOs anyway (RFC 9000 §10.1: "endpoints MUST increase the idle timeout period to
+// be at least three times the current Probe Timeout"), so the clamp cannot produce a
+// connection that closes under loss recovery.
+func (s *Server) idleTimeoutMillis() uint64 {
+	d := s.IdleTimeout
+	switch {
+	case d < 0:
+		return 0 // advertise none
+	case d == 0:
+		d = defaultIdleTimeout
+	}
+	if ms := d.Milliseconds(); ms > 0 {
+		return uint64(ms)
+	}
+	return 1
 }
 
 // ListenAndServe listens on addr ("host:port") and serves HTTP/3 until ctx is
 // cancelled or the listener fails.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
-	l, err := quic.Listen(addr, s.TLSConfig, quic.ServerTransportParams{
-		MaxStreamsBidi: maxStreamsBidi,
-		MaxStreamsUni:  maxStreamsUni,
-	})
+	l, err := quic.Listen(addr, s.TLSConfig, s.transportParams())
 	if err != nil {
 		return err
 	}
@@ -82,6 +141,12 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 }
 
 // Serve accepts connections from l and serves each until ctx is cancelled.
+//
+// l carries the transport parameters it was built with, so IdleTimeout takes
+// effect only when the caller built l from transportParams, as ListenAndServe
+// does. A listener assembled by hand without max_idle_timeout advertises none
+// whatever IdleTimeout says, and RFC 9000 §18.2 then leaves the idle timeout
+// disabled against a peer that also advertises none (issue #168).
 func (s *Server) Serve(ctx context.Context, l *quic.Listener) error {
 	for {
 		c, err := l.Accept(ctx)

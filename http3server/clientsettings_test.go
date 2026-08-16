@@ -45,6 +45,14 @@ const rfc9114FieldOverhead = 32
 // The caller owns Poll: there is no reader goroutine.
 func dialRawPeer(ctx context.Context, t *testing.T, addr string, pool *x509.CertPool) *quic.Conn {
 	t.Helper()
+	return dialRawPeerIdle(ctx, t, addr, pool, 30000)
+}
+
+// dialRawPeerIdle is dialRawPeer with the peer's advertised max_idle_timeout under
+// the test's control, in milliseconds; 0 omits the parameter (RFC 9000 §18.2). Only
+// the idle-timeout tests (#168) need anything but the 30s dialRawPeer advertises.
+func dialRawPeerIdle(ctx context.Context, t *testing.T, addr string, pool *x509.CertPool, idleMS uint64) *quic.Conn {
+	t.Helper()
 	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		t.Fatalf("ResolveUDPAddr: %v", err)
@@ -64,7 +72,7 @@ func dialRawPeer(ctx context.Context, t *testing.T, addr string, pool *x509.Cert
 		InitialMaxStreamDataBidiLocal: quic.DefaultStreamRecvWindow,
 		InitialMaxStreamDataUni:       quic.DefaultStreamRecvWindow,
 		InitialMaxStreamsUni:          3, // the server's control + QPACK streams
-		MaxIdleTimeout:                30000,
+		MaxIdleTimeout:                idleMS,
 	})
 	conn, err := quic.NewConn(uc, &tls.Config{
 		ServerName: "example.com",
