@@ -32,7 +32,6 @@ var defaultDurationBuckets = []float64{
 type histogram struct {
 	buckets  []float64
 	counts   []atomic.Int64 // len == len(buckets); index of the matching bucket
-	infCount atomic.Int64   // observations exceeding the largest bucket bound
 	sumNanos atomic.Int64
 	count    atomic.Int64
 }
@@ -52,8 +51,6 @@ func (h *histogram) observe(d time.Duration) {
 	i := sort.SearchFloat64s(h.buckets, seconds)
 	if i < len(h.buckets) {
 		h.counts[i].Add(1)
-	} else {
-		h.infCount.Add(1)
 	}
 	h.sumNanos.Add(int64(d))
 	h.count.Add(1)
