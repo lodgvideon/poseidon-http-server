@@ -262,6 +262,14 @@ func TestServer_AbortsIncompleteRequestWithIncomplete(t *testing.T) {
 		t.Fatalf("Send control: %v", err)
 	}
 
+	// The §8.1 wire values, written out rather than read from the production constants:
+	// asserting against h3RequestIncomplete would move with it, so a wrong constant
+	// would make this test agree with the bug instead of catching it.
+	const (
+		wireRequestIncomplete uint64 = 0x010d
+		wireMessageError      uint64 = 0x010e
+	)
+
 	// 1. A stream that ends — cleanly, with a FIN — carrying no HEADERS frame at all.
 	empty, err := conn.OpenStream()
 	if err != nil {
@@ -270,7 +278,7 @@ func TestServer_AbortsIncompleteRequestWithIncomplete(t *testing.T) {
 	if _, err := empty.Send(nil, true); err != nil {
 		t.Fatalf("Send FIN: %v", err)
 	}
-	wantStreamReset(ctx, t, conn, empty, h3RequestIncomplete, "a stream with no HEADERS frame")
+	wantStreamReset(ctx, t, conn, empty, wireRequestIncomplete, "a stream with no HEADERS frame")
 
 	// 2. A stream the peer abandons part-way through the header section.
 	partial, err := conn.OpenStream()
@@ -285,7 +293,7 @@ func TestServer_AbortsIncompleteRequestWithIncomplete(t *testing.T) {
 	if err := partial.Reset(http3.H3RequestCancelled); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	wantStreamReset(ctx, t, conn, partial, h3RequestIncomplete, "a stream reset mid-message")
+	wantStreamReset(ctx, t, conn, partial, wireRequestIncomplete, "a stream reset mid-message")
 
 	// 3. The fork's other side, over the same connection: a header section that is
 	// present and invalid is still §4.1.2's H3_MESSAGE_ERROR.
@@ -296,7 +304,7 @@ func TestServer_AbortsIncompleteRequestWithIncomplete(t *testing.T) {
 	if _, err := bad.Send(http3.AppendHeaders(nil, []byte{0xff, 0xff}), true); err != nil {
 		t.Fatalf("Send malformed HEADERS: %v", err)
 	}
-	wantStreamReset(ctx, t, conn, bad, http3.H3MessageError, "a garbage field section")
+	wantStreamReset(ctx, t, conn, bad, wireMessageError, "a garbage field section")
 
 	select {
 	case body := <-served:
