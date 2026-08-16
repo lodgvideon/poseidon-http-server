@@ -405,11 +405,31 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 		}
 		close(credited)
 
-		// Keep reading to drain server output.
-		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		// Drain server output for as long as the connection lives.
+		//
+		// This loop used to run under a single `SetReadDeadline(now+5s)` set here
+		// and never refreshed. The drain is the only consumer of the server's
+		// output, so when that deadline elapsed the goroutine returned, the
+		// deferred Close() shut the client end, and every subsequent write from
+		// the benchmark failed — surfacing as a socket error raised inside
+		// writeServerData or writeServerHeaders, which reads like a server defect
+		// and is not one. That made the harness valid only for runs shorter than
+		// a wall-clock constant nobody set in relation to -benchtime:
+		// BenchmarkWriteServerHeaders passed at -benchtime=2s and failed at 4s;
+		// BenchmarkWriteServerData_Small passed at 200000x and failed at 300000x,
+		// a boundary that had already moved down from the 400000x recorded in
+		// #123 as this host's per-op cost drifted from ~17us to ~21us.
+		//
+		// The correct lifetime for a drain is the connection's, so let the
+		// benchmark's `defer sc.Close()` end it — the same shape
+		// benchParTCPConn already uses. The barrier's deadline must be cleared
+		// first or it would carry into this loop and reimpose the coupling.
+		if err := clientConn.SetReadDeadline(time.Time{}); err != nil {
+			fail("clear read deadline", err)
+			return
+		}
 		for {
-			_, err := clientConn.Read(drain)
-			if err != nil {
+			if _, err := clientConn.Read(drain); err != nil {
 				return
 			}
 		}
