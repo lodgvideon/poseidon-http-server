@@ -1,0 +1,46 @@
+# Line endings and per-type handling.
+#
+# Development happens on Windows, CI and every deployment target are Linux, and
+# `core.autocrlf` is a per-machine setting nobody in a clone inherits. Pinning
+# the rules here is what makes a checkout identical on both.
+
+# Normalise every text file to LF in the repository AND in the working tree.
+# Not just `text=auto`: with autocrlf on, that still hands Windows a CRLF working
+# tree, which is how a shell script or a Makefile acquires a `\r` that only fails
+# on Linux.
+* text=auto eol=lf
+
+# --- Byte-exact artifacts: never convert, never diff as text ----------------
+
+# Go fuzz corpus entries are reproduction material. The payload is an escaped Go
+# string literal, so the bytes matter exactly; a seed that git rewrote on
+# checkout is a seed that no longer reproduces what it was recorded for. Go's
+# parser currently tolerates a CRLF header line, which is luck, not a contract.
+#
+# This repository has a concrete stake in that: the corpus under
+# FuzzDecodeFields carries byte 0xf9 — the HPACK Huffman symbol whose miscoding
+# shipped in v0.4.3 on both HTTP/2 and HTTP/3.
+**/testdata/fuzz/** -text
+
+# --- Explicit where breakage is silent and platform-specific ---------------
+#
+# Covered by the `*` rule above; spelled out so the intent survives someone
+# narrowing that rule, because each of these fails only on the other platform.
+
+*.sh        text eol=lf
+*.py        text eol=lf
+Makefile    text eol=lf
+Dockerfile  text eol=lf
+*.tpl       text eol=lf
+
+# --- Diff quality ----------------------------------------------------------
+
+# Built-in hunk-header driver: shows the enclosing func/type in `@@` lines.
+*.go   diff=golang
+*.md   diff=markdown
+
+# --- Repository statistics -------------------------------------------------
+
+# Vendored verbatim from poseidon-http-client (see each file's DIVERGED marker
+# for the local additions). Not this project's prose.
+.claude/skills/** linguist-vendored
