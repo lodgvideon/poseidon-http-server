@@ -82,16 +82,41 @@ Rules that follow:
   needs a reason next to it.
 - **Every hot-path benchmark needs a `RunParallel` variant.** A single-goroutine
   `ns/op` says nothing about a lock. As of 2026-08-15 the repo had 27 benchmarks
-  and zero parallel ones, which is why this section exists.
+  and zero parallel ones, which is why this section exists. The parallel ones now
+  live in `*_parallel_test.go` (`conn/`, `server/`, `middleware/`,
+  `server/integration/`); each `_SharedConn` benchmark is paired with a
+  `_PerConn` control doing identical work with the lock out of the picture,
+  because a parallel benchmark without a control cannot tell a scalable path
+  from a benchmark that never reached the lock. Get the curve with
+
+  ```sh
+  go test -run='^$' -bench='Parallel|FCOutCond' -benchmem \
+          -benchtime=500ms -count=10 -cpu=1,2,4,8,16 ./conn ./server ./middleware
+  ```
+
+  and the attribution with `-mutexprofile`/`-blockprofile`: `ns/op` is
+  circumstantial for a lock claim, a mutex profile is not.
 - This rule is **in tension with ADR-0003**, which records "every write is
   serialised under one mutex" (`conn.ServerConn.wmu`) as a deliberate choice, and
   with `CONTEXT.md`'s connection entry. Changing that needs a superseding ADR and
   a measurement, not a quiet edit — see issue #95, which exists to produce the
   measurement first.
-- Known sites to weigh against this rule: `wmu` (15 call sites, all writes),
-  `fcOutCond.Broadcast()` (6 sites, O(N) wakeups per WINDOW_UPDATE),
-  `Server.mu` (taken per stream in `spawnStream`), `MetricsCollector.mu`
-  (four map lookups per request).
+- Known sites to weigh against this rule, each now carrying the #95 measurement
+  (2026-08-16, Ryzen 7 7700 8C/16T, go1.26.6; method and spreads in that PR):
+  - `wmu` (15 call sites, all writes) — **contended, and it is the ceiling.**
+    99.2% of all end-to-end mutex delay. One connection's HEADERS throughput
+    never improves past one core and is ~34% worse at 16; sixteen connections
+    doing the identical work improve 6.3×.
+  - `fcOutCond.Broadcast()` (6 sites, `Signal()` still 0) — **contended, O(N) in
+    parked streams.** One connection-level WINDOW_UPDATE costs 4.4 ns with no
+    waiters and 155 ns with 64.
+  - `Server.mu` (taken per stream in `spawnStream`) — **measured, not
+    contended**: 0.0009% of end-to-end mutex delay, and that sliver is
+    `newproc`/`newobject`, not the mutex. Leave it alone.
+  - `MetricsCollector.mu` (four map lookups per request) — **contended as cache
+    traffic, not as waiting.** Barely visible in a mutex profile (an `RLock`
+    seldom blocks), yet `RLock`/`RUnlock` on its reader counter are 21.6% of all
+    CPU on a path that scales only 1.36× across 16 cores.
 
 ## Conventions
 
