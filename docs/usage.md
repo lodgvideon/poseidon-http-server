@@ -210,7 +210,7 @@ All middleware below lives in the `middleware` package.
 | **RequestID** | `RequestID()` | Generates/propagates a request id, stored in context (`FromContext(ctx)`). |
 | **AccessLog** | `AccessLog(log Logger)` | One `Printf`-style access-log line per request. |
 | **StructuredAccessLog** | `StructuredAccessLog(*slog.Logger)` | One structured `slog` record per request: `method`, `path`, `status`, `duration_ms`, `request_id` (when set), and `bytes_written` (when the writer exposes it). Level by status class: 5xx→Error, 4xx→Warn, else Info. Emitted even on panic (recorded as 500, then re-raised). |
-| **Metrics** | `NewMetricsCollector().Metrics()` | Records request counts, active in-flight gauge, and latency histograms (see [Observability](#metrics)). |
+| **Metrics** | `NewMetricsCollector().Metrics()` | Records request counts, active in-flight gauge, and latency histograms. Label cardinality is **bounded**: `MaxSeries` (default 1024) caps distinct label combinations and `SeriesIdleTTL` (default 15m) reclaims idle ones, so attacker-chosen paths can't exhaust memory; overflow folds into `path="__other__"`. Use `NewMetricsCollectorWithConfig` with `PathLabel` to label by route template (see [Observability](#metrics)). |
 | **SecurityHeaders** | `SecurityHeaders(SecurityHeadersConfig)` | Injects HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options`, `Referrer-Policy`, and optional CSP. `DefaultSecurityHeadersConfig()` is secure-by-default. |
 | **RateLimit** | `RateLimit(RateLimitConfig)` | Token-bucket limiter; short-circuits with **429** when a bucket is empty. Keyed by `cfg.Key(ctx, req)` (single global bucket by default); use `KeyByClientIP()` to bucket per RealIP-resolved client IP (place `RealIP` earlier in the chain). `Rate` (req/s, default 100) + `Burst` (default `max(1, Rate)`). The per-key bucket map is **memory-bounded**: `MaxBuckets` (default 65536) caps it (evicting the oldest bucket) and `BucketIdleTTL` reclaims idle ones, so attacker-influenced keys (e.g. unbounded IPv6 client IPs) can't exhaust memory. Set `MaxBuckets: -1` for the legacy unbounded map. |
 | **RealIP** | `RealIP(RealIPConfig)` | Resolves the client IP from `X-Forwarded-For`/`X-Real-IP` **only** when the immediate peer is in `TrustedProxies` (CIDRs/bare IPs). Secure default: trusts nothing. Retrieve with `ClientIP(ctx)`. |
@@ -310,6 +310,48 @@ set via `ContentSecurityPolicy`.
 
 The histogram `observe` path is allocation-free (binary-searched bucket index,
 atomic updates).
+
+#### Label cardinality is bounded
+
+The `path` label defaults to the raw request path — attacker-chosen input, query
+string included. Left unbounded, a scanner walking `/users/1`, `/users/2`, …
+would mint one counter, one duration counter and one histogram per distinct
+path and never release them. The collector therefore caps how many distinct
+label combinations it holds:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `MetricsConfig.MaxSeries` | `1024` (`DefaultMaxSeries`) | Max distinct label combinations per metric. `-1` disables the cap. |
+| `MetricsConfig.SeriesIdleTTL` | `15m` (`DefaultSeriesIdleTTL`) | An untouched series becomes eligible for eviction, freeing its slot for a label first seen later. `-1` disables idle eviction. |
+| `MetricsConfig.PathLabel` | `nil` (raw path) | `func(*server.Request) string` — return a route template instead of the concrete path. |
+
+Requests past the cap are **folded, never dropped**: they are counted under
+`method="__other__",path="__other__",status="__other__"` (`OverflowLabel`), so
+request totals stay exact even where per-path resolution is lost.
+
+Raise the cap, or turn it off:
+
+```go
+metrics := middleware.NewMetricsCollectorWithConfig(middleware.MetricsConfig{
+	MaxSeries:     8192,             // 0 => DefaultMaxSeries; -1 => unbounded
+	SeriesIdleTTL: 30 * time.Minute, // 0 => DefaultSeriesIdleTTL; -1 => never evict
+})
+```
+
+For a router-backed app the better answer is to label by **route template**,
+which keeps the label set naturally small and strips the query string:
+
+```go
+metrics := middleware.NewMetricsCollectorWithConfig(middleware.MetricsConfig{
+	PathLabel: func(req *server.Request) string {
+		// chi: the matched pattern, e.g. "/users/{id}"
+		return chi.RouteContext(req.Context()).RoutePattern()
+	},
+})
+```
+
+`PathLabel` is a refinement, not a replacement: the cap still applies to
+whatever it returns, so a hook that leaks unbounded values remains safe.
 
 #### Transport metrics
 
