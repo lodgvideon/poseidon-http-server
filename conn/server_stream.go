@@ -17,8 +17,15 @@ type ServerStream struct {
 	events chan StreamEvent
 
 	// ctx is cancelled when the stream is reset by the client, completes, or its
-	// connection closes. Set by registerStream; nil for unregistered or pushed
-	// streams (Context() then falls back to context.Background()).
+	// connection closes. Bound once, by registerStream for a client stream and by
+	// Push for a pushed one, in both cases BEFORE the stream is published into the
+	// stream table or onto acceptCh — so from the moment any other goroutine can
+	// reach the stream at all, these two fields are immutable, and the publication
+	// itself (the table's mutex, or the channel send) is the happens-before edge
+	// that makes them visible. That is why Context and cancelCtx read them without
+	// a lock. Nil only for a stream that never went through either path — one
+	// constructed directly in a test, or the nil stream server.NewResponseWriter
+	// tolerates — for which Context falls back to context.Background().
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -121,15 +128,22 @@ func (ss *ServerStream) Context() context.Context {
 // cancellation was lost by both paths rather than merely delayed (issue #139).
 //
 // Safe to call more than once, and from either goroutine: context.CancelFunc is
-// idempotent. cancel is nil only for a stream published into the table before
-// registerStream bound its context, which is the window markStreamDone's own nil
-// check has always covered.
+// idempotent.
+//
+// Unsynchronised, and deliberately. cancel is written once, before the stream is
+// published into the table or onto acceptCh, and never again; every caller here
+// reached this stream through one of those two publications, which is the
+// happens-before edge. Reading it under ss.mu would not make a future
+// bind-after-publish safe, only invisible — the race detector reports an
+// unsynchronised field, and cannot report a mutex that is held on both sides of
+// a genuine ordering bug.
+//
+// The nil check remains for streams that never went through either binding path
+// — test-constructed ones — not for a half-built published stream, which
+// registerStream no longer produces (issue #156).
 func (ss *ServerStream) cancelCtx() {
-	ss.mu.Lock()
-	cancel := ss.cancel
-	ss.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if ss.cancel != nil {
+		ss.cancel()
 	}
 }
 

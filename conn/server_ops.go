@@ -38,6 +38,27 @@ func (sc *ServerConn) lookupStream(id uint32) *ServerStream { return sc.tbl.look
 // table stays in step with the client's encoder.
 func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	s.sc = sc
+	// Finish the stream BEFORE publishing it — streamTable.reservePush states the
+	// rule and the push path already follows it. This function publishes twice,
+	// into the stream table and onto acceptCh, and the per-stream context is bound
+	// ahead of the FIRST of them. It used to be bound between the two, which left
+	// the stream discoverable in the table with a nil cancel; nothing could reach
+	// it there (every table reader is the frame reader goroutine, or names an
+	// identifier it already owns — see issue #156), but the invariant was true
+	// only by whole-program argument, and the same publish-then-populate shape had
+	// already shipped once at the other publication point (issue #140).
+	//
+	// Derived from the connection context; cancelled when the stream completes or
+	// resets (markStreamDone), when the connection closes (shutdownStreams), or on
+	// either refusal below.
+	//
+	// No lock. The stream is not reachable from another goroutine yet, and the two
+	// publications below are themselves the happens-before edges that make this
+	// write visible — the table's mutex for anyone who finds the stream by
+	// identifier, the channel send for the application that receives it. Writing
+	// once, before anyone can look, is also what lets ServerStream.Context and
+	// cancelCtx read these two fields without synchronising.
+	s.ctx, s.cancel = context.WithCancel(sc.connCtx)
 	// Admission seeds the send window and consumes the identifier under the
 	// table's own lock, so the §6.9.2 retroactive window walk cannot interleave
 	// with the seeding, and a refusal still burns the identifier (§5.1.1 forbids
@@ -47,13 +68,15 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 		// the request was not processed, so the client may safely retry it
 		// elsewhere (§5.1.2). Best-effort; ignored if the connection is going away.
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
+		// The context bound above has to go back, and only this branch can return
+		// it: the stream never entered the table, so writeServerRSTStream's
+		// markStreamDone finds nothing to release and therefore cancels nothing.
+		// Left bound it is a context child parked in connCtx's map for the life of
+		// the connection, accumulating at a rate an unauthenticated peer chooses by
+		// opening streams past the limit it was given.
+		s.cancel()
 		return false
 	}
-	// Per-stream context derived from the connection context; cancelled when the
-	// stream completes or resets (markStreamDone) or the connection closes.
-	s.mu.Lock()
-	s.ctx, s.cancel = context.WithCancel(sc.connCtx)
-	s.mu.Unlock()
 	// Non-blocking, and it has to stay that way. This runs on the single frame
 	// reader goroutine, so blocking here would stop PING, SETTINGS, WINDOW_UPDATE
 	// and RST_STREAM for the whole connection — including the frames whose
@@ -80,12 +103,20 @@ func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
 	case sc.acceptCh <- s:
 	default:
 		_ = sc.writeServerRSTStream(s, frame.ErrCodeRefusedStream)
+		// Registered by now, so writeServerRSTStream's markStreamDone releases the
+		// stream and cancels it for us. Said again anyway: CancelFunc is idempotent,
+		// the cost of the line being redundant is nothing, and the cost of it being
+		// absent — if that path ever stops cancelling — is the leak described on the
+		// admission branch above.
+		s.cancel()
 		return false
 	}
-	// Counted only once delivery is certain: a refused stream was never accepted,
-	// and ConnStats.StreamsAccepted is the number the operator's dashboards
-	// reconcile against requests actually served.
-	sc.atomicStreamsAccepted.Add(1)
+	// NOT counted here. ConnStats.StreamsAccepted counts deliveries, and a
+	// successful send into acceptCh is not one: a stream can be reset, or found
+	// malformed, while it waits in the queue, and AcceptStream then skips it at
+	// dequeue rather than hand the application a corpse (deliverable, issue #133).
+	// The counter is incremented at that dequeue instead — see ServerConn.deliver
+	// and issue #147.
 	return true
 }
 

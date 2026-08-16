@@ -267,10 +267,15 @@ func (sc *ServerConn) sendInitialConnWindowUpdate() error {
 //
 //nolint:revive // exported stutters with package; kept for API consistency with client.
 type ConnStats struct {
-	BytesSent       int64
-	BytesReceived   int64
-	FramesSent      int64
-	FramesReceived  int64
+	BytesSent      int64
+	BytesReceived  int64
+	FramesSent     int64
+	FramesReceived int64
+	// StreamsAccepted counts streams AcceptStream handed to the application, so
+	// it reconciles against requests actually served. It is deliberately NOT the
+	// number of streams the peer opened: streams refused over
+	// MaxConcurrentStreams or a full accept queue, and streams that died while
+	// they waited in that queue, are all excluded (issue #147).
 	StreamsAccepted uint32
 	// RapidResets counts client RST_STREAM frames charged against the
 	// Rapid Reset budget (CVE-2023-44487) on this connection.
@@ -473,7 +478,7 @@ func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 			if !ss.deliverable() {
 				continue
 			}
-			return ss, nil
+			return sc.deliver(ss), nil
 		default:
 		}
 		select {
@@ -487,7 +492,7 @@ func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 				// straight into spawnStream.
 				continue
 			}
-			return ss, nil
+			return sc.deliver(ss), nil
 		case <-sc.readerDone:
 			// The reader goroutine has exited — the connection is finished, whether it
 			// ended cleanly or on a protocol error. acceptCh is never closed, so without
@@ -498,6 +503,35 @@ func (sc *ServerConn) AcceptStream(ctx context.Context) (*ServerStream, error) {
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// deliver records a stream as accepted and hands it back. It is the single
+// accounting point for ConnStats.StreamsAccepted, and it exists as a function
+// rather than a line repeated at AcceptStream's two exits because that counter
+// has already drifted from its meaning once by being written where delivery was
+// merely likely.
+//
+// StreamsAccepted counts streams handed to the APPLICATION. registerStream used
+// to count them at enqueue instead, on the reasoning that a successful send into
+// acceptCh made delivery certain — true when AcceptStream returned everything it
+// dequeued, and false from the moment it began skipping streams that died in the
+// queue (deliverable, issue #133). A client that opens and cancels aggressively,
+// or one sending malformed field sections — which emitHeaderBlock answers with
+// RST_STREAM(PROTOCOL_ERROR) after the stream is already queued — drove the
+// counter above the number of handlers that ran, with nothing else reporting the
+// gap. Under a rapid-reset flood (CVE-2023-44487) the two diverge completely:
+// the counter climbs at the full request rate while zero handlers run, so the
+// number meant to say how much work the application is carrying instead reports
+// the attack volume (issue #147).
+//
+// Counting here rather than there also moves the atomic off the single frame
+// reader goroutine, which every stream on the connection is serialised behind,
+// onto the accepting one. What is no longer counted is a stream the reader
+// queued that nobody ever accepted before the connection ended — which is the
+// point: nobody served it.
+func (sc *ServerConn) deliver(ss *ServerStream) *ServerStream {
+	sc.atomicStreamsAccepted.Add(1)
+	return ss
 }
 
 // deliverable reports whether a stream just taken off the accept queue is still
