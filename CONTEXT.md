@@ -88,6 +88,47 @@ path** — the `net/http` `Header()` map plus `WriteHeader` — intentionally
 allocates. Several behaviours are currently implemented once per path; that is a
 known locality problem, not a design.
 
+## Call, and call outcome
+
+A **call** is one request/response exchange as the *application* sees it. On
+HTTP it is a request; on gRPC it is an RPC. It rides on exactly one stream, so
+"call" and "stream" are one-to-one — but they are not the same word, because a
+stream is a transport thing with transport states and a call is an application
+thing with an application result.
+
+The **call outcome** is how a call ended: an outcome code, the class it falls
+into (succeeded, the caller was wrong, we were wrong), and the sizes and
+duration that go with it. It is deliberately *protocol-independent*, because the
+concept has two encodings and only two: HTTP writes it as a status code, gRPC
+writes it as a `grpc-status` trailer.
+
+That distinction is load-bearing and its absence has already cost us. Anything
+that reads the HTTP status in order to learn how a call went is reading one of
+the two encodings of a concept it should be reading directly — and on gRPC it
+gets 200 for every failure, because the real answer is in the trailers. A layer
+that wants outcomes and reaches for status codes is making a category error, not
+a shortcut.
+
+## RPC vocabulary
+
+From the gRPC HTTP/2 protocol specification and the gRFCs, not from RFC 9113.
+
+- **Service** and **method** — the two halves of the `:path` that select a
+  handler. A **method** has one of four shapes: unary, server-streaming,
+  client-streaming, bidirectional-streaming.
+- **Metadata** — the application's own key/value pairs on a call, carried in the
+  request field section, in an initial response field section, and in trailers.
+  Keys ending `-bin` carry binary values and are base64-encoded on the wire.
+  Metadata is a distinct concept from *field section*: a field section is the
+  transport's carrier, metadata is what the application put in it, and the
+  transport's own pseudo-headers and framing fields are not metadata.
+- **Status** — the outcome of an RPC: a code, a message, and optionally typed
+  details. It travels in the **trailers**, which is why an RPC that failed still
+  has a successful HTTP response around it. See
+  [ADR-0004](docs/adr/0004-grpc-framing-and-status-trailers.md).
+- **Trailers-Only** — the shape a response takes when it carries a status and
+  nothing else: one field section with END_STREAM, no separate initial section.
+
 ## Conformance test
 
 A test whose assertion is derived from the RFC text, quoting the governing

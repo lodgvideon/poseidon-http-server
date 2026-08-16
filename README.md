@@ -134,6 +134,7 @@ BenchmarkLookup            0 ns/op    0 B/op    0 allocs/op
 - **[Usage guide](docs/usage.md)** — configuration, middleware catalog, security hardening, observability, and deployment.
 - **[Architecture Decision Records](docs/adr/)** — zero-alloc contract, RFC 7540 choices, ResponseWriter interface, Rapid Reset mitigation, and more.
 - **[Examples](examples/)** — runnable servers: HTTP/2, TLS, gRPC, observability, and security.
+- **[Backlog](docs/BACKLOG.md)** — planned feature work as user stories, each with the CI gate that proves it.
 - **[CHANGELOG](CHANGELOG.md)** — release history and migration notes.
 
 ## License

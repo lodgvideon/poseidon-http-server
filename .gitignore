@@ -29,3 +29,12 @@ http-server
 
 # Claude Code local settings (per-machine, not shared)
 .claude/settings.local.json
+
+# Git worktrees live here. Ignored in-tree rather than only in .git/info/exclude,
+# so a fresh clone on another machine gets the same protection: a worktree is a
+# full second checkout, and committing one would duplicate the whole repository
+# inside itself.
+.claude/worktrees/
+
+# CodeGraph local index (per-machine, rebuilt by `codegraph init`)
+.codegraph/

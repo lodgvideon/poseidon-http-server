@@ -1,0 +1,7 @@
+{
+  "exclude": [
+    ".claude/worktrees/**",
+    "**/testdata/**",
+    "bin/**"
+  ]
+}
