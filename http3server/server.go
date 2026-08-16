@@ -261,8 +261,8 @@ func readRequestStream(ctx context.Context, rs *quic.Stream) ([]byte, error) {
 }
 
 // connFrameError reports a frame whose receipt is a CONNECTION error rather than a
-// stream error (RFC 9114 §8): the offending frame type, and the §8.1 code the
-// connection must be closed with.
+// stream error (RFC 9114 §8): the offending frame type, the §8.1 code the
+// connection must be closed with, and the rule it broke.
 //
 // It exists so decodeRequest can stay a pure function of the peer's bytes — it is
 // the package's top untrusted surface and has a fuzz target — while still reaching
@@ -271,16 +271,33 @@ func readRequestStream(ctx context.Context, rs *quic.Stream) ([]byte, error) {
 type connFrameError struct {
 	typ  uint64 // the frame type that is not permitted here
 	code uint64 // the HTTP/3 error code to close the connection with (§8.1)
+	why  string // the rule broken, for the error string only
 }
 
 func (e *connFrameError) Error() string {
-	return "http3server: frame type " + strconv.FormatUint(e.typ, 16) +
-		" is not permitted on a request stream (RFC 9114 §7.2)"
+	return "http3server: frame type " + strconv.FormatUint(e.typ, 16) + " " + e.why
 }
 
-// decodeRequest turns a request stream's frames into an http.Request: one HEADERS
-// frame carrying the QPACK field section, then any DATA frames carrying the body
-// (RFC 9114 §4.1).
+// decodeRequest turns a request stream's frames into an http.Request. RFC 9114 §4.1
+// fixes the sequence: "An HTTP message (request or response) consists of: 1. the
+// header section ... sent as a single HEADERS frame, 2. optionally, the content, if
+// present, sent as a series of DATA frames, and 3. optionally, the trailer section,
+// if present, sent as a single HEADERS frame."
+//
+// The same section makes a departure from that order a connection error, and names
+// the three cases: "Receipt of an invalid sequence of frames MUST be treated as a
+// connection error of type H3_FRAME_UNEXPECTED. In particular, a DATA frame before
+// any HEADERS frame, or a HEADERS or DATA frame after the trailing HEADERS frame, is
+// considered invalid." All three are rejected below, before any of the message
+// reaches a handler.
+//
+// The last of them is the one with teeth. Bytes a peer places after the trailer
+// section are not content: an intermediary that parses the stream conformantly ends
+// the body at the trailers, so folding them in would leave that intermediary and this
+// server disagreeing about where the message ends — a request-smuggling differential
+// (issue #167), not a conformance nit. Rejecting is also why the whole message is
+// refused rather than truncated at the trailers: a handler must not be able to
+// observe part of a message as if it were the whole of one.
 //
 // A *connFrameError return means the frame sequence is a connection error, not a
 // malformed request: the caller must close the connection with its code rather than
@@ -291,9 +308,10 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 	fr.Feed(stream)
 
 	var (
-		fields []hpack.HeaderField
-		body   []byte
-		seen   bool
+		fields   []hpack.HeaderField
+		body     []byte
+		seen     bool // the header section has arrived
+		trailers bool // the trailing HEADERS frame has arrived; nothing may follow it
 	)
 	for {
 		typ, payload, err := fr.ReadFrame()
@@ -305,14 +323,34 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 		}
 		switch typ {
 		case http3.FrameHeaders:
+			if trailers {
+				// §4.1: "a HEADERS or DATA frame after the trailing HEADERS frame".
+				// A message carries at most two field sections — header and trailer —
+				// so a third HEADERS frame has no place in the sequence.
+				return nil, &connFrameError{
+					typ:  typ,
+					code: http3.H3FrameUnexpected,
+					why:  "arrived after the trailing HEADERS frame (RFC 9114 §4.1)",
+				}
+			}
 			if seen {
-				continue // trailers: not surfaced
+				trailers = true
+				continue // the trailer section: read for its position, not surfaced
 			}
 			seen = true
 			if fields, err = decodeFields(payload); err != nil {
 				return nil, err
 			}
 		case http3.FrameData:
+			if !seen || trailers {
+				// §4.1: "a DATA frame before any HEADERS frame, or a HEADERS or DATA
+				// frame after the trailing HEADERS frame, is considered invalid."
+				return nil, &connFrameError{
+					typ:  typ,
+					code: http3.H3FrameUnexpected,
+					why:  "arrived outside the message content (RFC 9114 §4.1)",
+				}
+			}
 			body = append(body, payload...)
 		case http3.FrameSettings, http3.FrameCancelPush, http3.FrameMaxPushID, http3.FramePushPromise,
 			0x02, 0x06, 0x08, 0x09:
@@ -329,7 +367,11 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 			// stream as a connection error of type H3_FRAME_UNEXPECTED" — and this
 			// is the server. Killing a connection the RFC does not say to kill is
 			// the failure mode this switch exists to avoid in the other direction.
-			return nil, &connFrameError{typ: typ, code: http3.H3FrameUnexpected}
+			return nil, &connFrameError{
+				typ:  typ,
+				code: http3.H3FrameUnexpected,
+				why:  "is not permitted on a request stream (RFC 9114 §7.2)",
+			}
 		default:
 			// Genuinely unknown types and the GREASE types of §7.2.8 (0x1f*N + 0x21)
 			// are ignored, which §4.1 requires and an interop suite checks: "Frames

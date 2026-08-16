@@ -69,6 +69,45 @@ func assertRequestContract(t *testing.T, req *http.Request, err error) {
 	}
 }
 
+// legalSequence re-derives RFC 9114 §4.1's request-stream frame sequence from the
+// raw stream, independently of decodeRequest, so the fuzzer has an oracle for the
+// class of bug in issue #167 rather than only a crash detector. §4.1: "Receipt of an
+// invalid sequence of frames MUST be treated as a connection error of type
+// H3_FRAME_UNEXPECTED. In particular, a DATA frame before any HEADERS frame, or a
+// HEADERS or DATA frame after the trailing HEADERS frame, is considered invalid."
+//
+// It reports true for a stream it cannot finish reading: a truncated or oversized
+// frame is a framing question, not a sequencing one, and decodeRequest stops at the
+// same place. A violation already found before that point still reports false,
+// because the loop returns as soon as it sees one.
+func legalSequence(stream []byte) bool {
+	var fr http3.FrameReader
+	fr.SetMaxFrameLen(maxRequestBytes)
+	fr.Feed(stream)
+	var seen, trailers bool
+	for {
+		typ, _, err := fr.ReadFrame()
+		if err != nil {
+			return true // ErrNeedMore or a frame error: nothing further to sequence
+		}
+		switch typ {
+		case http3.FrameHeaders:
+			switch {
+			case trailers:
+				return false // "a HEADERS ... after the trailing HEADERS frame"
+			case seen:
+				trailers = true // the trailer section
+			default:
+				seen = true // the header section
+			}
+		case http3.FrameData:
+			if !seen || trailers {
+				return false // "a DATA frame before any HEADERS frame, or a ... DATA frame after"
+			}
+		}
+	}
+}
+
 // FuzzDecodeRequest feeds arbitrary bytes to decodeRequest, the top untrusted
 // surface of this package: it is handed a whole request stream read off a QUIC
 // connection, so every byte — the HTTP/3 frame headers, the QPACK field section
@@ -79,9 +118,16 @@ func assertRequestContract(t *testing.T, req *http.Request, err error) {
 // Contract: decodeRequest returns either (*http.Request, nil) or (nil, error) —
 // never a panic, never a hang, and never unbounded buffering (SetMaxFrameLen
 // caps a frame at maxRequestBytes). A returned request must satisfy the
-// invariants in assertRequestContract.
+// invariants in assertRequestContract, and a served stream must have carried a
+// legal §4.1 frame sequence.
+//
+// That last clause is why assertRequestContract alone was not enough to catch #167:
+// DATA folded in from after the trailer section satisfies every invariant it checks,
+// ContentLength included — the body and the length agree with each other and lie
+// together. The sequence has to be judged from the frames, not from the request.
 func FuzzDecodeRequest(f *testing.F) {
 	headers := http3.AppendHeaders(nil, encodeSection(validFields))
+	trailers := http3.AppendHeaders(nil, encodeSection([]hpack.HeaderField{field("x-checksum", "deadbeef")}))
 
 	f.Add(headers)                                                // a valid, complete request
 	f.Add(http3.AppendData(headers, []byte("body")))              // valid HEADERS + DATA
@@ -93,10 +139,24 @@ func FuzzDecodeRequest(f *testing.F) {
 	f.Add(http3.AppendFrameHeader(nil, http3.FrameData, 1<<62-1)) // absurd declared length, no payload
 	// A HEADERS frame whose declared length overruns the bytes present.
 	f.Add(append(http3.AppendFrameHeader(nil, http3.FrameHeaders, 4096), encodeSection(validFields)...))
+	// The §4.1 sequence violations (issue #167). The first is the smuggling shape:
+	// DATA after the trailer section, which was folded into the body.
+	f.Add(http3.AppendData(append(http3.AppendData(append([]byte(nil), headers...), []byte("body")), trailers...), []byte("after")))
+	f.Add(http3.AppendData(append(append([]byte(nil), headers...), trailers...), []byte("after")))
+	f.Add(append(append(append([]byte(nil), headers...), trailers...), trailers...)) // a third HEADERS
+	f.Add(append(http3.AppendData(nil, []byte("early")), headers...))                // DATA before HEADERS
+	f.Add(append(append([]byte(nil), headers...), trailers...))                      // legal: HEADERS + trailers
 
 	f.Fuzz(func(t *testing.T, stream []byte) {
 		req, err := decodeRequest(stream)
 		assertRequestContract(t, req, err)
+		if err == nil && !legalSequence(stream) {
+			// assertRequestContract has already drained Body, so the size the handler
+			// would have seen is reported from ContentLength, which it checked agrees.
+			t.Fatalf("served a stream whose frame sequence RFC 9114 §4.1 makes a connection error of "+
+				"type H3_FRAME_UNEXPECTED: a handler would read a %d-byte body from stream %x",
+				req.ContentLength, stream)
+		}
 	})
 }
 
