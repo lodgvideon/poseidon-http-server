@@ -272,10 +272,25 @@ func (s *Server) serve(ctx context.Context, ln net.Listener, cfg *tls.Config) er
 			continue
 		}
 		go func() {
+			// Attach the peer address ONCE per connection, not per request: every
+			// stream context descends from the context handed to
+			// conn.NewServerConn (ServerConn.connCtx), so one context.WithValue
+			// here covers every request on the connection — no allocation, no
+			// lookup and no lock added to the per-request path. Without this,
+			// middleware.PeerAddr is empty for every request and RealIP resolves
+			// nothing, which collapses KeyByClientIP into one global bucket.
+			//
+			// RemoteAddr is nil-checked because Serve accepts a caller-supplied
+			// net.Listener: a net.Conn implementation that returns nil here would
+			// otherwise panic in this goroutine and take the process down.
+			connCtx := ctx
+			if ra := nc.RemoteAddr(); ra != nil {
+				connCtx = WithPeerAddr(ctx, ra.String())
+			}
 			if s.opts.H2C {
-				s.detectAndServe(ctx, nc, cfg)
+				s.detectAndServe(connCtx, nc, cfg)
 			} else {
-				s.serveConn(ctx, nc, cfg)
+				s.serveConn(connCtx, nc, cfg)
 			}
 		}()
 	}
