@@ -1,7 +1,8 @@
 // Package main demonstrates Poseidon HTTP/2 server with TLS + ALPN.
 //
 // Generate self-signed cert:
-//   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
+//
+//	openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
 //
 // Run: go run ./examples/tls-server
 // Test: curl --cert cert.pem --key key.pem https://localhost:8443/

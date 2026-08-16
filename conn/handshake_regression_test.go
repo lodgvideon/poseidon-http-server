@@ -151,8 +151,8 @@ func (c *collectSettings) OnData(frame.FrameHeader, []byte, uint8) error { retur
 func (c *collectSettings) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
 	return nil
 }
-func (c *collectSettings) OnPriority(frame.FrameHeader, frame.Priority) error    { return nil }
-func (c *collectSettings) OnRSTStream(frame.FrameHeader, frame.ErrCode) error    { return nil }
+func (c *collectSettings) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+func (c *collectSettings) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
 func (c *collectSettings) OnSettings(fh frame.FrameHeader, _ frame.SettingsParams) error {
 	if fh.Flags&frame.FlagSettingsAck != 0 {
 		c.ackSeen = true
@@ -161,11 +161,15 @@ func (c *collectSettings) OnSettings(fh frame.FrameHeader, _ frame.SettingsParam
 	}
 	return nil
 }
-func (c *collectSettings) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error { return nil }
-func (c *collectSettings) OnPing(frame.FrameHeader, [8]byte) error                                  { return nil }
-func (c *collectSettings) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error          { return nil }
-func (c *collectSettings) OnWindowUpdate(frame.FrameHeader, uint32) error                           { return nil }
-func (c *collectSettings) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                { return nil }
+func (c *collectSettings) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (c *collectSettings) OnPing(frame.FrameHeader, [8]byte) error { return nil }
+func (c *collectSettings) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (c *collectSettings) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
+func (c *collectSettings) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
 
-func (c *collectSettings) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (c *collectSettings) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (c *collectSettings) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }

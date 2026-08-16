@@ -139,8 +139,8 @@ type mockConnOps struct {
 	peerGoAway bool
 }
 
-func (m *mockConnOps) lookupStream(id uint32) *ServerStream                { return m.streams[id] }
-func (m *mockConnOps) validateClientStreamID(uint32) error { return nil }
+func (m *mockConnOps) lookupStream(id uint32) *ServerStream { return m.streams[id] }
+func (m *mockConnOps) validateClientStreamID(uint32) error  { return nil }
 
 // isIdleStream mirrors ServerConn's rule against maxSeenID, which the mock
 // advances the way registerStream does. Without it every unit test driving the
@@ -163,18 +163,18 @@ func (m *mockConnOps) registerStream(id uint32, s *ServerStream) bool {
 	m.streams[id] = s
 	return true
 }
-func (m *mockConnOps) markStreamDone(id uint32)                            { delete(m.streams, id) }
+func (m *mockConnOps) markStreamDone(id uint32) { delete(m.streams, id) }
 func (m *mockConnOps) writeServerRSTStream(ss *ServerStream, code frame.ErrCode) error {
 	m.rstStreamID, m.rstCode, m.rstCalled = ss.id, code, true
 	m.markStreamDone(ss.id)
 	return nil
 }
-func (m *mockConnOps) writeSettingsAck() error                             { m.settingsAckCalled = true; return nil }
-func (m *mockConnOps) writePingAck(_ [8]byte) error                      { m.pingAckCalled = true; return nil }
-func (m *mockConnOps) deliverPingAck(_ [8]byte)                          {}
-func (m *mockConnOps) applyPeerSettings(_ frame.SettingsParams) error    { return nil }
-func (m *mockConnOps) onWindowUpdate(_, _ uint32) error                   { return nil }
-func (m *mockConnOps) onDataReceived(_ *ServerStream, _ uint32) error    { return nil }
+func (m *mockConnOps) writeSettingsAck() error                        { m.settingsAckCalled = true; return nil }
+func (m *mockConnOps) writePingAck(_ [8]byte) error                   { m.pingAckCalled = true; return nil }
+func (m *mockConnOps) deliverPingAck(_ [8]byte)                       {}
+func (m *mockConnOps) applyPeerSettings(_ frame.SettingsParams) error { return nil }
+func (m *mockConnOps) onWindowUpdate(_, _ uint32) error               { return nil }
+func (m *mockConnOps) onDataReceived(_ *ServerStream, _ uint32) error { return nil }
 func (m *mockConnOps) onClientRSTStream(_ uint32, rapid bool) error {
 	if !rapid {
 		return nil

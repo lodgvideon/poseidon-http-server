@@ -558,13 +558,13 @@ func buildEchoFDS() []byte {
 	//   field 6 (service) = serviceProto
 	// tag(1, LEN) = 0x0a; tag(2, LEN) = 0x12; tag(6, LEN) = 0x32
 	var fdp []byte
-	fdp = append(fdp, 0x0a)                            // field 1 tag (LEN)
-	fdp = append(fdp, byte(len("echo.proto")))         // length
-	fdp = append(fdp, "echo.proto"...)                 // value
-	fdp = append(fdp, 0x12)                            // field 2 tag (LEN)
-	fdp = append(fdp, byte(len("echo.v1")))            // length (7)
-	fdp = append(fdp, "echo.v1"...)                    // value
-	fdp = append(fdp, 0x32)                            // field 6 tag (LEN)
+	fdp = append(fdp, 0x0a)                    // field 1 tag (LEN)
+	fdp = append(fdp, byte(len("echo.proto"))) // length
+	fdp = append(fdp, "echo.proto"...)         // value
+	fdp = append(fdp, 0x12)                    // field 2 tag (LEN)
+	fdp = append(fdp, byte(len("echo.v1")))    // length (7)
+	fdp = append(fdp, "echo.v1"...)            // value
+	fdp = append(fdp, 0x32)                    // field 6 tag (LEN)
 	fdp = append(fdp, byte(len(serviceProto)))
 	fdp = append(fdp, serviceProto...)
 

@@ -550,7 +550,7 @@ func sendReq(t *testing.T, cliFr *frame.Framer, streamID uint32, headers []hpack
 }
 
 type dataCapture struct {
-	data       []byte
+	data        []byte
 	onEndStream func()
 }
 
@@ -575,13 +575,13 @@ func (d *dataCapture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte)
 func (d *dataCapture) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (d *dataCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 func (d *dataCapture) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
-func (d *dataCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+func (d *dataCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
 
 type pingCapture struct {
 	payload [8]byte
 }
 
-func (p *pingCapture) OnData(frame.FrameHeader, []byte, uint8) error       { return nil }
+func (p *pingCapture) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
 func (p *pingCapture) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
 	return nil
 }
@@ -599,14 +599,14 @@ func (p *pingCapture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte)
 func (p *pingCapture) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (p *pingCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 func (p *pingCapture) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
-func (p *pingCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+func (p *pingCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
 
 type goAwayCapture struct {
 	lastID uint32
 	code   frame.ErrCode
 }
 
-func (g *goAwayCapture) OnData(frame.FrameHeader, []byte, uint8) error       { return nil }
+func (g *goAwayCapture) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
 func (g *goAwayCapture) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
 	return nil
 }
@@ -625,7 +625,7 @@ func (g *goAwayCapture) OnGoAway(_ frame.FrameHeader, lastID uint32, code frame.
 func (g *goAwayCapture) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
 func (g *goAwayCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
 func (g *goAwayCapture) OnOrigin(frame.FrameHeader, []string) error                { return nil }
-func (g *goAwayCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+func (g *goAwayCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
 
 type rstCapture struct {
 	code frame.ErrCode
@@ -635,8 +635,11 @@ func (r *rstCapture) OnData(frame.FrameHeader, []byte, uint8) error { return nil
 func (r *rstCapture) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
 	return nil
 }
-func (r *rstCapture) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
-func (r *rstCapture) OnRSTStream(_ frame.FrameHeader, code frame.ErrCode) error { r.code = code; return nil }
+func (r *rstCapture) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+func (r *rstCapture) OnRSTStream(_ frame.FrameHeader, code frame.ErrCode) error {
+	r.code = code
+	return nil
+}
 func (r *rstCapture) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
 func (r *rstCapture) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
@@ -646,7 +649,7 @@ func (r *rstCapture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) 
 func (r *rstCapture) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (r *rstCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 func (r *rstCapture) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
-func (r *rstCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+func (r *rstCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
 
 // multiHandler dispatches to both data and headers handlers.
 type multiHandler struct {
@@ -671,7 +674,7 @@ func (m *multiHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte
 func (m *multiHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (m *multiHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 func (m *multiHandler) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
-func (m *multiHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+func (m *multiHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
 
 // captureHandler records the fragment of a single HEADERS frame.
 type captureHandler struct {
@@ -694,4 +697,4 @@ func (h captureHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byt
 func (h captureHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (h captureHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 func (h captureHandler) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
-func (h captureHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
+func (h captureHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }

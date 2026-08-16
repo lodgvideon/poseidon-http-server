@@ -20,13 +20,13 @@ func FuzzRequestPath(f *testing.F) {
 	f.Add("")
 	f.Add("/api/v1/users")
 	f.Add("/api/v1/users?limit=10")
-	f.Add("/search?q=a?b=c")       // multiple '?'
-	f.Add("?")                     // bare question mark
-	f.Add("/path?")               // trailing '?'
-	f.Add("?leadingquery")         // leading '?'
-	f.Add("/p\x00ath?q=\x00")     // embedded NUL bytes
-	f.Add("/\xff\xfe?\xff")        // invalid UTF-8
-	f.Add("*")                     // OPTIONS asterisk-form
+	f.Add("/search?q=a?b=c")  // multiple '?'
+	f.Add("?")                // bare question mark
+	f.Add("/path?")           // trailing '?'
+	f.Add("?leadingquery")    // leading '?'
+	f.Add("/p\x00ath?q=\x00") // embedded NUL bytes
+	f.Add("/\xff\xfe?\xff")   // invalid UTF-8
+	f.Add("*")                // OPTIONS asterisk-form
 	f.Add("/very/long/" + strings.Repeat("a", 1024) + "?" + strings.Repeat("b", 1024))
 
 	f.Fuzz(func(t *testing.T, raw string) {

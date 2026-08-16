@@ -65,11 +65,11 @@ func (c *fieldRSTCapture) OnSettings(frame.FrameHeader, frame.SettingsParams) er
 func (c *fieldRSTCapture) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
 }
-func (c *fieldRSTCapture) OnPing(frame.FrameHeader, [8]byte) error                { return nil }
-func (c *fieldRSTCapture) OnWindowUpdate(frame.FrameHeader, uint32) error         { return nil }
+func (c *fieldRSTCapture) OnPing(frame.FrameHeader, [8]byte) error                   { return nil }
+func (c *fieldRSTCapture) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
 func (c *fieldRSTCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
-func (c *fieldRSTCapture) OnOrigin(frame.FrameHeader, []string) error             { return nil }
-func (c *fieldRSTCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error  { return nil }
+func (c *fieldRSTCapture) OnOrigin(frame.FrameHeader, []string) error                { return nil }
+func (c *fieldRSTCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
 
 // runRSTProbe drives the client side with `attack` and returns what the server
 // sent back: the first RST_STREAM and whether the connection was also killed.

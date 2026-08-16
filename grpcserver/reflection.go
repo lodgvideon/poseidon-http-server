@@ -77,7 +77,6 @@ func (r *ServiceRegistrar) RegisterFileDescriptor(services []string, fileDescrip
 	r.reflection.allFiles = appendIfUnique(r.reflection.allFiles, fileDescriptorBytes)
 }
 
-
 // RegisterFileDescriptorSet extracts individual FileDescriptorProto entries
 // from a FileDescriptorSet (produced by `protoc --descriptor_set_out`) and
 // registers them. Each file is indexed by filename and by any services it
@@ -109,6 +108,7 @@ func (r *ServiceRegistrar) RegisterFileDescriptorSet(fileDescriptorSetBytes []by
 // a FileDescriptorSet protobuf. FileDescriptorSet has:
 //
 //	repeated FileDescriptorProto file = 1;
+//
 //nolint:gosec // protobuf wire format: int conversions are safe for field tags and lengths
 func extractFileProtos(fdsBytes []byte) [][]byte {
 	var files [][]byte
@@ -143,6 +143,7 @@ func extractFileProtos(fdsBytes []byte) [][]byte {
 }
 
 // extractStringField returns the first string field with the given number.
+//
 //nolint:gosec // protobuf wire format: int conversions are safe for field tags and lengths
 func extractStringField(data []byte, fieldNum int) string {
 	pos := 0
@@ -177,6 +178,7 @@ func extractStringField(data []byte, fieldNum int) string {
 // extractServiceNames returns fully-qualified service names from a
 // FileDescriptorProto. Services are field 6, each containing a
 // ServiceDescriptorProto with name at field 1.
+//
 //nolint:gosec // protobuf wire format: int conversions are safe for field tags and lengths
 func extractServiceNames(fdp []byte) []string {
 	pkg := extractStringField(fdp, 2) // package = field 2
@@ -262,7 +264,7 @@ func (r *ServiceRegistrar) RegisterReflection() {
 		Name: reflectionServiceV1Alpha,
 		Methods: []MethodDesc{
 			{
-				Name:       reflectionMethod,
+				Name:        reflectionMethod,
 				BidiStreamH: r.reflectionHandler,
 			},
 		},
@@ -274,7 +276,7 @@ func (r *ServiceRegistrar) RegisterReflection() {
 		Name: reflectionServiceV1,
 		Methods: []MethodDesc{
 			{
-				Name:       reflectionMethod,
+				Name:        reflectionMethod,
 				BidiStreamH: r.reflectionHandler,
 			},
 		},
@@ -414,16 +416,17 @@ type reflectionRequest struct {
 	host string
 
 	// Exactly one of the following is set (or listAll for empty string).
-	listAll               bool
-	listServices          string // field 7
-	fileByFilename        string // field 3
-	fileContainingSymbol  string // field 4
-	allExtensionNumbers   string // field 6 (message)
-	_ string // field 5 (message) — file_containing_extension, not supported
+	listAll              bool
+	listServices         string // field 7
+	fileByFilename       string // field 3
+	fileContainingSymbol string // field 4
+	allExtensionNumbers  string // field 6 (message)
+	_                    string // field 5 (message) — file_containing_extension, not supported
 }
 
-//nolint:funlen,gosec // protobuf wire decoder — one switch body; int conversions are safe for proto field tags
 // decodeReflectionRequest parses a ServerReflectionRequest protobuf message.
+//
+//nolint:funlen,gosec // protobuf wire decoder — one switch body; int conversions are safe for proto field tags
 func decodeReflectionRequest(data []byte) (*reflectionRequest, error) {
 	req := &reflectionRequest{}
 	pos := 0
@@ -546,11 +549,11 @@ func encodeExtensionNumberResponse(typeName string, numbers []int32) []byte {
 
 // encodeReflectionResponse wraps the response body with host + original_request.
 //
-// full_response = ServerReflectionResponse {
-//   string valid_host = 1;
-//   ServerReflectionRequest original_request = 2;
-//   oneof message_response { ... }
-// }
+//	full_response = ServerReflectionResponse {
+//	  string valid_host = 1;
+//	  ServerReflectionRequest original_request = 2;
+//	  oneof message_response { ... }
+//	}
 func encodeReflectionResponse(host string, originalRequest, messageResponse []byte) []byte {
 	var buf []byte
 	if host != "" {
@@ -692,9 +695,9 @@ func bytesContains(haystack, needle []byte) bool {
 
 // Sentinel errors for protobuf decoding.
 var (
-	errInvalidVarint    = newProtoError("invalid varint encoding")
-	errTruncated        = newProtoError("truncated message")
-	errUnknownWireType  = newProtoError("unknown wire type")
+	errInvalidVarint   = newProtoError("invalid varint encoding")
+	errTruncated       = newProtoError("truncated message")
+	errUnknownWireType = newProtoError("unknown wire type")
 )
 
 type protoError struct{ msg string }

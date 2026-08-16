@@ -398,18 +398,24 @@ func TestCORS_Preflight_ReturnsCORSHeaders(t *testing.T) {
 
 type noopFrameHandler struct{}
 
-func (h *noopFrameHandler) OnData(frame.FrameHeader, []byte, uint8) error                               { return nil }
-func (h *noopFrameHandler) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error { return nil }
-func (h *noopFrameHandler) OnPriority(frame.FrameHeader, frame.Priority) error                           { return nil }
-func (h *noopFrameHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error                           { return nil }
-func (h *noopFrameHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error                     { return nil }
-func (h *noopFrameHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error      { return nil }
-func (h *noopFrameHandler) OnPing(frame.FrameHeader, [8]byte) error                                      { return nil }
-func (h *noopFrameHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error              { return nil }
-func (h *noopFrameHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                               { return nil }
-func (h *noopFrameHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                    { return nil }
+func (h *noopFrameHandler) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+func (h *noopFrameHandler) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
+	return nil
+}
+func (h *noopFrameHandler) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (h *noopFrameHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
+func (h *noopFrameHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
+func (h *noopFrameHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (h *noopFrameHandler) OnPing(frame.FrameHeader, [8]byte) error { return nil }
+func (h *noopFrameHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (h *noopFrameHandler) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
+func (h *noopFrameHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
 
-func (h *noopFrameHandler) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (h *noopFrameHandler) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (h *noopFrameHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 // headerCollector decodes HEADERS frames and stores the result.
@@ -432,16 +438,20 @@ func (c *headerCollector) OnHeaders(_ frame.FrameHeader, hb frame.HeaderBlock, _
 	})
 	return nil
 }
-func (c *headerCollector) OnPriority(frame.FrameHeader, frame.Priority) error                      { return nil }
-func (c *headerCollector) OnRSTStream(frame.FrameHeader, frame.ErrCode) error                       { return nil }
-func (c *headerCollector) OnSettings(frame.FrameHeader, frame.SettingsParams) error                 { return nil }
-func (c *headerCollector) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error  { return nil }
-func (c *headerCollector) OnPing(frame.FrameHeader, [8]byte) error                                   { return nil }
-func (c *headerCollector) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error          { return nil }
-func (c *headerCollector) OnWindowUpdate(frame.FrameHeader, uint32) error                            { return nil }
-func (c *headerCollector) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                { return nil }
+func (c *headerCollector) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (c *headerCollector) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
+func (c *headerCollector) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
+func (c *headerCollector) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (c *headerCollector) OnPing(frame.FrameHeader, [8]byte) error { return nil }
+func (c *headerCollector) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (c *headerCollector) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
+func (c *headerCollector) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
 
-func (c *headerCollector) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (c *headerCollector) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (c *headerCollector) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 func TestCORS_NonPreflight_PassesThrough(t *testing.T) {
