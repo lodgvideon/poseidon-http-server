@@ -11,28 +11,28 @@ import (
 //
 // Quotes copied verbatim from rfc9113.txt fetched from rfc-editor.org:
 //
-//	:2606 "Endpoints MUST NOT generate pseudo-header fields other than those
+//	§8.3 "Endpoints MUST NOT generate pseudo-header fields other than those
 //	       defined in this document."
-//	:2614 "Endpoints MUST treat a request or response that contains undefined
+//	§8.3 "Endpoints MUST treat a request or response that contains undefined
 //	       or invalid pseudo-header fields as malformed (Section 8.1.1)."
-//	:2619 "All pseudo-header fields MUST appear in a field block before all
+//	§8.3 "All pseudo-header fields MUST appear in a field block before all
 //	       regular field lines. Any request or response that contains a
 //	       pseudo-header field that appears in a field block after a regular
 //	       field line MUST be treated as malformed (Section 8.1.1)."
-//	:2624 "The same pseudo-header field name MUST NOT appear more than once in
+//	§8.3 "The same pseudo-header field name MUST NOT appear more than once in
 //	       a field block. A field block for an HTTP request or response that
 //	       contains a repeated pseudo-header field name MUST be treated as
 //	       malformed (Section 8.1.1)."
-//	:2690 "\":authority\" MUST NOT include the deprecated userinfo subcomponent
+//	§8.3.1 "\":authority\" MUST NOT include the deprecated userinfo subcomponent
 //	       for \"http\" or \"https\" schemed URIs."
-//	:2699 "This pseudo-header field MUST NOT be empty for \"http\" or \"https\"
+//	§8.3.1 "This pseudo-header field MUST NOT be empty for \"http\" or \"https\"
 //	       URIs"
-//	:2710 "All HTTP/2 requests MUST include exactly one valid value for the
+//	§8.3.1 "All HTTP/2 requests MUST include exactly one valid value for the
 //	       \":method\", \":scheme\", and \":path\" pseudo-header fields, unless
 //	       they are CONNECT requests (Section 8.5). An HTTP request that omits
 //	       mandatory pseudo-header fields is malformed (Section 8.1.1)."
 //
-// The reaction is fixed by §8.1.1 (:2463): "Malformed requests or responses
+// The reaction is fixed by §8.1.1: "Malformed requests or responses
 // that are detected MUST be treated as a stream error (Section 5.4.2) of type
 // PROTOCOL_ERROR" — reset the stream, keep the connection.
 
@@ -159,14 +159,14 @@ func TestConformance_RFC9113_Sec83_ValidRequestsAccepted(t *testing.T) {
 }
 
 // TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive pins RFC 9110 §4.2.3
-// (rfc9110.txt:1179): "The scheme and host are case-insensitive and normally
+// (RFC 9110 §4.2.3): "The scheme and host are case-insensitive and normally
 // provided in lowercase; all other components are compared in a case-sensitive
 // manner."
 //
 // So "HTTPS" is the same scheme as "https", not a different one. The scheme
 // comparison decides whether the http/https-specific rules of §8.3 apply — the
 // non-empty :path rule (RFC 9113 §8.3.1) and the userinfo prohibition
-// (:2690) — so a case-sensitive comparison lets a client opt out of both by
+// (RFC 9113 §8.3.1) — so a case-sensitive comparison lets a client opt out of both by
 // uppercasing a single header value.
 func TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive(t *testing.T) {
 	for _, tc := range []struct {

@@ -311,7 +311,7 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 // The connection-level half still runs, and must. RFC 9113 §6.9.1
 // — "A receiver MUST count the padding and the entire size of
 // a frame ... against its connection-level flow-control window even if the
-// frame is in error"; §6.8 (:2044) says the same of frames on streams discarded
+// frame is in error"; §6.8 says the same of frames on streams discarded
 // after a GOAWAY. The peer has already debited those octets from its own send
 // window, so a receiver that neither counts nor refunds them burns connection
 // credit permanently: repeat it and the peer's window drains to zero and every

@@ -45,9 +45,9 @@ func (g *goAwayLog) OnGoAway(_ frame.FrameHeader, lastID uint32, code frame.ErrC
 }
 
 // TestConformance_RFC9113_Sec68_GracefulShutdownIsTwoPhase pins RFC 9113 §6.8
-// and :2029 together, because the second only makes sense once the first holds.
+// and §6.8 together, because the second only makes sense once the first holds.
 //
-//	:2035 — "A server that is attempting to gracefully shut down a connection
+//	§6.8 — "A server that is attempting to gracefully shut down a connection
 //	SHOULD send an initial GOAWAY frame with the last stream identifier set to
 //	2^31-1 and a NO_ERROR code... After allowing time for any in-flight stream
 //	creation (at least one round-trip time), the server can send another GOAWAY
@@ -231,7 +231,7 @@ func TestConformance_RFC9113_Sec66_PushPreconditions(t *testing.T) {
 
 // TestConformance_RFC9113_Sec542_NoResetInResponseToReset pins RFC 9113 §5.4.2
 // and, with it, §5.1's "An endpoint MUST NOT send frames other than PRIORITY on
-// a closed stream" (:1082).
+// a closed stream" (§5.1).
 //
 // A received RST_STREAM closes the stream in both directions. The server used to
 // record only that the client's half had ended, so a handler reacting to the

@@ -284,10 +284,10 @@ func hasField(fields []hpack.HeaderField, name []byte) bool {
 
 // suppressContent reports whether this response must carry no content.
 //
-// RFC 9110 §9.3.2 (rfc9110.txt:3987): "The HEAD method is identical to GET
+// RFC 9110 §9.3.2: "The HEAD method is identical to GET
 // except that the server MUST NOT send content in the response." Only the DATA
 // frames are dropped — the header section is left exactly as a GET would have
-// produced it (:3993), and RFC 9113 §8.1.1 explicitly allows
+// produced it (§9.3.2), and RFC 9113 §8.1.1 explicitly allows
 // the resulting non-zero content-length with no DATA behind it.
 //
 // Hot path: a nil check and a string comparison, no allocation.
@@ -460,7 +460,7 @@ func ToHTTPHandler(h Handler) http.Handler {
 			_, _ = w.Write(buf.body)
 		}
 		// Forward the trailer section as trailers. RFC 9110 §6.5.1 notes that
-		// "in most cases, the trailers are simply discarded" (rfc9110.txt:2244),
+		// "in most cases, the trailers are simply discarded" (RFC 9110 §6.5.1),
 		// which would also satisfy the MUST above, but dropping grpc-status
 		// would lose the outcome of the call. http.TrailerPrefix is net/http's
 		// mechanism for trailers whose names are not known before WriteHeader.
@@ -489,7 +489,7 @@ func (b *bufferStreamWriter) sendHeaders(_ context.Context, headers []hpack.Head
 	// header section with endStream=false (WriteHeaders) and the trailer section
 	// with endStream=true (WriteTrailers).
 	//
-	// They must not be pooled. RFC 9110 §6.5.1 (rfc9110.txt:2245): "A recipient
+	// They must not be pooled. RFC 9110 §6.5.1: "A recipient
 	// MUST NOT merge a trailer field into a header section unless the recipient
 	// understands the corresponding header field definition and that definition
 	// explicitly permits and defines how trailer field values can be safely
@@ -517,7 +517,7 @@ func (*bufferStreamWriter) streamID() uint32 { return 0 }
 // neither an ":authority" pseudo-header nor a Host field, so the target URI for
 // an "http" or "https" scheme would have an empty host.
 //
-// RFC 9110 §4.2.1 (rfc9110.txt:1106) and §4.2.2 (:1135): "A sender MUST NOT
+// RFC 9110 §4.2.1 and §4.2.2: "A sender MUST NOT
 // generate an "http" URI with an empty host identifier. A recipient that
 // processes such a URI reference MUST reject it as invalid."
 //

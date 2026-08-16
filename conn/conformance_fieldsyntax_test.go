@@ -12,10 +12,10 @@ import (
 //
 //	§8.2.1 — "implementations MUST perform the following
 //	minimal validation of field names and values"
-//	  :2508 names must avoid 0x00-0x20, 0x41-0x5a (uppercase) and 0x7f-0xff
-//	  :2513 names must not include a colon, except a single leading one
-//	  :2517 values must not contain NUL, LF or CR at any position
-//	  :2521 values must not start or end with SP or HTAB
+//	  §8.2.1 names must avoid 0x00-0x20, 0x41-0x5a (uppercase) and 0x7f-0xff
+//	  §8.2.1 names must not include a colon, except a single leading one
+//	  §8.2.1 values must not contain NUL, LF or CR at any position
+//	  §8.2.1 values must not start or end with SP or HTAB
 //
 //	§8.2.2 — "Any message containing connection-specific
 //	header fields MUST be treated as malformed."
@@ -23,7 +23,7 @@ import (
 //	§8.1.1 fixes the reaction: a stream error of type
 //	PROTOCOL_ERROR, so the connection and its sibling streams survive.
 //
-// Only the value half of :2517 was implemented. A field name went entirely
+// Only the value half of §8.2.1 was implemented. A field name went entirely
 // unchecked, which is why `Content-Length` — uppercase, and therefore a
 // different field from `content-length` to every lowercase comparison in this
 // repository — was forwarded verbatim.
@@ -45,27 +45,27 @@ func TestConformance_RFC9113_Sec821_MalformedFieldSyntax_StreamError(t *testing.
 		field hpack.HeaderField
 		why   string
 	}{
-		{"uppercase_name", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("0")}, ":2508 excludes 'A' to 'Z'"},
-		{"space_in_name", hpack.HeaderField{Name: []byte("x te"), Value: []byte("1")}, ":2508 excludes 0x00-0x20"},
-		{"del_in_name", hpack.HeaderField{Name: []byte("x-\x7f"), Value: []byte("1")}, ":2508 excludes 0x7f-0xff"},
-		{"high_octet_in_name", hpack.HeaderField{Name: []byte("x-\xff"), Value: []byte("1")}, ":2508 excludes 0x7f-0xff"},
-		{"interior_colon_in_name", hpack.HeaderField{Name: []byte("x-forwarded-for:extra"), Value: []byte("1")}, ":2513 forbids a non-leading colon"},
+		{"uppercase_name", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("0")}, "§8.2.1 excludes 'A' to 'Z'"},
+		{"space_in_name", hpack.HeaderField{Name: []byte("x te"), Value: []byte("1")}, "§8.2.1 excludes 0x00-0x20"},
+		{"del_in_name", hpack.HeaderField{Name: []byte("x-\x7f"), Value: []byte("1")}, "§8.2.1 excludes 0x7f-0xff"},
+		{"high_octet_in_name", hpack.HeaderField{Name: []byte("x-\xff"), Value: []byte("1")}, "§8.2.1 excludes 0x7f-0xff"},
+		{"interior_colon_in_name", hpack.HeaderField{Name: []byte("x-forwarded-for:extra"), Value: []byte("1")}, "§8.2.1 forbids a non-leading colon"},
 		{"empty_name", hpack.HeaderField{Name: []byte(""), Value: []byte("1")}, "a field must have a name"},
-		{"leading_space_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte(" v")}, ":2521 forbids leading SP"},
-		{"trailing_space_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte("v ")}, ":2521 forbids trailing SP"},
-		{"leading_htab_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte("\tv")}, ":2521 forbids leading HTAB"},
-		{"trailing_htab_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte("v\t")}, ":2521 forbids trailing HTAB"},
+		{"leading_space_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte(" v")}, "§8.2.1 forbids leading SP"},
+		{"trailing_space_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte("v ")}, "§8.2.1 forbids trailing SP"},
+		{"leading_htab_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte("\tv")}, "§8.2.1 forbids leading HTAB"},
+		{"trailing_htab_in_value", hpack.HeaderField{Name: []byte("x-a"), Value: []byte("v\t")}, "§8.2.1 forbids trailing HTAB"},
 
-		// §8.2.2 (:2547) — the five connection-specific field names.
+		// §8.2.2 — the five connection-specific field names.
 		{"connection", hpack.HeaderField{Name: []byte("connection"), Value: []byte("close")}, "§8.2.2"},
 		{"keep_alive", hpack.HeaderField{Name: []byte("keep-alive"), Value: []byte("timeout=5")}, "§8.2.2"},
 		{"proxy_connection", hpack.HeaderField{Name: []byte("proxy-connection"), Value: []byte("close")}, "§8.2.2"},
 		{"transfer_encoding", hpack.HeaderField{Name: []byte("transfer-encoding"), Value: []byte("chunked")}, "§8.2.2"},
 		{"upgrade", hpack.HeaderField{Name: []byte("upgrade"), Value: []byte("websocket")}, "§8.2.2"},
 
-		// §8.2.2 (:2559) — TE is the one exception, and only for "trailers".
-		{"te_with_other_value", hpack.HeaderField{Name: []byte("te"), Value: []byte("gzip")}, ":2559 permits only \"trailers\""},
-		{"te_with_list", hpack.HeaderField{Name: []byte("te"), Value: []byte("trailers, deflate")}, ":2559 permits only \"trailers\""},
+		// §8.2.2 — TE is the one exception, and only for "trailers".
+		{"te_with_other_value", hpack.HeaderField{Name: []byte("te"), Value: []byte("gzip")}, "§8.2.2 permits only \"trailers\""},
+		{"te_with_list", hpack.HeaderField{Name: []byte("te"), Value: []byte("trailers, deflate")}, "§8.2.2 permits only \"trailers\""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rc := runRSTProbe(t, func(cliFr *frame.Framer) {
@@ -124,8 +124,8 @@ func TestConformance_RFC9113_Sec821_LegalFieldsAccepted(t *testing.T) {
 // TestConformance_RFC9113_Sec81_TrailerRules pins the two rules that apply only
 // to a trailer section.
 //
-//	:2411 — "Trailers MUST NOT include pseudo-header fields."
-//	:2415 — the field section that ends a message "bears an END_STREAM flag".
+//	§8.1 — "Trailers MUST NOT include pseudo-header fields."
+//	§8.1 — the field section that ends a message "bears an END_STREAM flag".
 //
 // Both are reached only on a request whose opening HEADERS left the stream open;
 // a field section arriving after END_STREAM is answered STREAM_CLOSED by §5.1

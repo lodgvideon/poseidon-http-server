@@ -8,7 +8,7 @@ import (
 
 // Inbound HTTP field validation (RFC 9110 §5.5 via RFC 9113 §8.2.1).
 //
-// RFC 9110 §5.5 (rfc9110.txt:1606):
+// RFC 9110 §5.5:
 //
 //	"Field values containing CR, LF, or NUL characters are invalid and
 //	 dangerous, due to the varying ways that implementations might parse and
@@ -24,20 +24,20 @@ import (
 // RFC 9113 §8.2.1 turns that into four checks a receiver
 // must perform, "a minimal set of validations":
 //
-//	:2508 "A field name MUST NOT contain characters in the ranges 0x00-0x20,
-//	       0x41-0x5a, or 0x7f-0xff (all ranges inclusive). This specifically
-//	       excludes all non-visible ASCII characters, ASCII SP (0x20), and
-//	       uppercase characters ('A' to 'Z', ASCII 0x41 to 0x5a)."
-//	:2513 "With the exception of pseudo-header fields (Section 8.3), which have
-//	       a name that starts with a single colon, field names MUST NOT include
-//	       a colon (ASCII COLON, 0x3a)."
-//	:2517 "A field value MUST NOT contain the zero value (ASCII NUL, 0x00), line
-//	       feed (ASCII LF, 0x0a), or carriage return (ASCII CR, 0x0d) at any
-//	       position."
-//	:2521 "A field value MUST NOT start or end with an ASCII whitespace
-//	       character (ASCII SP or HTAB, 0x20 or 0x09)."
+//	"A field name MUST NOT contain characters in the ranges 0x00-0x20,
+//	 0x41-0x5a, or 0x7f-0xff (all ranges inclusive). This specifically
+//	 excludes all non-visible ASCII characters, ASCII SP (0x20), and
+//	 uppercase characters ('A' to 'Z', ASCII 0x41 to 0x5a)."
+//	"With the exception of pseudo-header fields (Section 8.3), which have
+//	 a name that starts with a single colon, field names MUST NOT include
+//	 a colon (ASCII COLON, 0x3a)."
+//	"A field value MUST NOT contain the zero value (ASCII NUL, 0x00), line
+//	 feed (ASCII LF, 0x0a), or carriage return (ASCII CR, 0x0d) at any
+//	 position."
+//	"A field value MUST NOT start or end with an ASCII whitespace
+//	 character (ASCII SP or HTAB, 0x20 or 0x09)."
 //
-// Interior HTAB and obs-text stay legal — RFC 9110 §5.5 (rfc9110.txt:1611) says
+// Interior HTAB and obs-text stay legal — RFC 9110 §5.5 says
 // values "containing other CTL characters are also invalid; however, recipients
 // MAY retain such characters", so nothing beyond the four checks is rejected.
 
@@ -136,7 +136,7 @@ func isProhibitedField(name, value []byte, isTrailer bool) bool {
 	if isTrailer && name[0] == ':' {
 		return true
 	}
-	// §8.2.2 (:2559) — TE "MUST NOT contain any value other than 'trailers'".
+	// §8.2.2 — TE "MUST NOT contain any value other than 'trailers'".
 	// EqualFold because transfer codings are case-insensitive tokens (RFC 9110
 	// §10.1.4): a case-sensitive compare here would be the same opt-out-by-
 	// uppercasing bypass already closed for :scheme.
@@ -146,21 +146,21 @@ func isProhibitedField(name, value []byte, isTrailer bool) bool {
 	return isConnectionSpecificName(name)
 }
 
-// Request pseudo-header validation (RFC 9113 §8.3), verbatim rules:
+// Request pseudo-header validation, verbatim rules:
 //
-//	:2614 "Endpoints MUST treat a request or response that contains undefined
-//	       or invalid pseudo-header fields as malformed (Section 8.1.1)."
-//	:2619 "All pseudo-header fields MUST appear in a field block before all
-//	       regular field lines."
-//	:2624 "The same pseudo-header field name MUST NOT appear more than once in
-//	       a field block."
-//	:2690 ":authority" MUST NOT include the deprecated userinfo subcomponent
-//	       for "http" or "https" schemed URIs."
-//	:2699 "This pseudo-header field MUST NOT be empty for "http" or "https"
-//	       URIs"
-//	:2710 "All HTTP/2 requests MUST include exactly one valid value for the
-//	       ":method", ":scheme", and ":path" pseudo-header fields, unless they
-//	       are CONNECT requests (Section 8.5)."
+//	RFC 9113 §8.3 — "Endpoints MUST treat a request or response that contains
+//	 undefined or invalid pseudo-header fields as malformed (Section 8.1.1)."
+//	RFC 9113 §8.3 — "All pseudo-header fields MUST appear in a field block
+//	 before all regular field lines."
+//	RFC 9113 §8.3 — "The same pseudo-header field name MUST NOT appear more
+//	 than once in a field block."
+//	RFC 9113 §8.3.1 — ":authority" MUST NOT include the deprecated userinfo
+//	 subcomponent for "http" or "https" schemed URIs."
+//	RFC 9113 §8.3.1 — "This pseudo-header field MUST NOT be empty for "http"
+//	 or "https" URIs"
+//	RFC 9113 §8.3.1 — "All HTTP/2 requests MUST include exactly one valid
+//	 value for the ":method", ":scheme", and ":path" pseudo-header fields,
+//	 unless they are CONNECT requests (Section 8.5)."
 //
 // Before this existed the target URI was reconstructed with no validation at
 // all: a missing :authority was silently repaired with the literal "localhost"
@@ -189,8 +189,8 @@ type requestPseudoHeaders struct {
 }
 
 // scanRequestPseudoHeaders collects the pseudo-headers, enforcing the two rules
-// that depend on position and repetition (:2619, :2624) plus the
-// undefined-name rule (:2614). Reports false the moment the block is malformed.
+// that depend on position and repetition (RFC 9113 §8.3) plus the
+// undefined-name rule (also §8.3). Reports false the moment the block is malformed.
 func scanRequestPseudoHeaders(fields []hpack.HeaderField) (requestPseudoHeaders, bool) {
 	var ph requestPseudoHeaders
 	seenRegular := false
@@ -238,20 +238,20 @@ func validRequestPseudoHeaders(fields []hpack.HeaderField) bool {
 	if !ok {
 		return false
 	}
-	// :2710 — :method is mandatory for every request, CONNECT included.
+	// §8.3.1 — :method is mandatory for every request, CONNECT included.
 	if ph.method == nil {
 		return false
 	}
-	// EqualFold, not Equal: RFC 9110 §4.2.3 (rfc9110.txt:1179) — "The scheme and
+	// EqualFold, not Equal: RFC 9110 §4.2.3 — "The scheme and
 	// host are case-insensitive and normally provided in lowercase". "HTTPS" is
 	// the same scheme as "https", so a case-sensitive comparison would let a
 	// client opt out of every rule below by uppercasing one header value.
 	httpScheme := bytes.EqualFold(ph.scheme, schemeHTTP) || bytes.EqualFold(ph.scheme, schemeHTTPS)
-	// :2690 — userinfo is forbidden in :authority for http/https URIs.
+	// §8.3.1 — userinfo is forbidden in :authority for http/https URIs.
 	if httpScheme && bytes.IndexByte(ph.authority, '@') >= 0 {
 		return false
 	}
-	// :2710 — the mandatory-:scheme/:path rule exempts CONNECT, which omits
+	// §8.3.1 — the mandatory-:scheme/:path rule exempts CONNECT, which omits
 	// both (§8.5).
 	if bytes.Equal(ph.method, methodCONNECT) { // methods ARE case-sensitive (§9.1)
 		return true
@@ -259,8 +259,8 @@ func validRequestPseudoHeaders(fields []hpack.HeaderField) bool {
 	if ph.scheme == nil || !ph.seenPath {
 		return false
 	}
-	// :2699 — :path MUST NOT be empty for http/https URIs. Other schemes are
-	// out of that sentence's scope (:2643 — ":scheme" is not restricted to
+	// §8.3.1 — :path MUST NOT be empty for http/https URIs. Other schemes are
+	// out of that sentence's scope (§8.3.1 — ":scheme" is not restricted to
 	// "http" and "https"), so the emptiness rule is not extended to them.
 	return !httpScheme || len(ph.path) > 0
 }

@@ -2,7 +2,7 @@ package grpcserver
 
 // Percent-encoding for the grpc-message trailer.
 //
-// RFC 9110 §2.2 (rfc9110.txt:572): "A sender MUST NOT generate protocol
+// RFC 9110 §2.2: "A sender MUST NOT generate protocol
 // elements that do not match the grammar defined by the corresponding ABNF
 // rules." The grammar is supplied by the gRPC-over-HTTP/2 spec
 // (doc/PROTOCOL-HTTP2.md):

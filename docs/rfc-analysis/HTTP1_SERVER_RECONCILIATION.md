@@ -75,7 +75,7 @@ That last row is a request-smuggling primitive, not a paperwork failure.
 `TestTransport_H2C_Upgrade_Fallback` both send a *brand-new* `HEADERS` on
 stream 1 after the 101. A conformant client cannot do that — stream 1 is already
 assigned to the upgrading request and is half-closed from the client side
-(RFC 7540 §3.2, `rfc7540.txt:487-492`). The tests encode the same wrong model as
+(RFC 7540 §3.2). The tests encode the same wrong model as
 the code, so they are green.
 
 #### 5 whys

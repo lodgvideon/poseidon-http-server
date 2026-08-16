@@ -600,7 +600,7 @@ func (s *Server) dispatchAndClose(ctx context.Context, stream *conn.ServerStream
 func (s *Server) buildRequest(headers []hpack.HeaderField, streamID uint32) *Request {
 	req := &Request{Headers: headers, streamID: streamID}
 	// hostField is the fallback source for the target URI's authority. RFC 9110
-	// §7.2 (rfc9110.txt:2426): "A user agent MUST generate a Host header field
+	// §7.2: "A user agent MUST generate a Host header field
 	// in a request unless it sends that information as an ":authority"
 	// pseudo-header field" — so a request carrying only Host is legal and its
 	// authority must come from there. RFC 9113 §8.3.1 fixes
@@ -961,7 +961,7 @@ func selectLeaf(cfg *tls.Config) *x509.Certificate {
 
 // misdirectedRequest reports whether the request must be answered with 421.
 //
-// RFC 9110 §7.4 (rfc9110.txt:2510): "Unless the connection is from a trusted
+// RFC 9110 §7.4: "Unless the connection is from a trusted
 // gateway, an origin server MUST reject a request if any scheme-specific
 // requirements for the target URI are not met. In particular, a request for an
 // "https" resource MUST be rejected unless it has been received over a
@@ -985,7 +985,7 @@ func selectLeaf(cfg *tls.Config) *x509.Certificate {
 // client may coalesce connections and reuse one for any origin the certificate
 // covers, which SNI-matching would wrongly reject.
 func misdirectedRequest(req *Request, leaf *x509.Certificate) bool {
-	// EqualFold: RFC 9110 §4.2.3 (rfc9110.txt:1179) — "The scheme and host are
+	// EqualFold: RFC 9110 §4.2.3 — "The scheme and host are
 	// case-insensitive". A byte comparison here would let a client disable the
 	// whole check by sending ":scheme: HTTPS", which net/url then lowercases
 	// downstream so the handler sees an ordinary https request.

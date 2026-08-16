@@ -9,22 +9,24 @@ import (
 
 // Conformance tests for the grpc-status / grpc-message trailers.
 //
-// The binding MUST is RFC 9110 §2.2 (rfc9110.txt:572):
+// The binding MUST is RFC 9110 §2.2:
 //
 //	"A sender MUST NOT generate protocol elements that do not match the
 //	 grammar defined by the corresponding ABNF rules."
 //
 // The grammar for these trailers comes from the gRPC-over-HTTP/2 spec
-// (grpc/grpc doc/PROTOCOL-HTTP2.md, fetched from raw.githubusercontent.com):
+// (grpc/grpc doc/PROTOCOL-HTTP2.md, the "Responses" section). That file is not
+// in this repository and its line numbers move as it is edited, so the
+// production names below are the locator, not an offset:
 //
-//	Status-Message         -> "grpc-message" Percent-Encoded          (:112)
-//	Percent-Encoded        -> 1*(Percent-Byte-Unencoded / Percent-Byte-Encoded)  (:114)
-//	Percent-Byte-Unencoded -> 1*( %x20-%x24 / %x26-%x7E ) ; space and VCHAR, except %  (:115)
-//	Percent-Byte-Encoded   -> "%" 2HEXDIGIT ; 0-9 A-F                 (:116)
+//	Status-Message         -> "grpc-message" Percent-Encoded
+//	Percent-Encoded        -> 1*(Percent-Byte-Unencoded / Percent-Byte-Encoded)
+//	Percent-Byte-Unencoded -> 1*( %x20-%x24 / %x26-%x7E ) ; space and VCHAR, except %
+//	Percent-Byte-Encoded   -> "%" 2HEXDIGIT ; 0-9 A-F
 //
 //	"The value portion of Status-Message is conceptually a Unicode string
 //	 description of the error, physically encoded as UTF-8 followed by
-//	 percent-encoding."                                                (:130)
+//	 percent-encoding."
 //
 // This matters beyond pedantry: the message is built from attacker-controlled
 // input -- Statusf(Unimplemented, "unknown method %s", req.Path) interpolates

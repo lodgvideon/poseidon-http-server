@@ -17,7 +17,7 @@ import (
 //	 and valid set of header fields ... it MUST respond on the promised stream
 //	 with a stream error (Section 5.4.2) of type PROTOCOL_ERROR."
 //
-// RFC 9110 §4.2.1 (rfc9110.txt:1106) / §4.2.2 (:1135):
+// RFC 9110 §4.2.1 / §4.2.2:
 //
 //	"A sender MUST NOT generate an "http" URI with an empty host identifier."
 //
@@ -36,7 +36,7 @@ func pseudoValue(fields []hpack.HeaderField, name string) (string, int) {
 	return value, count
 }
 
-// TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority pins :2812. The
+// TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority pins RFC 9113 §8.4.1. The
 // promised request belongs to the same origin as the request that triggered it,
 // so its authority is the originating request's.
 func TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority(t *testing.T) {
@@ -66,7 +66,7 @@ func TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority(t *testing.T) {
 }
 
 // TestConformance_RFC9113_Sec84_PushPromiseCallerAuthorityWins guards against
-// emitting the pseudo-header twice, which RFC 9113 §8.3 (:2624) makes malformed
+// emitting the pseudo-header twice, which RFC 9113 §8.3 makes malformed
 // on its own.
 func TestConformance_RFC9113_Sec84_PushPromiseCallerAuthorityWins(t *testing.T) {
 	t.Parallel()

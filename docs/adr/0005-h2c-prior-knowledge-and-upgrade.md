@@ -73,18 +73,18 @@ Corrected, with a `TestConformance_*` test per rule (see
 [docs/RFC_COVERAGE.md](../RFC_COVERAGE.md)):
 
 - **`Upgrade: h2` is no longer honoured.** *"A server MUST ignore an "h2" token
-  in an Upgrade header field"* (`rfc7540.txt:464`). The original text of this
+  in an Upgrade header field"* (RFC 7540 §3.2). The original text of this
   ADR promoted that violation to a documented feature; that sentence is
   withdrawn. `h2` over TLS is negotiated by ALPN and nothing else.
 - **`HTTP2-Settings` is now required and validated** — exactly one field, whose
   value must be base64url decoding to a well-formed SETTINGS payload. *"A server
   MUST NOT upgrade the connection to HTTP/2 if this header field is not present
-  or if more than one is present"* (`rfc7540.txt:511`).
+  or if more than one is present"* (RFC 7540 §3.2.1).
 - **The upgrading request now receives a response.** It is seeded onto stream 1
   in the half-closed (remote) state via the new `conn.UpgradedRequest` option,
   because *"These frames MUST include a response to the request that initiated
-  the upgrade"* (`rfc7540.txt:471`) and *"stream 1 is used for the response"*
-  (`rfc7540.txt:492`). Registering stream 1 also makes the client's next stream
+  the upgrade"* (RFC 7540 §3.2) and *"stream 1 is used for the response"*
+  (RFC 7540 §3.2). Registering stream 1 also makes the client's next stream
   3 for free. Previously the parsed request was discarded and a conformant
   client hung forever.
 - **HTTP/1.0 requests no longer upgrade.** RFC 9110 §7.8 requires the Upgrade

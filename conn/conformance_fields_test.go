@@ -14,7 +14,7 @@ import (
 //
 // Governing text, copied verbatim from the sources fetched from rfc-editor.org:
 //
-//	RFC 9110 §5.5 (rfc9110.txt:1606) — "Field values containing CR, LF, or NUL
+//	RFC 9110 §5.5 — "Field values containing CR, LF, or NUL
 //	characters are invalid and dangerous, due to the varying ways that
 //	implementations might parse and interpret those characters; a recipient of
 //	CR, LF, or NUL within a field value MUST either reject the message or
@@ -127,7 +127,7 @@ func runRSTProbe(t *testing.T, attack func(cliFr *frame.Framer)) fieldRSTCapture
 }
 
 // TestConformance_RFC9110_Sec55_FieldValueCRLFNUL_StreamError pins
-// rfc9110.txt:1606 together with the reaction mandated by RFC 9113 §8.1.1.
+// RFC 9110 §5.5 together with the reaction mandated by RFC 9113 §8.1.1.
 //
 // A field value carrying CR, LF, or NUL must not reach the handler. Left
 // unvalidated it is a header-injection primitive: the value is copied verbatim
@@ -175,7 +175,7 @@ func TestConformance_RFC9110_Sec55_FieldValueCRLFNUL_StreamError(t *testing.T) {
 // direction: ordinary values, including obs-text and other CTLs which the RFC
 // explicitly permits a recipient to retain, must NOT be rejected.
 //
-//	rfc9110.txt:1611 — "Field values containing other CTL characters are also
+//	RFC 9110 §5.5 — "Field values containing other CTL characters are also
 //	invalid; however, recipients MAY retain such characters"
 func TestConformance_RFC9110_Sec55_CleanFieldValueAccepted(t *testing.T) {
 	headers := []hpack.HeaderField{

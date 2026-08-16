@@ -1148,7 +1148,7 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 			return err
 		}
 	}
-	// §6.5.3 (:1858): "Once all values have been processed, the recipient MUST
+	// §6.5.3: "Once all values have been processed, the recipient MUST
 	// immediately emit a SETTINGS frame with the ACK flag set." Every non-ACK
 	// SETTINGS in the handshake window gets its own acknowledgement; the caller
 	// used to send exactly one however many arrived. Safe without wmu: this runs
