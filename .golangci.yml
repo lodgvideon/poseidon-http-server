@@ -141,6 +141,28 @@ linters:
           - exhaustive     # test switches need not enumerate every frame type
           - makezero       # fuzz/test buffers are deliberately pre-sized
 
+# ─── Formatting gate ───
+# In golangci-lint v2 the formatters are NOT valid `linters.enable` entries —
+# they live in this top-level `formatters:` section, and `golangci-lint run`
+# reports an unformatted file as an issue (exit 1) without rewriting it.
+# Verified against the pinned v2.3.0 (`golangci-lint formatters`).
+#
+# Without this block the repo had no automated answer to "is this gofmt-clean":
+# `make lint` is `go vet` + `golangci-lint run`, and neither checks formatting,
+# so 15 files drifted unformatted while every gate stayed green.
+#
+# Scope caveat, measured against v2.3.0 rather than assumed: the path list in
+# `linters.exclusions.paths` (examples, loadtest) is applied GLOBALLY to every
+# issue, formatter issues included — so those two trees are outside this gate.
+# Verified by removing `examples` from that list, at which point gofmt/errcheck
+# both began reporting examples/tls-server/main.go. Un-excluding them here is not
+# possible without also subjecting them to the full strict linter set, which the
+# comment above deliberately opted out of. The follow-up style commit still
+# gofmt's those trees; they are simply not gated against future drift.
+formatters:
+  enable:
+    - gofmt
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
