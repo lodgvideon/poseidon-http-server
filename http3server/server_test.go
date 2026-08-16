@@ -54,12 +54,18 @@ func testCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 // pool trusting its certificate.
 func serveTest(ctx context.Context, t *testing.T, h http.Handler) (addr string, pool *x509.CertPool) {
 	t.Helper()
+	return serveTestServer(ctx, t, &Server{Handler: h})
+}
+
+// serveTestServer starts srv on the loopback with a fresh self-signed certificate
+// and returns its address and a pool trusting it. The listener is built from
+// srv.transportParams(), the same call ListenAndServe makes, so a test peer meets
+// the parameters production advertises — including max_idle_timeout (#168).
+func serveTestServer(ctx context.Context, t *testing.T, srv *Server) (addr string, pool *x509.CertPool) {
+	t.Helper()
 	cert, pool := testCert(t)
-	srv := &Server{Handler: h, TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}}}
-	l, err := quic.Listen("127.0.0.1:0", srv.TLSConfig, quic.ServerTransportParams{
-		MaxStreamsBidi: maxStreamsBidi,
-		MaxStreamsUni:  maxStreamsUni,
-	})
+	srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	l, err := quic.Listen("127.0.0.1:0", srv.TLSConfig, srv.transportParams())
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

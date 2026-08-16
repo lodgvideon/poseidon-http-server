@@ -42,6 +42,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-client/http3"
@@ -58,6 +59,13 @@ const (
 	maxStreamsUni   uint64 = 4   // client control + QPACK encoder/decoder, with slack
 )
 
+// defaultIdleTimeout is the QUIC max_idle_timeout this server advertises when
+// Server.IdleTimeout is zero. It matches server.defaultIdleTimeout, this repo's
+// secure default for the HTTP/2 server, and RFC 4787's REQ-5 — quoted by RFC 9000
+// §10.1.2 as recommending "a 2-minute timeout interval" for UDP NAT mappings, past
+// which the path is likely gone regardless of what either endpoint keeps in memory.
+const defaultIdleTimeout = 120 * time.Second
+
 // Server serves HTTP/3 requests to Handler.
 type Server struct {
 	// Handler answers requests. A nil Handler serves http.DefaultServeMux.
@@ -65,15 +73,66 @@ type Server struct {
 	// TLSConfig must carry the server's certificate(s). ALPN "h3" is filled in
 	// when NextProtos is unset.
 	TLSConfig *tls.Config
+
+	// IdleTimeout is the QUIC max_idle_timeout this server advertises (RFC 9000
+	// §18.2, §10.1): after this long with no packet received, the connection is
+	// silently closed and its state discarded.
+	//
+	//   0  => secure default (defaultIdleTimeout)
+	//   <0 => advertise none (the parameter is omitted)
+	//   >0 => explicit timeout
+	//
+	// The effective timeout is the minimum of the two advertised values (§10.1),
+	// so this is a ceiling, not a floor: a peer asking for less gets less.
+	//
+	// <0 is the pre-#168 behaviour and is unsafe on an open network — with a peer
+	// that also advertises none, §10.1 leaves the idle timeout disabled entirely
+	// and one handshake buys an attacker a connection this package will never
+	// reap. It exists for closed deployments that keep connections alive by other
+	// means.
+	IdleTimeout time.Duration
+}
+
+// transportParams are the QUIC transport parameters this server advertises. Every
+// path that builds a listener for a Server must use it, so no caller can quietly
+// drop max_idle_timeout the way ListenAndServe did before #168.
+func (s *Server) transportParams() quic.ServerTransportParams {
+	return quic.ServerTransportParams{
+		MaxStreamsBidi: maxStreamsBidi,
+		MaxStreamsUni:  maxStreamsUni,
+		MaxIdleTimeout: s.idleTimeoutMillis(),
+	}
+}
+
+// idleTimeoutMillis renders IdleTimeout as the millisecond integer the transport
+// parameter carries: "The maximum idle timeout is a value in milliseconds that is
+// encoded as an integer" (RFC 9000 §18.2).
+//
+// Zero is not a small timeout but the absence of one — "Idle timeout is disabled
+// when both endpoints omit this transport parameter or specify a value of 0" (§18.2)
+// — so a positive IdleTimeout below a millisecond is raised to 1ms rather than
+// rounded down into that hole. The transport floors the effective period at three
+// PTOs anyway (RFC 9000 §10.1: "endpoints MUST increase the idle timeout period to
+// be at least three times the current Probe Timeout"), so the clamp cannot produce a
+// connection that closes under loss recovery.
+func (s *Server) idleTimeoutMillis() uint64 {
+	d := s.IdleTimeout
+	switch {
+	case d < 0:
+		return 0 // advertise none
+	case d == 0:
+		d = defaultIdleTimeout
+	}
+	if ms := d.Milliseconds(); ms > 0 {
+		return uint64(ms)
+	}
+	return 1
 }
 
 // ListenAndServe listens on addr ("host:port") and serves HTTP/3 until ctx is
 // cancelled or the listener fails.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
-	l, err := quic.Listen(addr, s.TLSConfig, quic.ServerTransportParams{
-		MaxStreamsBidi: maxStreamsBidi,
-		MaxStreamsUni:  maxStreamsUni,
-	})
+	l, err := quic.Listen(addr, s.TLSConfig, s.transportParams())
 	if err != nil {
 		return err
 	}
@@ -82,6 +141,12 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 }
 
 // Serve accepts connections from l and serves each until ctx is cancelled.
+//
+// l carries the transport parameters it was built with, so IdleTimeout takes
+// effect only when the caller built l from transportParams, as ListenAndServe
+// does. A listener assembled by hand without max_idle_timeout advertises none
+// whatever IdleTimeout says, and RFC 9000 §18.2 then leaves the idle timeout
+// disabled against a peer that also advertises none (issue #168).
 func (s *Server) Serve(ctx context.Context, l *quic.Listener) error {
 	for {
 		c, err := l.Accept(ctx)
@@ -261,8 +326,8 @@ func readRequestStream(ctx context.Context, rs *quic.Stream) ([]byte, error) {
 }
 
 // connFrameError reports a frame whose receipt is a CONNECTION error rather than a
-// stream error (RFC 9114 §8): the offending frame type, and the §8.1 code the
-// connection must be closed with.
+// stream error (RFC 9114 §8): the offending frame type, the §8.1 code the
+// connection must be closed with, and the rule it broke.
 //
 // It exists so decodeRequest can stay a pure function of the peer's bytes — it is
 // the package's top untrusted surface and has a fuzz target — while still reaching
@@ -271,16 +336,33 @@ func readRequestStream(ctx context.Context, rs *quic.Stream) ([]byte, error) {
 type connFrameError struct {
 	typ  uint64 // the frame type that is not permitted here
 	code uint64 // the HTTP/3 error code to close the connection with (§8.1)
+	why  string // the rule broken, for the error string only
 }
 
 func (e *connFrameError) Error() string {
-	return "http3server: frame type " + strconv.FormatUint(e.typ, 16) +
-		" is not permitted on a request stream (RFC 9114 §7.2)"
+	return "http3server: frame type " + strconv.FormatUint(e.typ, 16) + " " + e.why
 }
 
-// decodeRequest turns a request stream's frames into an http.Request: one HEADERS
-// frame carrying the QPACK field section, then any DATA frames carrying the body
-// (RFC 9114 §4.1).
+// decodeRequest turns a request stream's frames into an http.Request. RFC 9114 §4.1
+// fixes the sequence: "An HTTP message (request or response) consists of: 1. the
+// header section ... sent as a single HEADERS frame, 2. optionally, the content, if
+// present, sent as a series of DATA frames, and 3. optionally, the trailer section,
+// if present, sent as a single HEADERS frame."
+//
+// The same section makes a departure from that order a connection error, and names
+// the three cases: "Receipt of an invalid sequence of frames MUST be treated as a
+// connection error of type H3_FRAME_UNEXPECTED. In particular, a DATA frame before
+// any HEADERS frame, or a HEADERS or DATA frame after the trailing HEADERS frame, is
+// considered invalid." All three are rejected below, before any of the message
+// reaches a handler.
+//
+// The last of them is the one with teeth. Bytes a peer places after the trailer
+// section are not content: an intermediary that parses the stream conformantly ends
+// the body at the trailers, so folding them in would leave that intermediary and this
+// server disagreeing about where the message ends — a request-smuggling differential
+// (issue #167), not a conformance nit. Rejecting is also why the whole message is
+// refused rather than truncated at the trailers: a handler must not be able to
+// observe part of a message as if it were the whole of one.
 //
 // A *connFrameError return means the frame sequence is a connection error, not a
 // malformed request: the caller must close the connection with its code rather than
@@ -291,9 +373,10 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 	fr.Feed(stream)
 
 	var (
-		fields []hpack.HeaderField
-		body   []byte
-		seen   bool
+		fields   []hpack.HeaderField
+		body     []byte
+		seen     bool // the header section has arrived
+		trailers bool // the trailing HEADERS frame has arrived; nothing may follow it
 	)
 	for {
 		typ, payload, err := fr.ReadFrame()
@@ -305,14 +388,34 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 		}
 		switch typ {
 		case http3.FrameHeaders:
+			if trailers {
+				// §4.1: "a HEADERS or DATA frame after the trailing HEADERS frame".
+				// A message carries at most two field sections — header and trailer —
+				// so a third HEADERS frame has no place in the sequence.
+				return nil, &connFrameError{
+					typ:  typ,
+					code: http3.H3FrameUnexpected,
+					why:  "arrived after the trailing HEADERS frame (RFC 9114 §4.1)",
+				}
+			}
 			if seen {
-				continue // trailers: not surfaced
+				trailers = true
+				continue // the trailer section: read for its position, not surfaced
 			}
 			seen = true
 			if fields, err = decodeFields(payload); err != nil {
 				return nil, err
 			}
 		case http3.FrameData:
+			if !seen || trailers {
+				// §4.1: "a DATA frame before any HEADERS frame, or a HEADERS or DATA
+				// frame after the trailing HEADERS frame, is considered invalid."
+				return nil, &connFrameError{
+					typ:  typ,
+					code: http3.H3FrameUnexpected,
+					why:  "arrived outside the message content (RFC 9114 §4.1)",
+				}
+			}
 			body = append(body, payload...)
 		case http3.FrameSettings, http3.FrameCancelPush, http3.FrameMaxPushID, http3.FramePushPromise,
 			0x02, 0x06, 0x08, 0x09:
@@ -329,7 +432,11 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 			// stream as a connection error of type H3_FRAME_UNEXPECTED" — and this
 			// is the server. Killing a connection the RFC does not say to kill is
 			// the failure mode this switch exists to avoid in the other direction.
-			return nil, &connFrameError{typ: typ, code: http3.H3FrameUnexpected}
+			return nil, &connFrameError{
+				typ:  typ,
+				code: http3.H3FrameUnexpected,
+				why:  "is not permitted on a request stream (RFC 9114 §7.2)",
+			}
 		default:
 			// Genuinely unknown types and the GREASE types of §7.2.8 (0x1f*N + 0x21)
 			// are ignored, which §4.1 requires and an interop suite checks: "Frames
