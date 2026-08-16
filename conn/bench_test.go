@@ -223,6 +223,42 @@ func BenchmarkOnDataReceived(b *testing.B) {
 // Helpers: create a real ServerConn over net.Pipe
 // ---------------------------------------------------------------------------
 
+// benchCreditPing is the opaque payload of the barrier PING below. Its only job
+// is to be recognisable in a packet capture.
+var benchCreditPing = [8]byte{'b', 'e', 'n', 'c', 'h', 'c', 'r', 'd'}
+
+// benchCreditProbe is a client-side frame.Handler that records the arrival of
+// the barrier PING's ACK. ReadFrame dispatches synchronously on the calling
+// goroutine, so the plain bool needs no synchronisation.
+type benchCreditProbe struct{ acked bool }
+
+func (p *benchCreditProbe) OnPing(fh frame.FrameHeader, _ [8]byte) error {
+	if fh.Flags&frame.FlagPingAck != 0 {
+		p.acked = true
+	}
+	return nil
+}
+
+func (p *benchCreditProbe) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+func (p *benchCreditProbe) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
+	return nil
+}
+func (p *benchCreditProbe) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+func (p *benchCreditProbe) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
+func (p *benchCreditProbe) OnSettings(frame.FrameHeader, frame.SettingsParams) error {
+	return nil
+}
+func (p *benchCreditProbe) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (p *benchCreditProbe) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (p *benchCreditProbe) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
+func (p *benchCreditProbe) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
+func (p *benchCreditProbe) OnOrigin(frame.FrameHeader, []string) error                { return nil }
+func (p *benchCreditProbe) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
+
 func benchmarkServerConn(b *testing.B) *ServerConn {
 	// Use TCP loopback instead of net.Pipe to avoid synchronous deadlocks.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -271,23 +307,43 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 	// hence before every caller's b.ResetTimer.
 	drain := make([]byte, 1<<20)
 
+	// Closed once the server has demonstrably applied the two WINDOW_UPDATEs
+	// below; see the barrier at the end of the client goroutine.
+	credited := make(chan struct{})
+
 	go func() {
 		defer clientConn.Close()
 
+		// Every frame below is load-bearing for the benchmark that follows, so
+		// report rather than drop a write error: an unreported failure here
+		// resurfaces later as an unrelated-looking error inside the code under
+		// test. b.Error is legal from a non-benchmark goroutine; b.Fatal is not.
+		fail := func(what string, err error) {
+			b.Errorf("bench harness client: %s: %v", what, err)
+		}
+
 		// Send client preface.
-		clientConn.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
+		if _, err := clientConn.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")); err != nil {
+			fail("write preface", err)
+			return
+		}
 
-		// Send client SETTINGS (empty).
+		// Send client SETTINGS (empty) and immediately ACK the server's. The
+		// server's OnSettings returns nil for an ACK without matching it against
+		// an outstanding SETTINGS (conn/server_handler.go), so the ACK need not
+		// wait for the server's SETTINGS to arrive — which lets every byte the
+		// server sends be consumed by the framer below, in frame alignment. The
+		// raw 4096-byte Read this replaces could split a frame and leave any
+		// later parse misaligned.
 		fr := frame.NewFramer(clientConn, clientConn)
-		fr.WriteSettings(frame.SettingsParams{N: 0})
-
-		// Read server SETTINGS + SETTINGS ACK.
-		buf := make([]byte, 4096)
-		clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		clientConn.Read(buf)
-
-		// Send SETTINGS ACK.
-		fr.WriteSettingsAck()
+		if err := fr.WriteSettings(frame.SettingsParams{N: 0}); err != nil {
+			fail("write SETTINGS", err)
+			return
+		}
+		if err := fr.WriteSettingsAck(); err != nil {
+			fail("write SETTINGS ACK", err)
+			return
+		}
 
 		// Send HEADERS to open stream 1.
 		enc := hpack.NewEncoder()
@@ -298,16 +354,56 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 			{Name: []byte("content-type"), Value: []byte("application/grpc")},
 		}
 		block := enc.EncodeBlock(nil, hf)
-		fr.WriteHeaders(frame.WriteHeadersParams{
+		if err := fr.WriteHeaders(frame.WriteHeadersParams{
 			StreamID:      1,
 			BlockFragment: block,
 			EndHeaders:    true,
 			EndStream:     false,
-		})
+		}); err != nil {
+			fail("write HEADERS", err)
+			return
+		}
 
 		// Send WINDOW_UPDATE for stream + connection so server can write.
-		fr.WriteWindowUpdate(0, 1<<30) // 1GB window
-		fr.WriteWindowUpdate(1, 1<<30)
+		if err := fr.WriteWindowUpdate(0, 1<<30); err != nil { // 1GB window
+			fail("write connection WINDOW_UPDATE", err)
+			return
+		}
+		if err := fr.WriteWindowUpdate(1, 1<<30); err != nil {
+			fail("write stream WINDOW_UPDATE", err)
+			return
+		}
+
+		// Credit barrier. AcceptStream returns as soon as the HEADERS above is
+		// decoded, which says nothing about the two WINDOW_UPDATEs written after
+		// it — so without this the benchmark loop could start against the 65535
+		// a connection begins with rather than 65535+2^30, and measure its first
+		// iterations under a flow-control state the rest of the run does not
+		// share. Measured before this barrier existed, 497 of 600 runs started
+		// with at least one window still at 65535.
+		//
+		// The server processes frames in receipt order on its single reader
+		// goroutine, so an ACK for a PING written after the WINDOW_UPDATEs proves
+		// both have already been applied. Everything here — including whatever
+		// the framer allocates while parsing — completes before the helper
+		// returns, hence before any caller's b.ResetTimer (see #99 on why the
+		// process-wide allocation counter makes that ordering matter).
+		if err := fr.WritePing(false, benchCreditPing); err != nil {
+			fail("write barrier PING", err)
+			return
+		}
+		if err := clientConn.SetReadDeadline(time.Now().Add(benchSetupTimeout)); err != nil {
+			fail("set handshake read deadline", err)
+			return
+		}
+		probe := &benchCreditProbe{}
+		for !probe.acked {
+			if _, err := fr.ReadFrame(context.Background(), probe); err != nil {
+				fail("read frame awaiting barrier PING ACK", err)
+				return
+			}
+		}
+		close(credited)
 
 		// Keep reading to drain server output.
 		clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -319,11 +415,27 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 		}
 	}()
 
+	var sc *ServerConn
 	select {
-	case sc := <-scCh:
-		return sc
-	case <-time.After(3 * time.Second):
+	case sc = <-scCh:
+	case <-time.After(benchSetupTimeout):
 		b.Fatal("timeout waiting for ServerConn")
 		return nil
 	}
+
+	// The helper's postcondition is "stream open AND credit granted", not just
+	// "stream open": waiting only on scCh returns while the WINDOW_UPDATEs are
+	// still in flight.
+	select {
+	case <-credited:
+	case <-time.After(benchSetupTimeout):
+		b.Fatal("timeout waiting for the harness WINDOW_UPDATEs to be applied")
+		return nil
+	}
+	return sc
 }
+
+// benchSetupTimeout bounds each step of the harness handshake. It is a function
+// of loopback round-trip latency (sub-millisecond here), not of -benchtime: no
+// part of the setup it guards scales with the benchmark's iteration count.
+const benchSetupTimeout = 5 * time.Second
