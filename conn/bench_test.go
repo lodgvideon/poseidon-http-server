@@ -59,6 +59,21 @@ func BenchmarkWriteServerData_Small(b *testing.B) {
 		if err := sc.writeServerData(context.Background(), stream, payload, false); err != nil {
 			b.Fatal(err)
 		}
+		// Refund windows to avoid exhaustion, as the two siblings below do.
+		// A seeded send window is a budget, not a watermark: RFC 9113 §6.9.1
+		// replenishes it only from the peer's WINDOW_UPDATE, and the harness
+		// client sends exactly two, both before this loop starts. Unrefunded,
+		// 100 octets per iteration exhausts the 65535+2^30 it grants at
+		// b.N = 10738074, where writeServerData blocks forever in
+		// acquireSendCredits' fcOutCond.Wait — the context is Background, so
+		// there is no cancellation to break it, and `go test -timeout` does not
+		// cover benchmarks (testing.M.Run stops the alarm before runBenchmarks).
+		sc.fcOutMu.Lock()
+		sc.peerConnSendWindow += 100
+		stream.mu.Lock()
+		stream.sendWindow += 100
+		stream.mu.Unlock()
+		sc.fcOutMu.Unlock()
 	}
 }
 
