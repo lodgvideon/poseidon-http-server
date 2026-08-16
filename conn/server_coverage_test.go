@@ -396,7 +396,7 @@ func (w *windowUpdateCapture) OnWindowUpdate(_ frame.FrameHeader, inc uint32) er
 }
 func (w *windowUpdateCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
 
-func (w *windowUpdateCapture) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (w *windowUpdateCapture) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (w *windowUpdateCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 // TestServerConn_Ping_CancelledContext verifies that Ping returns an error

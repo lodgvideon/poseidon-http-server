@@ -338,6 +338,7 @@ func readResponseHeaders(cliFr *frame.Framer) ([]hpack.HeaderField, error) {
 
 // headerValue finds a header by name.
 // statusValue extracts :status from headers.
+//
 //nolint:unparam
 func statusValue(headers []hpack.HeaderField) string {
 	for _, h := range headers {
@@ -351,18 +352,22 @@ func statusValue(headers []hpack.HeaderField) string {
 // noopHandler absorbs all frames.
 type noopHandler struct{}
 
-func (h *noopHandler) OnData(frame.FrameHeader, []byte, uint8) error                                { return nil }
-func (h *noopHandler) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error { return nil }
-func (h *noopHandler) OnPriority(frame.FrameHeader, frame.Priority) error                           { return nil }
-func (h *noopHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error                           { return nil }
-func (h *noopHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error                     { return nil }
-func (h *noopHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error      { return nil }
-func (h *noopHandler) OnPing(frame.FrameHeader, [8]byte) error                                      { return nil }
-func (h *noopHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error              { return nil }
-func (h *noopHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                               { return nil }
-func (h *noopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error                    { return nil }
+func (h *noopHandler) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+func (h *noopHandler) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
+	return nil
+}
+func (h *noopHandler) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (h *noopHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
+func (h *noopHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
+func (h *noopHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (h *noopHandler) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
+func (h *noopHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+func (h *noopHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+func (h *noopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 
-func (h *noopHandler) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (h *noopHandler) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (h *noopHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 // testDecoders keeps one HPACK decoder per connection, keyed by its Framer.
@@ -389,7 +394,7 @@ type headerCapture struct {
 	dec     *hpack.Decoder
 }
 
-func (h *headerCapture) OnData(frame.FrameHeader, []byte, uint8) error                                { return nil }
+func (h *headerCapture) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
 func (h *headerCapture) OnHeaders(_ frame.FrameHeader, hb frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
 	dec := h.dec
 	if dec == nil {
@@ -413,16 +418,18 @@ func (h *headerCapture) OnHeaders(_ frame.FrameHeader, hb frame.HeaderBlock, _ *
 	h.headers = result
 	return nil
 }
-func (h *headerCapture) OnPriority(frame.FrameHeader, frame.Priority) error                      { return nil }
-func (h *headerCapture) OnRSTStream(frame.FrameHeader, frame.ErrCode) error                      { return nil }
-func (h *headerCapture) OnSettings(frame.FrameHeader, frame.SettingsParams) error                { return nil }
-func (h *headerCapture) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error { return nil }
-func (h *headerCapture) OnPing(frame.FrameHeader, [8]byte) error                                 { return nil }
-func (h *headerCapture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error         { return nil }
-func (h *headerCapture) OnWindowUpdate(frame.FrameHeader, uint32) error                          { return nil }
-func (h *headerCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error               { return nil }
+func (h *headerCapture) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (h *headerCapture) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
+func (h *headerCapture) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
+func (h *headerCapture) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (h *headerCapture) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
+func (h *headerCapture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+func (h *headerCapture) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+func (h *headerCapture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 
-func (h *headerCapture) OnOrigin(frame.FrameHeader, []string) error { return nil }
+func (h *headerCapture) OnOrigin(frame.FrameHeader, []string) error            { return nil }
 func (h *headerCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 // TestServer_ServeStream_BodyData covers the EventData path in serveStream.

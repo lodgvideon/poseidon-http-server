@@ -295,13 +295,15 @@ func (h *h2Capture) OnHeaders(_ frame.FrameHeader, hb frame.HeaderBlock, _ *fram
 	return nil
 }
 
-func (h *h2Capture) OnPriority(frame.FrameHeader, frame.Priority) error                      { return nil }
-func (h *h2Capture) OnRSTStream(frame.FrameHeader, frame.ErrCode) error                      { return nil }
-func (h *h2Capture) OnSettings(frame.FrameHeader, frame.SettingsParams) error                { return nil }
-func (h *h2Capture) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error { return nil }
-func (h *h2Capture) OnPing(frame.FrameHeader, [8]byte) error                                 { return nil }
-func (h *h2Capture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error         { return nil }
-func (h *h2Capture) OnWindowUpdate(frame.FrameHeader, uint32) error                          { return nil }
-func (h *h2Capture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error               { return nil }
-func (h *h2Capture) OnOrigin(frame.FrameHeader, []string) error                              { return nil }
-func (h *h2Capture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error                   { return nil }
+func (h *h2Capture) OnPriority(frame.FrameHeader, frame.Priority) error       { return nil }
+func (h *h2Capture) OnRSTStream(frame.FrameHeader, frame.ErrCode) error       { return nil }
+func (h *h2Capture) OnSettings(frame.FrameHeader, frame.SettingsParams) error { return nil }
+func (h *h2Capture) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (h *h2Capture) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
+func (h *h2Capture) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+func (h *h2Capture) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+func (h *h2Capture) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+func (h *h2Capture) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
+func (h *h2Capture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }

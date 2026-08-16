@@ -242,7 +242,7 @@ func TestServerConn_AcceptStream_ReceivesClientHeaders(t *testing.T) {
 // nilHandler discards all frames.
 type nilHandler struct{}
 
-func (nilHandler) OnData(frame.FrameHeader, []byte, uint8) error       { return nil }
+func (nilHandler) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
 func (nilHandler) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
 	return nil
 }
@@ -257,5 +257,4 @@ func (nilHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) err
 func (nilHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (nilHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 func (nilHandler) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
-func (nilHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
-
+func (nilHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }

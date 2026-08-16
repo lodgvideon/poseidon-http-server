@@ -566,11 +566,13 @@ func (h *responseHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) er
 func (h *responseHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
 }
-func (h *responseHandler) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
-func (h *responseHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
-func (h *responseHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
-func (h *responseHandler) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
-func (h *responseHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
+func (h *responseHandler) OnPing(frame.FrameHeader, [8]byte) error { return nil }
+func (h *responseHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (h *responseHandler) OnWindowUpdate(frame.FrameHeader, uint32) error        { return nil }
+func (h *responseHandler) OnOrigin(frame.FrameHeader, []string) error            { return nil }
+func (h *responseHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 
 // discardHandler ignores every frame; used to drain SETTINGS during handshake.
 type discardHandler struct{}

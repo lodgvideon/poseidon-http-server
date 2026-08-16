@@ -312,8 +312,8 @@ func TestE2E_008_GracefulShutdown_DrainsInflight(t *testing.T) {
 	tlsLn := tls.NewListener(ln, tlsCfg)
 
 	srv, err := server.NewServer(server.Options{
-		Addr:                    ln.Addr().String(),
-		Handler:                 server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
+		Addr: ln.Addr().String(),
+		Handler: server.HandlerFunc(func(_ context.Context, _ *server.Request, w server.ResponseWriter) error {
 			started <- struct{}{}
 			time.Sleep(200 * time.Millisecond)
 			_, _ = w.Write([]byte("done"))
@@ -495,11 +495,11 @@ func TestE2E_012_MultipleConcurrentConnections(t *testing.T) {
 	// onceSetNextProtoDefaults) with N=20 fresh Clients — one TCP conn
 	// per client because we set MaxIdleConnsPerHost=1 and disable keep-alive.
 	sharedTr := &http.Transport{
-		TLSClientConfig:       ts.tls,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConnsPerHost:   0,
-		MaxIdleConns:          0,
-		DisableKeepAlives:     true,
+		TLSClientConfig:     ts.tls,
+		ForceAttemptHTTP2:   true,
+		MaxIdleConnsPerHost: 0,
+		MaxIdleConns:        0,
+		DisableKeepAlives:   true,
 	}
 	t.Cleanup(func() { sharedTr.CloseIdleConnections() })
 	const nConn = 20
