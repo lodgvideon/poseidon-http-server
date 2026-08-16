@@ -16,7 +16,7 @@ import (
 // concatenated into a single octet string using the two-octet delimiter of 0x3B,
 // 0x20 (the ASCII string '; ') before being passed into a non-HTTP/2 context."
 //
-// §8.2.3 (:2578) is why a conformant client produces them: "To allow for better
+// §8.2.3 is why a conformant client produces them: "To allow for better
 // compression efficiency, the Cookie header field MAY be split into separate
 // header fields, each with one or more cookie-pairs." Chrome and Firefox both
 // do. Without the join, http.Request.Cookies() sees only the first crumb.

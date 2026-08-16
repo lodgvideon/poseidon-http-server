@@ -104,13 +104,13 @@ func acceptsGzip(headers []hpack.HeaderField) bool {
 
 // isOWS reports whether c is optional whitespace.
 //
-// RFC 9110 §5.6.3 (rfc9110.txt:1774): "OWS = *( SP / HTAB )". HTAB counts, and
+// RFC 9110 §5.6.3: "OWS = *( SP / HTAB )". HTAB counts, and
 // treating only SP as whitespace hid a token behind a tab-separated list.
 func isOWS(c byte) bool { return c == ' ' || c == '	' }
 
 // containsToken checks if a comma-separated header value contains a token.
 //
-// Recipient side of the list construct, RFC 9110 §5.6.1.2 (rfc9110.txt:1695):
+// Recipient side of the list construct, RFC 9110 §5.6.1.2:
 // "A recipient MUST parse and ignore a reasonable number of empty list
 // elements ... a recipient MUST accept lists that satisfy the following syntax:
 // #element => [ element ] *( OWS "," OWS [ element ] )".
@@ -262,7 +262,7 @@ func (g *gzipResponseWriter) flush() error {
 // alreadyEncoded reports whether the handler has already applied a content
 // coding to this representation.
 //
-// RFC 9110 §8.4 (rfc9110.txt:3059): "If one or more encodings have been applied
+// RFC 9110 §8.4: "If one or more encodings have been applied
 // to a representation, the sender that applied the encodings MUST generate a
 // Content-Encoding header field that lists the content codings in the order in
 // which they were applied."
@@ -340,7 +340,7 @@ func (g *gzipResponseWriter) Flush() {
 
 // withoutContentLength drops content-length from a field list.
 //
-// RFC 9110 §8.6 (rfc9110.txt:3226): "A server MAY send a Content-Length header
+// RFC 9110 §8.6: "A server MAY send a Content-Length header
 // field in a response to a HEAD request (Section 9.3.2); a server MUST NOT send
 // Content-Length in such a response unless its field value equals the decimal
 // number of octets that would have been sent in the content of a response if
@@ -350,7 +350,7 @@ func (g *gzipResponseWriter) Flush() {
 // handler's Content-Length — which describes the uncompressed representation —
 // is not that number. The wrapper never sees the body on a HEAD request, so it
 // cannot compute the right one either. Omitting the field is what §9.3.2
-// (rfc9110.txt:3995) permits: "a server MAY omit header fields for which a
+// (RFC 9110 §9.3.2) permits: "a server MAY omit header fields for which a
 // value is determined only while generating the content".
 func withoutContentLength(headers []hpack.HeaderField) []hpack.HeaderField {
 	out := make([]hpack.HeaderField, 0, len(headers))

@@ -140,7 +140,7 @@ rather than when the application read them, so the window bounded nothing. The
 per-stream window is now refunded on consumption (§5.2.1: "The sender of a
 flow-controlled frame MUST NOT send more than the receiver allows" means nothing
 if the receiver always allows more); the connection window keeps its
-receipt-time refund, because §6.9.1 requires every frame be counted there and
+receipt-time refund, because §6.9 requires every frame be counted there and
 gating it on one application's reading would let a single slow handler wedge the
 connection. `ServerConnOptions.StreamEventBuffer`, documented and plumbed
 through `server/` but ignored for every client stream, now applies.

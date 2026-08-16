@@ -250,7 +250,7 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 // has opted out of the mechanism.
 //
 // Called on the handler goroutine, which already writes under wmu elsewhere.
-// The connection-level window keeps its receipt-time refund: §6.9.1 requires
+// The connection-level window keeps its receipt-time refund: §6.9 requires
 // every flow-controlled frame be counted there whatever becomes of its stream,
 // and gating it on one application's reading would let a single slow handler
 // wedge every other stream on the connection.
@@ -313,7 +313,7 @@ func (ss *ServerStream) markLocalEnd() bool {
 // A received RST_STREAM closes the stream in both directions, not merely the
 // remote half. Recording that is what stops the server answering a reset with a
 // reset: RFC 9113 §5.1 — "An endpoint MUST NOT send frames
-// other than PRIORITY on a closed stream" — and §5.4.2 (:1197) — "To avoid
+// other than PRIORITY on a closed stream" — and §5.4.2 — "To avoid
 // looping, an endpoint MUST NOT send a RST_STREAM in response to a RST_STREAM
 // frame." Called before the EventReset is pushed, so no handler can observe the
 // reset while the stream still reports itself writable.

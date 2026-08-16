@@ -339,16 +339,28 @@ metrics := middleware.NewMetricsCollectorWithConfig(middleware.MetricsConfig{
 ```
 
 For a router-backed app the better answer is to label by **route template**,
-which keeps the label set naturally small and strips the query string:
+which keeps the label set naturally small and strips the query string. Collapse
+the concrete path onto the template yourself:
 
 ```go
 metrics := middleware.NewMetricsCollectorWithConfig(middleware.MetricsConfig{
 	PathLabel: func(req *server.Request) string {
-		// chi: the matched pattern, e.g. "/users/{id}"
-		return chi.RouteContext(req.Context()).RoutePattern()
+		if strings.HasPrefix(req.Path, "/users/") {
+			return "/users/{id}"
+		}
+		return req.Path
 	},
 })
 ```
+
+A router's own matched pattern is **not** reachable from this hook. This page
+used to show `chi.RouteContext(req.Context()).RoutePattern()`, which does not
+compile: `*server.Request` has no `Context()` method — a `server.Handler`
+receives `ctx` as a separate parameter. Adding one would not help either.
+`Metrics` is a `server.Middleware`, and `Options.resolvedHandler` chains
+middleware *on top of* `FromHTTPHandler`, so this hook runs **before** the
+router; the `*chi.Context` chi seeds inside its own `ServeHTTP` belongs to a
+request the outer middleware never sees.
 
 `PathLabel` is a refinement, not a replacement: the cap still applies to
 whatever it returns, so a hook that leaks unbounded values remains safe.

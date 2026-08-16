@@ -66,7 +66,7 @@ what a gRPC client expects for an early failure.
 - **Negative — deliberate deviation from RFC 9110 §6.5.1.** That section closes
   with: *"Because of the potential for trailer fields to be discarded in
   transit, a server SHOULD NOT generate trailer fields that it believes are
-  necessary for the user agent to receive"* (`rfc9110.txt:2260`). `grpc-status`
+  necessary for the user agent to receive"* (RFC 9110 §6.5.1). `grpc-status`
   is exactly such a field — it carries the outcome of the call, and every
   terminal path in `grpcserver/service.go` ends by emitting it as a trailer.
   This is not incidental; it is what the gRPC protocol specifies, so the
@@ -77,7 +77,7 @@ what a gRPC client expects for an early failure.
   *"The presence of the keyword "trailers" in the TE header field … indicates
   that the client is willing to accept trailer fields, on behalf of itself and
   any downstream clients … only that the trailer section(s) will not be dropped
-  by any of the clients"* (`rfc9110.txt:2250`). The gRPC-over-HTTP/2 spec
+  by any of the clients"* (RFC 9110 §6.5.1). The gRPC-over-HTTP/2 spec
   requires clients to send `te: trailers`, so in a conformant gRPC exchange the
   hazard the rule guards against does not arise.
 

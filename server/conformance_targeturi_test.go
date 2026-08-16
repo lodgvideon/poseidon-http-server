@@ -9,13 +9,13 @@ import (
 
 // Conformance tests for target-URI reconstruction.
 //
-// RFC 9110 §4.2.1 (rfc9110.txt:1106) and §4.2.2 (:1135), identical wording for
+// RFC 9110 §4.2.1 and §4.2.2, identical wording for
 // each scheme:
 //
 //	"A sender MUST NOT generate an "http" URI with an empty host identifier.
 //	 A recipient that processes such a URI reference MUST reject it as invalid."
 //
-// The authority has two legal sources. RFC 9110 §7.2 (rfc9110.txt:2426):
+// The authority has two legal sources. RFC 9110 §7.2:
 //
 //	"A user agent MUST generate a Host header field in a request unless it
 //	 sends that information as an ":authority" pseudo-header field."
@@ -34,7 +34,7 @@ func fieldsFor(pairs ...string) []hpack.HeaderField {
 	return out
 }
 
-// TestConformance_RFC9110_Sec42_EmptyHostRejected pins rfc9110.txt:1106/:1135.
+// TestConformance_RFC9110_Sec42_EmptyHostRejected pins RFC 9110 §4.2.1/§4.2.2.
 // The server used to substitute the literal "localhost" here, inventing an
 // authority the client never sent.
 func TestConformance_RFC9110_Sec42_EmptyHostRejected(t *testing.T) {
@@ -53,7 +53,7 @@ func TestConformance_RFC9110_Sec42_EmptyHostRejected(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9110_Sec72_HostSuppliesAuthority pins rfc9110.txt:2426:
+// TestConformance_RFC9110_Sec72_HostSuppliesAuthority pins RFC 9110 §7.2:
 // a request that carries Host instead of :authority is legal, and its authority
 // must come from that field rather than being invented.
 func TestConformance_RFC9110_Sec72_HostSuppliesAuthority(t *testing.T) {

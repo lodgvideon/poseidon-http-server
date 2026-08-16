@@ -23,7 +23,7 @@ import (
 //
 // RFC 7540 defines the h2c Upgrade mechanism (RFC 9113 marks it obsolete but
 // this server implements it, so 7540 is the governing text for this path).
-// RFC 9110 §7.8 and RFC 9112 §2.2 add the generic Upgrade/Host obligations.
+// RFC 9110 §7.8 and RFC 9112 §3.2 add the generic Upgrade/Host obligations.
 
 // upgradeConn dials the test server and returns the connection.
 func upgradeConn(t *testing.T) net.Conn {
@@ -69,7 +69,7 @@ func readStatusLine(t *testing.T, br *bufio.Reader) string {
 	return strings.TrimSpace(line)
 }
 
-// TestConformance_RFC7540_Sec32_ServerIgnoresH2UpgradeToken pins rfc7540.txt:464
+// TestConformance_RFC7540_Sec32_ServerIgnoresH2UpgradeToken pins RFC 7540 §3.2
 //
 //	"A server MUST ignore an "h2" token in an Upgrade header field."
 //
@@ -91,7 +91,7 @@ func TestConformance_RFC7540_Sec32_ServerIgnoresH2UpgradeToken(t *testing.T) {
 }
 
 // TestConformance_RFC7540_Sec321_NoUpgradeWithoutHTTP2Settings pins
-// rfc7540.txt:511
+// RFC 7540 §3.2.1
 //
 //	"A server MUST NOT upgrade the connection to HTTP/2 if this header
 //	 field is not present or if more than one is present."
@@ -110,7 +110,7 @@ func TestConformance_RFC7540_Sec321_NoUpgradeWithoutHTTP2Settings(t *testing.T) 
 }
 
 // TestConformance_RFC7540_Sec321_NoUpgradeWithDuplicateHTTP2Settings pins the
-// second half of rfc7540.txt:511 — "or if more than one is present".
+// second half of RFC 7540 §3.2.1 — "or if more than one is present".
 func TestConformance_RFC7540_Sec321_NoUpgradeWithDuplicateHTTP2Settings(t *testing.T) {
 	c := upgradeConn(t)
 	_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\n"+
@@ -128,7 +128,7 @@ func TestConformance_RFC7540_Sec321_NoUpgradeWithDuplicateHTTP2Settings(t *testi
 }
 
 // TestConformance_RFC9110_Sec78_IgnoreUpgradeInHTTP10Request pins
-// rfc9110.txt:2880
+// RFC 9110 §7.8
 //
 //	"A server that receives an Upgrade header field in an HTTP/1.0
 //	 request MUST ignore that Upgrade field."
@@ -151,7 +151,7 @@ func TestConformance_RFC9110_Sec78_IgnoreUpgradeInHTTP10Request(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9112_Sec22_RejectRequestWithoutHost pins rfc9112.txt:445
+// TestConformance_RFC9112_Sec22_RejectRequestWithoutHost pins RFC 9112 §3.2
 //
 //	"A server MUST respond with a 400 (Bad Request) status code to any
 //	 HTTP/1.1 request message that lacks a Host header field and to any
@@ -166,7 +166,7 @@ func TestConformance_RFC9112_Sec22_RejectRequestWithoutHost(t *testing.T) {
 
 	line := readStatusLine(t, bufio.NewReader(c))
 	if !strings.Contains(line, "400") {
-		t.Errorf("Host-less HTTP/1.1 request: got %q, want 400 (RFC 9112 §2.2)", line)
+		t.Errorf("Host-less HTTP/1.1 request: got %q, want 400 (RFC 9112 §3.2)", line)
 	}
 }
 
@@ -210,7 +210,7 @@ func (h *streamHeaderCapture) OnOrigin(frame.FrameHeader, []string) error       
 func (h *streamHeaderCapture) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
 
 // TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1 pins
-// rfc7540.txt:471 and :487-492
+// RFC 7540 §3.2-492
 //
 //	"These frames MUST include a response to the request that initiated the
 //	 upgrade."
@@ -246,7 +246,7 @@ func TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1(t *testin
 	}
 
 	// "Upon receiving the 101 response, the client MUST send a connection
-	// preface, which includes a SETTINGS frame." (rfc7540.txt:484)
+	// preface, which includes a SETTINGS frame." (RFC 7540 §3.2)
 	rwc := &bufioConn{Conn: c, Reader: br}
 	fr := frame.NewFramer(rwc, rwc)
 	if _, err := rwc.Write(clientPreface); err != nil {
@@ -279,7 +279,7 @@ func TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1(t *testin
 }
 
 // TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected pins
-// rfc9112.txt:716
+// RFC 9112 §5.1
 //
 //	"No whitespace is allowed between the field name and colon. In the past,
 //	 differences in the handling of such whitespace have led to security
@@ -420,7 +420,7 @@ func TestH2CProbe_ReleasedAfterUpgrade(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade pins rfc9112.txt:1521
+// TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade pins RFC 9112 §9.6
 //
 //	"A server that receives a "close" connection option MUST initiate closure of
 //	 the connection (see below) after it sends the final response to the request
@@ -516,12 +516,12 @@ func (c *stagedConn) Write(p []byte) (int, error)     { return len(p), nil }
 func (c *stagedConn) SetReadDeadline(time.Time) error { return nil }
 
 // TestH2CProbe_TearDownIsStaged pins the tear-down RFC 9112 §9.6 prescribes
-// (rfc9112.txt:1548): "servers typically close a connection in stages. First,
+// (RFC 9112 §9.6): "servers typically close a connection in stages. First,
 // the server performs a half-close by closing only the write side ... The
 // server then continues to read from the connection until it receives a
 // corresponding close by the client ... Finally, the server fully closes."
 //
-// The hazard is stated just above (:1539): unread client data on a fully closed
+// The hazard is stated just above (§9.6): unread client data on a fully closed
 // connection makes the TCP stack send a reset, and "the reset packet might
 // erase the client's unacknowledged input buffers before they can be read and
 // interpreted by the client's HTTP parser" — losing the response just written.

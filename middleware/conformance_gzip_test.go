@@ -8,7 +8,7 @@ import (
 
 // Conformance tests for Content-Encoding on the gzip middleware.
 //
-// RFC 9110 §8.4 (rfc9110.txt:3059):
+// RFC 9110 §8.4:
 //
 //	"If one or more encodings have been applied to a representation, the sender
 //	 that applied the encodings MUST generate a Content-Encoding header field
@@ -36,7 +36,7 @@ func countField(fields []hpack.HeaderField, name string) (string, int) {
 }
 
 // TestConformance_RFC9110_Sec84_NativePreEncodedNotRecompressed pins
-// rfc9110.txt:3059 on the native write path.
+// RFC 9110 §8.4 on the native write path.
 func TestConformance_RFC9110_Sec84_NativePreEncodedNotRecompressed(t *testing.T) {
 	t.Parallel()
 	under := newFakeRW()
@@ -131,7 +131,7 @@ func TestConformance_RFC9110_Sec84_UnencodedStillCompressed(t *testing.T) {
 	})
 }
 
-// TestConformance_RFC9110_Sec86_HeadContentLengthNotStale pins rfc9110.txt:3226
+// TestConformance_RFC9110_Sec86_HeadContentLengthNotStale pins RFC 9110 §8.6
 //
 //	"A server MAY send a Content-Length header field in a response to a HEAD
 //	 request (Section 9.3.2); a server MUST NOT send Content-Length in such a
@@ -145,7 +145,7 @@ func TestConformance_RFC9110_Sec84_UnencodedStillCompressed(t *testing.T) {
 // GET would have been gzipped to a different octet count. Passing it through is
 // the MUST NOT.
 //
-// Dropping it is what §9.3.2 (rfc9110.txt:3995) expressly allows: "a server MAY
+// Dropping it is what §9.3.2 expressly allows: "a server MAY
 // omit header fields for which a value is determined only while generating the
 // content", with buffering-for-a-late-content-decision given as the example.
 // The missing Content-Encoding on the HEAD response is permitted by that same
@@ -208,8 +208,8 @@ func TestConformance_RFC9110_Sec86_HeadContentLengthNotStale(t *testing.T) {
 // TestConformance_RFC9110_Sec561_ListGrammar pins the recipient half of the
 // list construct, which containsToken implements by hand.
 //
-//	rfc9110.txt:1774 — "OWS = *( SP / HTAB )"
-//	rfc9110.txt:1695 — "A recipient MUST parse and ignore a reasonable number of
+//	RFC 9110 §5.6.3 — "OWS = *( SP / HTAB )"
+//	RFC 9110 §5.6.1.2 — "A recipient MUST parse and ignore a reasonable number of
 //	 empty list elements ... a recipient MUST accept lists that satisfy the
 //	 following syntax:  #element => [ element ] *( OWS "," OWS [ element ] )"
 //
@@ -223,10 +223,10 @@ func TestConformance_RFC9110_Sec561_ListGrammar(t *testing.T) {
 		want  bool
 		why   string
 	}{
-		{"deflate,\tgzip", "gzip", true, "HTAB is OWS (rfc9110.txt:1774)"},
+		{"deflate,\tgzip", "gzip", true, "HTAB is OWS (RFC 9110 §5.6.3)"},
 		{"deflate,\t gzip", "gzip", true, "OWS is any run of SP and HTAB"},
 		{"gzip\t;q=1.0", "gzip", true, "HTAB before a parameter still ends the token"},
-		{",,gzip", "gzip", true, "leading empty elements are ignored (rfc9110.txt:1695)"},
+		{",,gzip", "gzip", true, "leading empty elements are ignored (RFC 9110 §5.6.1.2)"},
 		{"gzip,,", "gzip", true, "trailing empty elements are ignored"},
 		{"deflate,,gzip", "gzip", true, "interior empty elements are ignored"},
 		{"\t,\tgzip\t", "gzip", true, "OWS around empty elements and the token"},

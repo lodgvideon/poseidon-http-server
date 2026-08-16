@@ -190,7 +190,7 @@ func TestRegression_PushStreamsAreReleasedWhenTheirResponseEnds(t *testing.T) {
 }
 
 // TestRegression_MalformedFrameOnIdleStreamIsAConnectionError guards the
-// stream-scoped recovery added for §6.3 and §6.9.1. Recovering by sending
+// stream-scoped recovery added for §6.3 and §6.9. Recovering by sending
 // RST_STREAM is right for a live stream and forbidden for an idle one: §6.4
 // says "RST_STREAM frames MUST NOT be sent for a stream in
 // the 'idle' state", and a conformant peer receiving one MUST answer
@@ -203,7 +203,7 @@ func TestRegression_MalformedFrameOnIdleStreamIsAConnectionError(t *testing.T) {
 	}{
 		// The connection error keeps the code that names the actual violation:
 		// §4.2 mandates FRAME_SIZE_ERROR for a frame that is the
-		// wrong size, and §6.9.1 PROTOCOL_ERROR for a zero increment. Only the
+		// wrong size, and §6.9 PROTOCOL_ERROR for a zero increment. Only the
 		// SCOPE changes on an idle stream, not the diagnosis.
 		{"PRIORITY_wrong_length", rawFrame(frame.FramePriority, 0, 1, []byte{0, 0, 0, 0}), frame.ErrCodeFrameSizeError},
 		{"WINDOW_UPDATE_zero_increment", rawFrame(frame.FrameWindowUpdate, 0, 1, []byte{0, 0, 0, 0}), frame.ErrCodeProtocolError},

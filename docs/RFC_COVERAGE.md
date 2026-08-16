@@ -21,46 +21,46 @@ that mechanism.
 
 | Section | Type | Test |
 |---------|------|------|
-| §3.2 (`rfc7540.txt:464`) | Conformance | `TestConformance_RFC7540_Sec32_ServerIgnoresH2UpgradeToken` |
-| §3.2 (`rfc7540.txt:471`, `:487-492`) | Conformance | `TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1` |
-| §3.2.1 (`rfc7540.txt:511`) | Conformance | `TestConformance_RFC7540_Sec321_NoUpgradeWithoutHTTP2Settings` |
-| §3.2.1 (`rfc7540.txt:511`) | Conformance | `TestConformance_RFC7540_Sec321_NoUpgradeWithDuplicateHTTP2Settings` |
+| §3.2 | Conformance | `TestConformance_RFC7540_Sec32_ServerIgnoresH2UpgradeToken` |
+| §3.2 | Conformance | `TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1` |
+| §3.2.1 | Conformance | `TestConformance_RFC7540_Sec321_NoUpgradeWithoutHTTP2Settings` |
+| §3.2.1 | Conformance | `TestConformance_RFC7540_Sec321_NoUpgradeWithDuplicateHTTP2Settings` |
 | §3.2 / §3.4 | Integration | `TestH2C_Upgrade`, `TestH2C_PriorKnowledge`, `TestTransport_H2C_Upgrade_Fallback` |
 
 ## RFC 9110 — HTTP Semantics
 
 | Section | Type | Test |
 |---------|------|------|
-| §7.8, §15.2 (`rfc9110.txt:2880`) | Conformance | `TestConformance_RFC9110_Sec78_IgnoreUpgradeInHTTP10Request` |
-| §5.5 (`rfc9110.txt:1606`) | Conformance | `TestConformance_RFC9110_Sec55_FieldValueCRLFNUL_StreamError` |
-| §5.5 (`rfc9110.txt:1611`) | Conformance | `TestConformance_RFC9110_Sec55_CleanFieldValueAccepted` |
-| §2.2 (`rfc9110.txt:572`) | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessagePercentEncoded` |
-| §2.2 (`rfc9110.txt:572`) | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessageOmittedWhenEmpty` |
-| §4.2.1, §4.2.2 (`rfc9110.txt:1106`, `:1135`) | Conformance | `TestConformance_RFC9110_Sec42_EmptyHostRejected` |
+| §7.8, §15.2 | Conformance | `TestConformance_RFC9110_Sec78_IgnoreUpgradeInHTTP10Request` |
+| §5.5 | Conformance | `TestConformance_RFC9110_Sec55_FieldValueCRLFNUL_StreamError` |
+| §5.5 | Conformance | `TestConformance_RFC9110_Sec55_CleanFieldValueAccepted` |
+| §2.2 | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessagePercentEncoded` |
+| §2.2 | Conformance | `TestConformance_RFC9110_Sec22_GRPCMessageOmittedWhenEmpty` |
+| §4.2.1, §4.2.2 | Conformance | `TestConformance_RFC9110_Sec42_EmptyHostRejected` |
 | §4.2 boundary (RFC 9113 §8.3.1) | Conformance | `TestConformance_RFC9110_Sec42_NonHTTPSchemeUnaffected` |
-| §7.2 (`rfc9110.txt:2426`) | Conformance | `TestConformance_RFC9110_Sec72_HostSuppliesAuthority` |
+| §7.2 | Conformance | `TestConformance_RFC9110_Sec72_HostSuppliesAuthority` |
 | §7.2 / RFC 9113 §8.3.1 | Conformance | `TestConformance_RFC9110_Sec72_AuthorityWinsOverHost` |
-| §9.3.2 (`rfc9110.txt:3987`) | Conformance | `TestConformance_RFC9110_Sec932_HeadSendsNoContent` |
-| §9.3.2 (`rfc9110.txt:3993`, RFC 9113 §8.1.1) | Conformance | `TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields` |
+| §9.3.2 | Conformance | `TestConformance_RFC9110_Sec932_HeadSendsNoContent` |
+| §9.3.2 (RFC 9113 §8.1.1) | Conformance | `TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields` |
 | §9.3.2 control | Conformance | `TestConformance_RFC9110_Sec932_GetStillSendsContent` |
 | §5.4 | Conformance | `TestConformance_RFC9110_Sec54_OversizedFieldsGet431` |
 | §5.4 control | Conformance | `TestConformance_RFC9110_Sec54_WithinLimitUnaffected` |
 | §5.4 / CVE-2024-27316 | Conformance | `TestConformance_RFC9110_Sec54_ContinuationFloodAnswers431` |
-| §5.6.3, §5.6.1.2 (`rfc9110.txt:1774`, `:1695`) | Conformance | `TestConformance_RFC9110_Sec561_ListGrammar` |
-| §8.6 (`rfc9110.txt:3226`) | Conformance | `TestConformance_RFC9110_Sec86_HeadContentLengthNotStale` |
-| §6.6.1 (`rfc9110.txt:2313`) | Conformance | `TestConformance_RFC9110_Sec661_DateOnMustStatuses` |
-| §6.6.1 (`rfc9110.txt:2313`) | Conformance | `TestConformance_RFC9110_Sec661_DateOnStdlibPath` |
-| §6.6.1 (`rfc9110.txt:2313`) | Conformance | `TestConformance_RFC9110_Sec661_HandlerDateWins` |
-| §8.4 (`rfc9110.txt:3059`) | Conformance | `TestConformance_RFC9110_Sec84_NativePreEncodedNotRecompressed` |
-| §8.4 (`rfc9110.txt:3059`) | Conformance | `TestConformance_RFC9110_Sec84_HTTPPreEncodedNotRecompressed` |
+| §5.6.3, §5.6.1.2 | Conformance | `TestConformance_RFC9110_Sec561_ListGrammar` |
+| §8.6 | Conformance | `TestConformance_RFC9110_Sec86_HeadContentLengthNotStale` |
+| §6.6.1 | Conformance | `TestConformance_RFC9110_Sec661_DateOnMustStatuses` |
+| §6.6.1 | Conformance | `TestConformance_RFC9110_Sec661_DateOnStdlibPath` |
+| §6.6.1 | Conformance | `TestConformance_RFC9110_Sec661_HandlerDateWins` |
+| §8.4 | Conformance | `TestConformance_RFC9110_Sec84_NativePreEncodedNotRecompressed` |
+| §8.4 | Conformance | `TestConformance_RFC9110_Sec84_HTTPPreEncodedNotRecompressed` |
 | §8.4 control | Conformance | `TestConformance_RFC9110_Sec84_UnencodedStillCompressed` |
-| §6.5.1 (`rfc9110.txt:2245`) | Conformance | `TestConformance_RFC9110_Sec651_TrailersNotMergedIntoHeaders` |
-| §6.5.1 (`rfc9110.txt:2244`) | Conformance | `TestConformance_RFC9110_Sec651_TrailersForwardedAsTrailers` |
+| §6.5.1 | Conformance | `TestConformance_RFC9110_Sec651_TrailersNotMergedIntoHeaders` |
+| §6.5.1 | Conformance | `TestConformance_RFC9110_Sec651_TrailersForwardedAsTrailers` |
 | §6.5.1 boundary | Conformance | `TestConformance_RFC9110_Sec651_HeaderOnlyResponseUnaffected` |
 | §10.1.1 | Conformance | `TestConformance_RFC9110_Sec1011_ImmediateContinue` |
 | §10.1.1 (no expectation) | Conformance | `TestConformance_RFC9110_Sec1011_NoExpectNoContinue` |
 | §10.1.1 (no content) | Conformance | `TestConformance_RFC9110_Sec1011_NoContentNoContinue` |
-| §7.4 (`rfc9110.txt:2510`) | Conformance | `TestConformance_RFC9110_Sec74_MisdirectedAuthorityRejected` |
+| §7.4 | Conformance | `TestConformance_RFC9110_Sec74_MisdirectedAuthorityRejected` |
 | §7.4 control | Conformance | `TestConformance_RFC9110_Sec74_AuthorityInCertAccepted` |
 
 RFC 9110 §2.2 — *"A sender MUST NOT generate protocol elements that do not
@@ -78,11 +78,11 @@ serve HTTP/1.1.
 
 | Section | Type | Test |
 |---------|------|------|
-| §2.2 (`rfc9112.txt:445`) | Conformance | `TestConformance_RFC9112_Sec22_RejectRequestWithoutHost` |
-| §5.1 (`rfc9112.txt:716`) | Conformance | `TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected` |
-| §9.6 (`rfc9112.txt:1521`) | Conformance | `TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade` |
-| §9.6 (`rfc9112.txt:1521`) | Conformance | `TestConformance_RFC9112_Sec96_SecondCloseFieldLineCounts` |
-| §9.6 (`rfc9112.txt:1548`) | Regression | `TestH2CProbe_TearDownIsStaged`, `TestH2CProbe_BadRequestTearsDownStaged` |
+| §3.2 | Conformance | `TestConformance_RFC9112_Sec22_RejectRequestWithoutHost` |
+| §5.1 | Conformance | `TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected` |
+| §9.6 | Conformance | `TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade` |
+| §9.6 | Conformance | `TestConformance_RFC9112_Sec96_SecondCloseFieldLineCounts` |
+| §9.6 | Regression | `TestH2CProbe_TearDownIsStaged`, `TestH2CProbe_BadRequestTearsDownStaged` |
 
 ## RFC 9113 — HTTP/2
 
@@ -111,9 +111,9 @@ landed on §8.3 as the HTTP/2-native way to state the rule.
 | §6.6, §5.1.2, §8.4 | Conformance | `TestConformance_RFC9113_Sec66_PushPreconditions` |
 | §6.8 | Conformance | `TestConformance_RFC9113_Sec68_GracefulShutdownIsTwoPhase` |
 | §6.8 | Conformance | `TestConformance_RFC9113_Sec68_PushRefusedAfterPeerGoAway` |
-| §6.9.1, §6.8 | Conformance | `TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWindow` |
-| §6.9.1 split: connection on receipt, stream on consumption | Conformance | `TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead` |
-| §6.9.1 (both clauses) | Conformance | `TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit` |
+| §6.9, §6.8 | Conformance | `TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWindow` |
+| §6.9/§6.9.1 split: connection on receipt, stream on consumption | Conformance | `TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead` |
+| §6.9 (both clauses) | Conformance | `TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit` |
 | §6.10, §5.5 | Conformance | `TestConformance_RFC9113_Sec610_MalformedFrameDuringOpenFieldBlock` |
 | §8.1 trailers | Conformance | `TestConformance_RFC9113_Sec81_TrailerRules` |
 | §8.2.1, §8.2.2 | Conformance | `TestConformance_RFC9113_Sec821_MalformedFieldSyntax_StreamError` |
@@ -122,7 +122,7 @@ landed on §8.3 as the HTTP/2-native way to state the rule.
 | §8.2.3 control | Conformance | `TestConformance_RFC9113_Sec823_SingleCookieUnchanged` |
 | §8.3 | Conformance | `TestConformance_RFC9113_Sec83_MalformedPseudoHeaders_StreamError` |
 | §8.3 | Conformance | `TestConformance_RFC9113_Sec83_ValidRequestsAccepted` |
-| §8.3 / RFC 9110 §4.2.3 (`rfc9110.txt:1179`) | Conformance | `TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive` |
+| §8.3 / RFC 9110 §4.2.3 | Conformance | `TestConformance_RFC9113_Sec83_SchemeIsCaseInsensitive` |
 | §6.5.2 (uncompressed list size) | Regression | `TestServerConn_Continuation_OversizedBlock_TearsDownConnection` |
 | §8.1.1 | Regression | `TestServerConnHandler_MalformedStream_KeepsHPACKDecoderSynced` |
 | §8.4 | Conformance | `TestConformance_RFC9113_Sec84_PushPromiseCarriesAuthority` |

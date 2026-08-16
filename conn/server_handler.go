@@ -584,7 +584,7 @@ func (h *serverConnHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode
 		return err
 	}
 	// §5.1 — RST_STREAM is not one of the two frames an idle
-	// stream accepts, and §6.4 (:1596) restates it: "If a RST_STREAM frame
+	// stream accepts, and §6.4 restates it: "If a RST_STREAM frame
 	// identifying an idle stream is received, the recipient MUST treat this as a
 	// connection error of type PROTOCOL_ERROR." Checking it also stops these
 	// being charged as rapid resets, which made the CVE-2023-44487 budget

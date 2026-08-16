@@ -87,7 +87,7 @@ func TestMisdirectedRequest(t *testing.T) {
 		{"authority not covered", &Request{Scheme: "https", Authority: "b.example"}, leaf, true},
 		{"port is not part of the identity", &Request{Scheme: "https", Authority: "a.example:8443"}, leaf, false},
 		{"non-https scheme is out of scope", &Request{Scheme: "http", Authority: "b.example"}, leaf, false},
-		// RFC 9110 §4.2.3 (rfc9110.txt:1179): "The scheme and host are
+		// RFC 9110 §4.2.3: "The scheme and host are
 		// case-insensitive". An uppercase spelling is the same scheme, so it
 		// must not be a way to opt out of the check.
 		{"uppercase scheme still checked", &Request{Scheme: "HTTPS", Authority: "b.example"}, leaf, true},

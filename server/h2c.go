@@ -133,13 +133,13 @@ const (
 )
 
 // closeStaged tears the connection down the way RFC 9112 §9.6 prescribes
-// (rfc9112.txt:1548): "servers typically close a connection in stages. First,
+// (RFC 9112 §9.6): "servers typically close a connection in stages. First,
 // the server performs a half-close by closing only the write side of the
 // read/write connection. The server then continues to read from the connection
 // until it receives a corresponding close by the client ... Finally, the server
 // fully closes the connection."
 //
-// The hazard is stated just above it (:1539): unread client data arriving on a
+// The hazard is stated just above it (§9.6): unread client data arriving on a
 // fully closed connection makes the TCP stack send a reset, and "the reset
 // packet might erase the client's unacknowledged input buffers before they can
 // be read and interpreted by the client's HTTP parser" — losing the very
@@ -160,7 +160,7 @@ func closeStaged(nc net.Conn) {
 // Header.Values but its own shouldClose consults only the first, so a "close"
 // option on a second Connection line would otherwise slip past. Empty elements
 // simply do not match, and TrimSpace covers OWS — which RFC 9110 §5.6.3
-// (rfc9110.txt:1774) defines as "*( SP / HTAB )".
+// (RFC 9110 §5.6.3) defines as "*( SP / HTAB )".
 func hasListToken(values []string, want string) bool {
 	for _, v := range values {
 		for _, tok := range strings.Split(v, ",") {
@@ -175,7 +175,7 @@ func hasListToken(values []string, want string) bool {
 // hasUpgradeToken reports whether the Upgrade header field offers the exact
 // token "h2c".
 //
-// RFC 7540 §3.2 (rfc7540.txt:464): "A server MUST ignore an "h2" token in an
+// RFC 7540 §3.2: "A server MUST ignore an "h2" token in an
 // Upgrade header field." Ignoring means behaving as though it were absent, so
 // "h2" is simply never matched here — including in a list such as "h2, h2c",
 // where the "h2c" element still counts.
@@ -195,7 +195,7 @@ func validHTTP2SettingsPayload(v string) bool {
 	return len(raw)%6 == 0
 }
 
-// tokenChar reports whether c is a tchar (RFC 9110 §5.6.2, rfc9110.txt:1735):
+// tokenChar reports whether c is a tchar (RFC 9110 §5.6.2):
 //
 //	tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
 //	        "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
@@ -213,7 +213,7 @@ func tokenChar(c byte) bool {
 // validFieldName reports whether name matches field-name = token
 // (RFC 9110 §5.1).
 //
-// This exists because of RFC 9112 §5.1 (rfc9112.txt:716): "A server MUST
+// This exists because of RFC 9112 §5.1: "A server MUST
 // reject, with a response status code of 400 (Bad Request), any received
 // request message that contains whitespace between a header field name and
 // colon." Go's net/textproto deliberately accepts a SP there
@@ -282,7 +282,7 @@ func upgradeRequestFields(req *http.Request) []hpack.HeaderField {
 //
 //   - HTTP/1.0 request        RFC 9110 §7.8  — MUST ignore the Upgrade field;
 //     RFC 9110 §15.2 — MUST NOT send 1xx to an HTTP/1.0 client
-//   - no/duplicate/bad Host   RFC 9112 §2.2  — MUST respond 400
+//   - no/duplicate/bad Host   RFC 9112 §3.2  — MUST respond 400
 //   - "h2" token              RFC 7540 §3.2  — MUST ignore it
 //   - no/duplicate            RFC 7540 §3.2.1 — MUST NOT upgrade
 //     HTTP2-Settings
@@ -317,14 +317,14 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 		writeBadRequest(nc, "Only h2c supported")
 		return
 	case req.Host == "":
-		// RFC 9112 §2.2 (rfc9112.txt:445).
+		// RFC 9112 §3.2.
 		writeBadRequest(nc, "Missing Host header field")
 		return
 	case !hasUpgradeToken(req.Header.Values("Upgrade")):
 		writeBadRequest(nc, "Only h2c supported")
 		return
 	case hasListToken(req.Header.Values("Connection"), "close"):
-		// RFC 9112 §9.6 (rfc9112.txt:1521): "A server that receives a "close"
+		// RFC 9112 §9.6: "A server that receives a "close"
 		// connection option MUST initiate closure of the connection ... after it
 		// sends the final response ... The server MUST NOT process any further
 		// requests received on that connection."
@@ -340,7 +340,7 @@ func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.
 		return
 	}
 
-	// RFC 7540 §3.2.1 (rfc7540.txt:511): exactly one HTTP2-Settings field, and
+	// RFC 7540 §3.2.1: exactly one HTTP2-Settings field, and
 	// it must actually be a SETTINGS payload.
 	settings := req.Header.Values("HTTP2-Settings")
 	if len(settings) != 1 || !validHTTP2SettingsPayload(settings[0]) {

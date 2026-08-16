@@ -11,7 +11,7 @@ import (
 
 // Conformance tests for trailer handling in ToHTTPHandler.
 //
-// RFC 9110 §6.5.1 (rfc9110.txt:2245):
+// RFC 9110 §6.5.1:
 //
 //	"A recipient MUST NOT merge a trailer field into a header section unless
 //	 the recipient understands the corresponding header field definition and
@@ -25,10 +25,10 @@ import (
 // section of the http.ResponseWriter this adapter replays onto.
 //
 // They are forwarded as real trailers rather than dropped. The RFC notes that
-// "in most cases, the trailers are simply discarded" (:2244), which would also
+// "in most cases, the trailers are simply discarded" (§6.5.1), which would also
 // satisfy the MUST, but dropping grpc-status loses the outcome of the call.
 
-// TestConformance_RFC9110_Sec651_TrailersNotMergedIntoHeaders pins :2245.
+// TestConformance_RFC9110_Sec651_TrailersNotMergedIntoHeaders pins §6.5.1.
 func TestConformance_RFC9110_Sec651_TrailersNotMergedIntoHeaders(t *testing.T) {
 	h := ToHTTPHandler(HandlerFunc(func(_ context.Context, _ *Request, w ResponseWriter) error {
 		if err := w.WriteHeaders(200, []hpack.HeaderField{

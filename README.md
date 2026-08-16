@@ -22,9 +22,14 @@ Drop-in `http.Handler` replacement — compatible with **chi**, **echo**, **gin*
 go get github.com/lodgvideon/poseidon-http-server@latest
 ```
 
-Requires **Go 1.25+**. The only dependency is the HTTP/2 codec (`frame` + `hpack`)
-from [poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client);
-there are no other third-party runtime dependencies.
+Requires **Go 1.25+**. The HTTP/2 and gRPC packages (`server`, `conn`,
+`grpcserver`, `middleware`) and the `poseidon-server` binary have exactly one
+third-party dependency —
+[poseidon-http-client](https://github.com/lodgvideon/poseidon-http-client) — and
+nothing else. `http3server` is the exception: QUIC packet protection brings
+`golang.org/x/crypto` and `golang.org/x/sys` in transitively, so import it only
+if you want HTTP/3 (see
+[docs/HTTP3_SERVER_GUIDE.md](docs/HTTP3_SERVER_GUIDE.md#dependencies)).
 
 ```go
 import (

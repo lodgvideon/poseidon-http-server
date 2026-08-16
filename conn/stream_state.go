@@ -35,7 +35,7 @@ const (
 	// stReset: RST_STREAM crossed in either direction. The stream is closed in
 	// BOTH directions whatever the other bits say, and nothing further may be
 	// sent on it — §5.1 "An endpoint MUST NOT send frames
-	// other than PRIORITY on a closed stream", and §5.4.2 (:1197) "To avoid
+	// other than PRIORITY on a closed stream", and §5.4.2 "To avoid
 	// looping, an endpoint MUST NOT send a RST_STREAM in response to a RST_STREAM
 	// frame."
 	stReset

@@ -253,7 +253,7 @@ func TestConformance_RFC9113_Sec92_HandshakeSettingsApplyToPipelinedStreams(t *t
 
 // TestRegression_CodecRecoveryResetReleasesTheStream guards the sibling of the
 // reset-release fix. The reader loop recovers two codec-detected stream errors
-// (§6.3 a wrong-length PRIORITY, §6.9.1 a zero-increment WINDOW_UPDATE) by
+// (§6.3 a wrong-length PRIORITY, §6.9 a zero-increment WINDOW_UPDATE) by
 // resetting the stream through writeRSTStreamID — which set ss.closed and never
 // deregistered, leaving the stream in the registry with its context uncancelled.
 //

@@ -9,12 +9,12 @@ import (
 
 // Conformance tests for HEAD responses.
 //
-// RFC 9110 §9.3.2 (rfc9110.txt:3987):
+// RFC 9110 §9.3.2:
 //
 //	"The HEAD method is identical to GET except that the server MUST NOT send
 //	 content in the response."
 //
-// and (:3993):
+// and (§9.3.2):
 //
 //	"The server SHOULD send the same header fields in response to a HEAD
 //	 request as it would have sent if the request method had been GET."
@@ -37,7 +37,7 @@ func headWriter(method string) (*responseWriter, *mockStreamWriter) {
 	return w, sw
 }
 
-// TestConformance_RFC9110_Sec932_HeadSendsNoContent pins rfc9110.txt:3987 for
+// TestConformance_RFC9110_Sec932_HeadSendsNoContent pins RFC 9110 §9.3.2 for
 // both write paths: the native WriteData and the stdlib-compatible Write.
 func TestConformance_RFC9110_Sec932_HeadSendsNoContent(t *testing.T) {
 	t.Run("WriteData", func(t *testing.T) {
@@ -85,7 +85,7 @@ func TestConformance_RFC9110_Sec932_GetStillSendsContent(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields pins rfc9110.txt:3993
+// TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields pins RFC 9110 §9.3.2
 // together with RFC 9113 §8.1.1 — the header section, content-length included,
 // survives untouched even though no DATA follows.
 func TestConformance_RFC9110_Sec932_HeadKeepsHeaderFields(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 
 // Date response field (RFC 9110 §6.6.1).
 //
-// rfc9110.txt:2313: "An origin server with a clock (as defined in Section
+// RFC 9110 §6.6.1: "An origin server with a clock (as defined in Section
 // 5.6.7) MUST generate a Date header field in all 2xx (Successful), 3xx
 // (Redirection), and 4xx (Client Error) responses, and MAY generate a Date
 // header field in 1xx (Informational) and 5xx (Server Error) responses."

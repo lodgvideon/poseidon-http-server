@@ -18,7 +18,7 @@ fail=0
 #
 # RFC7540 is obsolete (superseded by RFC 9113) but stays in the list because
 # server/h2c.go implements the h2c Upgrade mechanism that only 7540 defines --
-# 9113 marks it obsolete (rfc9113.txt:3613). If that path is ever removed, drop
+# 9113 marks it obsolete (RFC 9113 §11). If that path is ever removed, drop
 # the tag in the same commit that deletes the tests.
 #
 # RFC9113 arrived with the RFC 9113 section 8.3 pseudo-header suites, which the

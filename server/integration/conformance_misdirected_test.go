@@ -15,7 +15,7 @@ import (
 
 // Conformance tests for 421 (Misdirected Request).
 //
-// RFC 9110 §7.4 (rfc9110.txt:2510):
+// RFC 9110 §7.4:
 //
 //	"Unless the connection is from a trusted gateway, an origin server MUST
 //	 reject a request if any scheme-specific requirements for the target URI
@@ -24,7 +24,7 @@ import (
 //	 secured via a certificate valid for that target URI's origin, as defined
 //	 by Section 4.2.2."
 //
-// and (:2517): "The 421 (Misdirected Request) status code in a response
+// and (§7.4): "The 421 (Misdirected Request) status code in a response
 // indicates that the origin server has rejected the request because it appears
 // to have been misdirected".
 //
@@ -81,7 +81,7 @@ func requestAuthority(t *testing.T, fr *frame.Framer, streamID uint32, authority
 	return status
 }
 
-// TestConformance_RFC9110_Sec74_MisdirectedAuthorityRejected pins :2510.
+// TestConformance_RFC9110_Sec74_MisdirectedAuthorityRejected pins §7.4.
 func TestConformance_RFC9110_Sec74_MisdirectedAuthorityRejected(t *testing.T) {
 	t.Parallel()
 

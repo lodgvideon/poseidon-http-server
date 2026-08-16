@@ -10,7 +10,7 @@ import (
 
 // Conformance tests for the Date response field.
 //
-// RFC 9110 §6.6.1 (rfc9110.txt:2313):
+// RFC 9110 §6.6.1:
 //
 //	"An origin server with a clock (as defined in Section 5.6.7) MUST generate
 //	 a Date header field in all 2xx (Successful), 3xx (Redirection), and 4xx
@@ -39,7 +39,7 @@ func dateField(t *testing.T, fields []hpack.HeaderField) string {
 	return value
 }
 
-// TestConformance_RFC9110_Sec661_DateOnMustStatuses pins rfc9110.txt:2313 for
+// TestConformance_RFC9110_Sec661_DateOnMustStatuses pins RFC 9110 §6.6.1 for
 // the whole MUST range, on the native write path.
 func TestConformance_RFC9110_Sec661_DateOnMustStatuses(t *testing.T) {
 	for _, status := range []int{200, 204, 301, 304, 400, 404, 429} {
