@@ -277,8 +277,11 @@ func (sc *ServerConn) applyPeerSettings(s frame.SettingsParams) error {
 		return err
 	}
 	if changed {
+		// §6.9.2 applied the delta to EVERY open stream's send window above, so
+		// every parked writer's answer may have changed. This is one of the two
+		// events that genuinely needs the whole population.
 		sc.fcOutMu.Lock()
-		sc.fcOutCond.Broadcast()
+		sc.fcWakeAll()
 		sc.fcOutMu.Unlock()
 	}
 	return nil
@@ -295,7 +298,9 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 			return connError{code: frame.ErrCodeFlowControlError, msg: "WINDOW_UPDATE overflowed connection send window"}
 		}
 		sc.peerConnSendWindow = int32(newVal) //nolint:gosec // G115: checked above
-		sc.fcOutCond.Broadcast()
+		// Connection credit only. A writer whose own stream window is empty is
+		// not released by this and is not woken for it.
+		sc.fcWakeConn()
 		sc.fcOutMu.Unlock()
 		return nil
 	}
@@ -337,8 +342,11 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 	}
 	s.sendWindow = int32(newVal) //nolint:gosec // G115: checked above
 	s.mu.Unlock()
+	// One stream's window grew, so exactly that stream's writers are released.
+	// This is the site the whole waiter list exists for: it used to broadcast to
+	// every parked writer on the connection to reach the one or two on s.
 	sc.fcOutMu.Lock()
-	sc.fcOutCond.Broadcast()
+	sc.fcWakeStream(s)
 	sc.fcOutMu.Unlock()
 	return nil
 }
@@ -670,13 +678,92 @@ func (sc *ServerConn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 
 // acquireSendCredits blocks until both per-stream and connection-level
 // outbound send windows have credit, then deducts up to `want` bytes.
+//
+// This function is the uncontended case and nothing else. It declares no
+// fcWaiter, so there is nothing here for the compiler to heap-allocate and a
+// writer that never blocks stays at 0 allocs/op; the blocking half lives one
+// call away in parkForSendCredits for exactly that reason.
 func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, want int) (int, error) {
 	if want <= 0 {
 		return 0, nil
 	}
 
 	sc.fcOutMu.Lock()
-	defer sc.fcOutMu.Unlock()
+	if sc.closed.Load() {
+		sc.fcOutMu.Unlock()
+		return 0, ErrConnClosed
+	}
+	if err := ctx.Err(); err != nil {
+		sc.fcOutMu.Unlock()
+		return 0, err
+	}
+	if n, ok := sc.takeSendCredits(ss, want); ok {
+		sc.fcOutMu.Unlock()
+		return int(n), nil
+	}
+	sc.fcOutMu.Unlock()
+	return sc.parkForSendCredits(ctx, ss, want)
+}
+
+// takeSendCredits deducts up to want octets from both send windows if there is
+// anything to deduct, reporting whether it did. Caller holds sc.fcOutMu.
+//
+// The amount is bounded by min(stream, connection) because RFC 9113 §6.9 debits
+// both windows for the same octets: the smaller of the two is what the peer has
+// actually authorised.
+//
+// The stream window is read and debited under a SINGLE ss.mu acquisition. The
+// previous shape released ss.mu between the two, which both cost an extra pair
+// of lock operations on the hot uncontended path and left room for a concurrent
+// SETTINGS_INITIAL_WINDOW_SIZE decrease — applyInitialWindow adjusts
+// st.sendWindow under st.mu alone, and its delta is negative when the peer
+// shrinks the window — to land in the gap and be overwritten by the debit.
+func (sc *ServerConn) takeSendCredits(ss *ServerStream, want int) (int32, bool) {
+	connWin := sc.peerConnSendWindow
+	ss.mu.Lock()
+	avail := ss.sendWindow
+	if connWin < avail {
+		avail = connWin
+	}
+	if avail <= 0 {
+		ss.mu.Unlock()
+		return 0, false
+	}
+	n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
+	if n > avail {
+		n = avail
+	}
+	ss.sendWindow -= n
+	ss.mu.Unlock()
+	sc.peerConnSendWindow -= n
+	return n, true
+}
+
+// parkForSendCredits is acquireSendCredits' blocking half: it waits until a
+// grant releases THIS writer, then takes its credit.
+//
+// It is also where the old acquireSendCreditsSlow went. That path spawned a
+// watchdog goroutine per park whose entire job was to turn context cancellation
+// into a Broadcast; a waiter holding its own channel selects on ctx.Done()
+// itself, so the goroutine, its closure and its channel are all gone. A
+// background context yields a nil Done channel, and a nil channel in a select
+// is a case that never fires — so the same loop serves both contexts and there
+// is no second copy of this logic to drift.
+func (sc *ServerConn) parkForSendCredits(ctx context.Context, ss *ServerStream, want int) (int, error) {
+	w := fcWaiter{ss: ss, ready: make(chan struct{}, 1)}
+	done := ctx.Done()
+
+	sc.fcOutMu.Lock()
+	// Unpark unconditionally on every exit. It is a no-op on the paths that have
+	// already unparked, and it is the one thing that must never be missed: a
+	// waiter left linked after its frame returns is a phantom entry that every
+	// later grant walks and wakes, and it would leave fcConnBlocked permanently
+	// wrong.
+	defer func() {
+		sc.fcUnpark(&w)
+		sc.fcOutMu.Unlock()
+	}()
+
 	for {
 		if sc.closed.Load() {
 			return 0, ErrConnClosed
@@ -684,34 +771,34 @@ func (sc *ServerConn) acquireSendCredits(ctx context.Context, ss *ServerStream, 
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		ss.mu.Lock()
-		streamWin := ss.sendWindow
-		ss.mu.Unlock()
-		connWin := sc.peerConnSendWindow
-		avail := streamWin
-		if connWin < avail {
-			avail = connWin
-		}
-		if avail > 0 {
-			n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
-			if n > avail {
-				n = avail
-			}
-			sc.peerConnSendWindow -= n
-			ss.mu.Lock()
-			ss.sendWindow -= n
-			ss.mu.Unlock()
+		if n, ok := sc.takeSendCredits(ss, want); ok {
 			return int(n), nil
 		}
-		// Only spawn watchdog goroutine when we actually need to wait
-		// and the context might be cancelled (non-background contexts).
-		if ctx.Done() != nil {
-			sc.fcOutMu.Unlock()
-			n, err := sc.acquireSendCreditsSlow(ctx, ss, want)
-			sc.fcOutMu.Lock()
-			return n, err
+
+		// Record which window is the binding constraint before parking: it is
+		// exactly what fcWakeConn selects on. Must be set before fcPark, which
+		// folds it into fcConnBlocked, and must not change while parked — the
+		// next iteration re-derives it after fcUnpark has undone the count.
+		ss.mu.Lock()
+		w.needConn = ss.sendWindow > 0
+		ss.mu.Unlock()
+
+		sc.fcPark(&w)
+		sc.fcOutMu.Unlock()
+		select {
+		case <-w.ready:
+		case <-done: // nil for a background context: this arm never fires
 		}
-		sc.fcOutCond.Wait()
+		sc.fcOutMu.Lock()
+		sc.fcUnpark(&w)
+		// A grant that landed while we were leaving for another reason leaves a
+		// token in the channel. Drop it: the loop re-reads both windows from
+		// scratch, so the token carries nothing that is not re-derived, and
+		// keeping it would spend a whole iteration discovering that.
+		select {
+		case <-w.ready:
+		default:
+		}
 	}
 }
 
@@ -748,11 +835,19 @@ func (sc *ServerConn) releaseSendCredits(ss *ServerStream, n int) {
 	}
 	sc.fcOutMu.Lock()
 	sc.peerConnSendWindow = addWindowSaturating(sc.peerConnSendWindow, n)
-	sc.fcOutCond.Broadcast()
-	sc.fcOutMu.Unlock()
 	ss.mu.Lock()
 	ss.sendWindow = addWindowSaturating(ss.sendWindow, n)
 	ss.mu.Unlock()
+	// Both windows grew, so both notifications are owed — and both are issued
+	// only after both refunds have landed. The sync.Cond version broadcast with
+	// fcOutMu held and took ss.mu to refund the STREAM window afterwards, so a
+	// writer that this refund had released could wake, re-read a stream window
+	// not yet restored, and park again with no further wakeup owed to it —
+	// stranded until the peer happened to send another WINDOW_UPDATE. Refunding
+	// both under fcOutMu before waking anyone closes that.
+	sc.fcWakeStream(ss)
+	sc.fcWakeConn()
+	sc.fcOutMu.Unlock()
 }
 
 // addWindowSaturating adds n to a flow-control window, capping at the RFC 9113
@@ -764,53 +859,6 @@ func addWindowSaturating(win int32, n int) int32 {
 		return int32(maxWindow)
 	}
 	return int32(v) //nolint:gosec // G115: bounded above here, and n > 0
-}
-
-// acquireSendCreditsSlow is the slow path that spawns a watchdog goroutine
-// to wake the condition variable when the context is cancelled.
-func (sc *ServerConn) acquireSendCreditsSlow(ctx context.Context, ss *ServerStream, want int) (int, error) {
-	watchdog := make(chan struct{})
-	defer close(watchdog)
-	go func() {
-		select {
-		case <-ctx.Done():
-			sc.fcOutMu.Lock()
-			sc.fcOutCond.Broadcast()
-			sc.fcOutMu.Unlock()
-		case <-watchdog:
-		}
-	}()
-
-	sc.fcOutMu.Lock()
-	defer sc.fcOutMu.Unlock()
-	for {
-		if sc.closed.Load() {
-			return 0, ErrConnClosed
-		}
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		ss.mu.Lock()
-		streamWin := ss.sendWindow
-		ss.mu.Unlock()
-		connWin := sc.peerConnSendWindow
-		avail := streamWin
-		if connWin < avail {
-			avail = connWin
-		}
-		if avail > 0 {
-			n := int32(want) //nolint:gosec // G115: want ≤ maxFrameSize
-			if n > avail {
-				n = avail
-			}
-			sc.peerConnSendWindow -= n
-			ss.mu.Lock()
-			ss.sendWindow -= n
-			ss.mu.Unlock()
-			return int(n), nil
-		}
-		sc.fcOutCond.Wait()
-	}
 }
 
 // writeWindowUpdate emits a WINDOW_UPDATE frame.

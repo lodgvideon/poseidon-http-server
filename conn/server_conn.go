@@ -44,9 +44,19 @@ type ServerConn struct {
 	connRecvWindow    int32
 	connRefundPending uint32
 
-	// fcOutMu guards the outbound connection-level send window.
+	// fcOutMu guards the outbound connection-level send window, and with it the
+	// population of writers parked for outbound credit: fcHead, fcConnBlocked,
+	// and every field of every fcWaiter reachable from either — including the
+	// per-stream list heads hanging off ServerStream.fcHead.
+	//
+	// fcHead roots the connection-wide list of parked writers; fcConnBlocked
+	// counts the subset of them that hold stream credit and want only connection
+	// credit, so a connection WINDOW_UPDATE that can release nobody costs one
+	// comparison. See conn/fc_waiters.go for why this is a list of private
+	// channels rather than a sync.Cond.
 	fcOutMu            sync.Mutex
-	fcOutCond          *sync.Cond
+	fcHead             *fcWaiter
+	fcConnBlocked      int
 	peerConnSendWindow int32
 
 	closed     atomic.Bool
@@ -341,7 +351,6 @@ func NewServerConn(ctx context.Context, nc net.Conn, opts ServerConnOptions) (*S
 		return settingValue(sc.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	})
 	sc.fr = newCountingFramer(nc, sc, opts.AdvertisedSettings.MaxFrameSize)
-	sc.fcOutCond = sync.NewCond(&sc.fcOutMu)
 	// Connection-lifetime context: cancelled on Close or when the caller's ctx
 	// is cancelled. Per-stream contexts derive from this.
 	sc.connCtx, sc.connCancel = context.WithCancel(ctx)
@@ -576,10 +585,13 @@ func (sc *ServerConn) Close() error {
 	if sc.connCancel != nil {
 		sc.connCancel() // cancel every in-flight handler's context
 	}
+	// Every parked writer's answer changed: acquireSendCredits returns
+	// ErrConnClosed once sc.closed is set, so all of them must re-check. The nil
+	// guard the sync.Cond version needed is gone with it — an empty list is the
+	// zero value, so this is safe on a ServerConn that never finished its
+	// handshake.
 	sc.fcOutMu.Lock()
-	if sc.fcOutCond != nil {
-		sc.fcOutCond.Broadcast()
-	}
+	sc.fcWakeAll()
 	sc.fcOutMu.Unlock()
 
 	// Best-effort GOAWAY. The write deadline is set under wmu together with the

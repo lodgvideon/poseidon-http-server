@@ -45,6 +45,16 @@ type ServerStream struct {
 	recvWindow        int32
 	recvRefundPending uint32
 	sendWindow        int32
+
+	// fcHead roots the list of writers parked in acquireSendCredits waiting for
+	// THIS stream's send window, so a WINDOW_UPDATE naming this stream reaches
+	// them without walking the connection's other waiters.
+	//
+	// Guarded by sc.fcOutMu, NOT by mu — see conn/fc_waiters.go. Keeping it off
+	// mu is what lets a notifier wake this stream's writers while holding only
+	// fcOutMu, which is the outer lock: taking mu there would invert the
+	// documented fcOutMu-then-mu order that acquireSendCredits relies on.
+	fcHead *fcWaiter
 }
 
 // Priority returns the RFC 7540 §5.3 priority payload extracted from
