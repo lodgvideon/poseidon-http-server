@@ -39,6 +39,27 @@ func BenchmarkWriteServerHeaders(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+	b.StopTimer()
+	benchAssertFramesSent(b, sc)
+}
+
+// benchAssertFramesSent fails the benchmark unless the connection put at least
+// one frame on the wire per iteration.
+//
+// The parallel file has carried this check since it was written
+// (benchParAssertWrites) and the sequential one never did, which is the wrong
+// way round: these three benchmarks reach the transport through more layers than
+// the parallel ones do. A write benchmark that quietly stops reaching the write
+// path — an early return added above it, a stream state that starts refusing —
+// does not fail, it reports a smaller number, and a smaller number is the one
+// result nobody investigates. ConnStats.FramesSent also counts the handshake
+// SETTINGS and any WINDOW_UPDATE, so the bound is deliberately ">=" and this can
+// only ever be a floor, never an exact accounting.
+func benchAssertFramesSent(b *testing.B, sc *ServerConn) {
+	b.Helper()
+	if got := sc.Stats().FramesSent; got < int64(b.N) {
+		b.Fatalf("write path not reached: %d frames sent for %d iterations", got, b.N)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +99,8 @@ func BenchmarkWriteServerData_Small(b *testing.B) {
 		stream.mu.Unlock()
 		sc.fcOutMu.Unlock()
 	}
+	b.StopTimer()
+	benchAssertFramesSent(b, sc)
 }
 
 // BenchmarkWriteServerData_16K measures 16KB payload write.
@@ -110,6 +133,8 @@ func BenchmarkWriteServerData_16K(b *testing.B) {
 		stream.mu.Unlock()
 		sc.fcOutMu.Unlock()
 	}
+	b.StopTimer()
+	benchAssertFramesSent(b, sc)
 }
 
 // ---------------------------------------------------------------------------
