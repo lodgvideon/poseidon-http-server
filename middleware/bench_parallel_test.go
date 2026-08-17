@@ -16,6 +16,7 @@ package middleware
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -89,4 +90,123 @@ func BenchmarkMetricsObserveDuration_Parallel(b *testing.B) {
 			c.ObserveDuration(http.MethodGet, "/bench", time.Millisecond)
 		}
 	})
+}
+
+// fullCollector returns a collector holding the maximum number of series the
+// default bounds admit, which is the worst case for a scrape.
+func fullCollector(b *testing.B) *MetricsCollector {
+	b.Helper()
+	c := NewMetricsCollector()
+	h := c.Metrics()(server.HandlerFunc(func(context.Context, *server.Request, server.ResponseWriter) error {
+		return nil
+	}))
+	ctx := context.Background()
+	w := &benchParRW{}
+	for i := range DefaultMaxSeries {
+		_ = h.ServeHTTP(ctx, &server.Request{
+			Method: http.MethodGet,
+			Path:   "/route/" + strconv.Itoa(i),
+			Body:   []byte("b"),
+		}, w)
+	}
+	return c
+}
+
+// BenchmarkMetricsWritePrometheus_FullCollector is the measurement issue #109
+// asked for and did not have: WritePrometheus holds the collector read lock for
+// the entire exposition build, so this ns/op IS the lock hold, on the largest
+// collector the default cardinality bound allows (DefaultMaxSeries series in
+// each of four maps, ~14 exposition lines per histogram).
+//
+// What that hold blocks is the write lock — inserting a first-sight series and
+// running the idle sweep. Weigh it against the scrape interval, not against a
+// request: at a 15s interval a hold of h seconds delays insertions for h/15 of
+// the time.
+func BenchmarkMetricsWritePrometheus_FullCollector(b *testing.B) {
+	c := fullCollector(b)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		sink = c.WritePrometheus()
+	}
+}
+
+var sink string
+
+// scrapeInBackground runs WritePrometheus in a loop until the returned stop
+// function is called, which it waits for the scraper to observe.
+func scrapeInBackground(c *MetricsCollector) (stop func()) {
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-quit:
+				return
+			default:
+			}
+			sink = c.WritePrometheus()
+		}
+	}()
+	return func() {
+		close(quit)
+		<-done
+	}
+}
+
+// BenchmarkMetricsWriteLockDuringScrape times the ONE thing a scrape blocks:
+// acquiring the write lock, which is what creating a first-sight series, running
+// the idle sweep and republishing the lock-free views all have to do (issue
+// #109). The collector is pre-filled to the default bound, so each background
+// scrape is a full-size exposition build.
+//
+// Taking and immediately releasing the lock is the whole iteration on purpose:
+// inserting real series instead would grow the collector without bound as the
+// benchmark ran, which changes the cost of the very scrape being measured.
+//
+// Read it against BenchmarkMetricsWritePrometheus_FullCollector: if the
+// exposition is built under the lock, every acquisition is a coin-flip on
+// landing inside a ~10ms hold; if it is built from a snapshot, the wait is only
+// the snapshot.
+func BenchmarkMetricsWriteLockDuringScrape(b *testing.B) {
+	c := fullCollector(b)
+	stop := scrapeInBackground(c)
+	defer stop()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		c.mu.Lock()
+		//nolint:staticcheck // the empty critical section IS the measurement
+		c.mu.Unlock()
+	}
+}
+
+// BenchmarkMetricsMiddlewareParallel_TrackedDuringScrape is the other half of
+// #109: the steady-state request path measured while a scraper hammers the
+// exposition build in the background. Compared against
+// BenchmarkMetricsMiddlewareParallel_Tracked it says whether a concurrent scrape
+// is visible from the request path at all.
+func BenchmarkMetricsMiddlewareParallel_TrackedDuringScrape(b *testing.B) {
+	c := fullCollector(b)
+	h := c.Metrics()(server.HandlerFunc(func(context.Context, *server.Request, server.ResponseWriter) error {
+		return nil
+	}))
+
+	stop := scrapeInBackground(c)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		ctx := context.Background()
+		w := &benchParRW{}
+		req := &server.Request{Method: http.MethodGet, Path: "/route/0"}
+		for pb.Next() {
+			_ = h.ServeHTTP(ctx, req, w)
+		}
+	})
+	b.StopTimer()
+	stop()
 }
