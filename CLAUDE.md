@@ -164,7 +164,9 @@ Rules that follow:
   - `MetricsCollector.mu` — **fixed in #120, keep it fixed.** The request path
     took four map lookups under an `RLock`. It never blocked, and that was the
     point: `RLock`/`RUnlock` on the reader counter were 13.3% of all CPU at
-    `-cpu=16` — 100% of the `Int32.Add` traffic — on a path scaling 1.36×.
+    `-cpu=16` — 100% of the `Int32.Add` traffic — on a path that scaled 1.27×
+    from 1 to 16 cores on the run the fix was judged against, and 1.26–1.62×
+    across runs.
     `middleware/metrics.go` now publishes an immutable `metricViews` snapshot
     behind an `atomic.Pointer`, rebuilt under the write lock on insert and on
     sweep, so a request does one atomic load and a map lookup and takes **no
