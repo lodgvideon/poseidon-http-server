@@ -695,17 +695,27 @@ func BenchmarkParallelWriteHeaders_PerConnTCP(b *testing.B) {
 }
 
 // ---------------------------------------------------------------------------
-// fcOutCond: what one WINDOW_UPDATE costs as the waiter population grows
+// Outbound flow control: what one WINDOW_UPDATE costs as the waiter population
+// grows
 // ---------------------------------------------------------------------------
 
 // BenchmarkFCOutCondBroadcast measures a single connection-level WINDOW_UPDATE
 // against the number of streams parked in acquireSendCredits.
 //
-// sc.fcOutCond.Broadcast() wakes EVERY waiter (there is no Signal() anywhere in
-// conn/). Each one re-acquires fcOutMu, re-reads its own window, finds it still
-// empty and parks again — so the cost of one WINDOW_UPDATE is expected to grow
-// with the waiter count. The waiters here hold a zero stream send window, which
-// is exactly the state a real stream is in when it is waiting for credit.
+// The waiters here hold a zero stream send window, which is exactly the state a
+// real stream is in while it waits for credit — and, for a CONNECTION-level
+// grant, the state in which no amount of connection credit can release them,
+// since the available send is min(stream, connection).
+//
+// Until #118 that made no difference: sc.fcOutCond.Broadcast() woke EVERY waiter
+// (there was no Signal() anywhere in conn/), each re-acquired fcOutMu, re-read
+// its own window, found it still empty and parked again — so the cost of one
+// WINDOW_UPDATE grew with the waiter count. conn/fc_waiters.go replaced the
+// condition variable with per-waiter channels and a wake that selects on that
+// same min(), so this benchmark now measures a grant that correctly releases
+// nobody. It is kept, and kept in this shape, because it is the number the
+// ticket quoted: the name and the setup have to stay comparable for the
+// before/after to mean anything.
 func BenchmarkFCOutCondBroadcast(b *testing.B) {
 	for _, waiters := range []int{0, 1, 8, 64} {
 		b.Run(fmt.Sprintf("waiters=%d", waiters), func(b *testing.B) {
@@ -729,7 +739,7 @@ func BenchmarkFCOutCondBroadcast(b *testing.B) {
 			for i := range waiters {
 				ss := streams[i]
 				ss.mu.Lock()
-				ss.sendWindow = 0 // no stream credit => park in fcOutCond.Wait
+				ss.sendWindow = 0 // no stream credit => park in acquireSendCredits
 				ss.mu.Unlock()
 				wg.Add(1)
 				go func() {

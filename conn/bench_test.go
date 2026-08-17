@@ -89,7 +89,7 @@ func BenchmarkWriteServerData_Small(b *testing.B) {
 		// client sends exactly two, both before this loop starts. Unrefunded,
 		// 100 octets per iteration exhausts the 65535+2^30 it grants at
 		// b.N = 10738074, where writeServerData blocks forever in
-		// acquireSendCredits' fcOutCond.Wait — the context is Background, so
+		// acquireSendCredits' park — the context is Background, so
 		// there is no cancellation to break it, and `go test -timeout` does not
 		// cover benchmarks (testing.M.Run stops the alarm before runBenchmarks).
 		sc.fcOutMu.Lock()
@@ -470,7 +470,7 @@ func benchmarkServerConn(b *testing.B) *ServerConn {
 		// that never writes to the socket (AcquireSendCredits, OnWindowUpdate,
 		// OnDataReceived) never arms it and is re-armed past; those cannot wedge
 		// on the socket. The wedge this catches is the one #123 names:
-		// writeServerData blocking in acquireSendCredits' fcOutCond.Wait, whose
+		// writeServerData blocking in acquireSendCredits' park, whose
 		// context here is Background and so has no cancellation.
 		//
 		// b.Fatal is unavailable here — only the goroutine running the benchmark
