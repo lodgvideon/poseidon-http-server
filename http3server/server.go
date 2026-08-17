@@ -142,9 +142,15 @@ type Server struct {
 	// against a peer that completes the handshake and stops reading its socket, so
 	// this server's HANDSHAKE_DONE and control-stream SETTINGS stay unacknowledged:
 	//
-	//	IdleTimeout   1s     30s    600s   none(<0)   held
-	//	              340.33s each, identical to 10ms, ending in a read timeout
-	//	              rather than quic.ErrIdleTimeout — the idle timer never fired.
+	//	IdleTimeout:   1s        30s       600s      none (<0)
+	//	held:          340.33s   340.33s   340.34s   340.34s
+	//
+	// All four identical to 10ms, and all ending in a read timeout rather than
+	// quic.ErrIdleTimeout — the idle timer never fired. The last column is what
+	// settles it: with no max_idle_timeout in effect there is no deadline to floor,
+	// so anything blamed on the floor predicts no bound at all there, and the hold
+	// is unchanged. Control connections whose peer acknowledged the opening flight
+	// and then went quiet closed at 1.00s with quic.ErrIdleTimeout.
 	//
 	// 340.33s is 511*666ms: a server-role quic.Conn is built with no RTT sample
 	// (quic/server.go NewServerConn), so its base PTO is the 2*kInitialRtt fallback.
