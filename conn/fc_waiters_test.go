@@ -129,12 +129,47 @@ func fcAwaitReleased(t *testing.T, w *fcWriter, what string) {
 	t.Fatalf("%s: writer on stream %d was never woken — missed wakeup", what, w.ss.id)
 }
 
-// fcAssertStillParked gives w every chance to wake and asserts it did not.
+// fcAssertStillParked gives w every chance to wake and asserts it did not
+// PROCEED.
+//
+// Note what this cannot see, and why fcAssertNotWokenBy exists alongside it: a
+// writer woken by an over-broad grant re-reads its windows, finds nothing, and
+// parks again — so it never looks released. Mutation testing caught exactly
+// that. Replacing fcWakeConn's predicate with `true`, which restores the entire
+// thundering herd this change removes, left every assertion in this file green.
+// "Did not proceed" is the correctness property; "was not woken" is the
+// performance property, and they need different instruments.
 func fcAssertStillParked(t *testing.T, w *fcWriter, what string) {
 	t.Helper()
 	time.Sleep(fcParkSettleTime)
 	if w.released() {
-		t.Fatalf("%s: writer on stream %d woke for a grant that cannot release it", what, w.ss.id)
+		t.Fatalf("%s: writer on stream %d proceeded on a grant that cannot release it", what, w.ss.id)
+	}
+}
+
+// fcAssertNotWokenBy runs grant with fcOutMu held and asserts that every stream
+// named in untouched still has its waiters linked when grant returns.
+//
+// This is the instrument for the performance property, and it is exact rather
+// than timing-based: fcWake unlinks the waiter it wakes, under the very lock
+// held across this call, so "still linked when the grant returns" is precisely
+// "this grant did not wake it". Nothing sleeps, nothing polls, and there is no
+// race against the woken goroutine re-parking — it cannot re-park until the
+// lock is released.
+func fcAssertNotWokenBy(t *testing.T, sc *ServerConn, what string, grant func(), untouched ...*ServerStream) {
+	t.Helper()
+	woken := make([]uint32, 0, len(untouched))
+	sc.fcOutMu.Lock()
+	grant()
+	for _, ss := range untouched {
+		if ss.fcHead == nil {
+			woken = append(woken, ss.id)
+		}
+	}
+	sc.fcOutMu.Unlock()
+	if len(woken) > 0 {
+		t.Fatalf("%s: woke the waiters on streams %v, which it cannot release — "+
+			"that is the broadcast this change exists to remove", what, woken)
 	}
 }
 
@@ -189,8 +224,15 @@ func TestFCWaiters_StreamGrantWakesOnlyThatStream(t *testing.T) {
 		fcAssertStillParked(t, w, "connection grant with every stream window empty")
 	}
 
-	// Now credit exactly one stream.
-	grantStreamCredit(t, sc, streams[2], fcParkWant)
+	// Credit one stream and prove, in the same critical section as the wake,
+	// that the other three writers were not so much as touched.
+	streams[2].mu.Lock()
+	streams[2].sendWindow += fcParkWant
+	streams[2].mu.Unlock()
+	fcAssertNotWokenBy(t, sc, "per-stream grant naming stream 5",
+		func() { sc.fcWakeStream(streams[2]) },
+		streams[0], streams[1], streams[3])
+
 	fcAwaitReleased(t, writers[2], "per-stream WINDOW_UPDATE")
 	if got := writers[2].got.Load(); got != fcParkWant {
 		t.Fatalf("released writer took %d octets, want %d", got, fcParkWant)
@@ -201,6 +243,33 @@ func TestFCWaiters_StreamGrantWakesOnlyThatStream(t *testing.T) {
 		}
 		fcAssertStillParked(t, w, "per-stream WINDOW_UPDATE naming a different stream")
 	}
+}
+
+// TestFCWaiters_StreamGrantThroughOnWindowUpdate is the same selectivity claim
+// routed through the real inbound frame path, so the two halves are covered
+// separately: this one proves onWindowUpdate reaches fcWakeStream at all, and
+// its sibling above proves fcWakeStream picks the right waiters.
+func TestFCWaiters_StreamGrantThroughOnWindowUpdate(t *testing.T) {
+	sc, streams := fcTestConn(t, 3)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer func() {
+		sc.closed.Store(true)
+		sc.fcOutMu.Lock()
+		sc.fcWakeAll()
+		sc.fcOutMu.Unlock()
+	}()
+
+	grantConnCredit(t, sc, 1<<20)
+	writers := make([]*fcWriter, len(streams))
+	for i, ss := range streams {
+		writers[i] = fcParkWriter(context.Background(), t, sc, ss, &wg)
+	}
+
+	grantStreamCredit(t, sc, streams[1], fcParkWant)
+	fcAwaitReleased(t, writers[1], "per-stream WINDOW_UPDATE via onWindowUpdate")
+	fcAssertStillParked(t, writers[0], "WINDOW_UPDATE naming another stream")
+	fcAssertStillParked(t, writers[2], "WINDOW_UPDATE naming another stream")
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +311,17 @@ func TestFCWaiters_ConnGrantWakesOnlyStreamCreditHolders(t *testing.T) {
 		t.Fatalf("fcConnBlocked = %d, want 1 (only the stream-credit holder waits on the connection)", blocked)
 	}
 
-	grantConnCredit(t, sc, fcParkWant)
+	// The waste being removed is the WAKEUP, not the release: a writer woken here
+	// would re-read min(0, credit), find nothing and park again, so asserting on
+	// "did not proceed" alone cannot see it. Assert on the link state, in the same
+	// critical section as the wake.
+	fcAssertNotWokenBy(t, sc, "connection grant with an empty stream window",
+		func() {
+			sc.peerConnSendWindow = addWindowSaturating(sc.peerConnSendWindow, fcParkWant)
+			sc.fcWakeConn()
+		},
+		streams[1])
+
 	fcAwaitReleased(t, hasStreamCredit, "connection WINDOW_UPDATE")
 	fcAssertStillParked(t, noStreamCredit, "connection WINDOW_UPDATE with an empty stream window")
 
