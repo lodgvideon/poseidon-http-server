@@ -80,3 +80,30 @@ because the text above overstated it in two ways (#101, #130).
 
 So the contract's teeth are real but local and allocation-only: run
 `make bench-gate` yourself, against a baseline you recorded on the same machine.
+
+## The contention axis is gated separately (description, added 2026-08-17)
+
+Nothing above changes; this only says where to look for the other half. This
+ADR's contract is about allocation counts, and `bench-gate`'s `sec/op` limit is
+set where a shared host's identical-code drift leaves it (+50%). Neither
+observes lock contention, which is superlinear in core count and invisible to a
+single-goroutine `ns/op` — the tension CLAUDE.md's "locks cost more than
+allocations" section records against ADR-0003.
+
+`scripts/contention-gate.sh` (#121) covers that axis and is deliberately a
+different instrument, not a fourth metric in `bench-gate`:
+
+- It **compares two arms it builds itself**, interleaved on one machine, rather
+  than a run against a committed file. The serialisation penalty scales with the
+  measuring machine's core count, so a recorded baseline cannot travel — which
+  is the same reason `ci.yml` gives for not committing one here.
+- It has **no self-baselining branch**. The branch described above — record the
+  first run, print PASS, compare nothing — is the one `bench-gate` always takes
+  today, and a gate that cannot fail reports success.
+  `scripts/contention-gate-selftest.sh` asserts on committed fixtures that the
+  contention gate still reaches red, green, not-measurable and
+  nothing-compared, and the nightly runs it before anything expensive.
+- It is **nightly and non-blocking** (`.github/workflows/perf-nightly.yml`).
+  Whether a timing gate can be a required check on GitHub's shared runners is
+  not known for this repository, and the workflow uploads its raw measurement so
+  that question gets an answer instead of an assumption.

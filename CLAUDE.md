@@ -63,6 +63,8 @@ make test-race      # go test -race -count=1 ./...   (CI runs with -race)
 make coverage-gate  # race coverage + scripts/coverage-gate.sh (min 80%, COVERAGE_MIN)
 make bench          # benchmarks, -benchmem
 make bench-gate     # scripts/bench-gate.sh — per-metric gate, see below
+make contention-gate           # scripts/contention-gate.sh — same-runner A/B, see below
+make contention-gate-selftest  # assert that gate still reaches red AND green
 make lint           # go vet ./... + golangci-lint run
 make tidy           # go mod tidy
 ```
@@ -109,10 +111,35 @@ above allocation count.
 
 Why: an allocation is a steady tax the GC amortises, and `make bench-gate`
 already measures it. Lock contention is superlinear in core count and appears
-only under concurrency — where, today, **no gate looks at all**. A connection-wide
-write mutex serialises every stream on that connection no matter how many cores
-are idle, so the allocation contract can be perfect and the server still not
-scale.
+only under concurrency. A connection-wide write mutex serialises every stream on
+that connection no matter how many cores are idle, so the allocation contract can
+be perfect and the server still not scale.
+
+**What now looks at it (#121).** `make contention-gate` runs
+`scripts/contention-gate.sh`: a same-runner A/B on `conn`'s
+`_SharedConn`/`_PerConn` pairs that builds both arms locally, runs them
+interleaved, and fails when the shared-connection number regresses beyond
+`CONTENTION_THRESHOLD` (default +30%). Know its limits before quoting it:
+
+- It is **nightly and non-blocking** (`.github/workflows/perf-nightly.yml`), not
+  a required PR check. The false-positive rate of a timing gate on GitHub's
+  shared runners has never been measured for this repository; blocking on an
+  unmeasured flake rate is how a check gets disabled.
+- It gates **`ns_Shared(N)`**, not a ratio. Every normalisation tried was
+  noisier than the raw number, and dividing by the `_PerConn` control at the
+  same `-cpu` inverts on the regression it is named after: an added uncontended
+  lock moves the control ~+140% and the shared arm ~+4%, so the ratio would
+  report an improvement. The control is a **guard** (below a 2× shared/control
+  penalty the machine cannot resolve a lock, and the pair is reported NOT
+  MEASURABLE rather than judged) and an **attribution** (a regression the
+  control did not share is contention; one it shared is `bench-gate`'s
+  question).
+- It covers the **HEADERS and DATA pairs only**. `RegisterStream` is
+  allocator-bound and its control's median swung 175 ns → 672 ns on identical
+  code; the `_TCP` pair cannot resolve a change to what `wmu` protects (#197).
+- Unlike `bench-gate` it has **no self-baselining branch**, and
+  `scripts/contention-gate-selftest.sh` asserts on every nightly run that the
+  gate still reaches red, green, not-measurable and nothing-compared.
 
 Rules that follow:
 
