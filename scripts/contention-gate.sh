@@ -48,21 +48,27 @@
 #   context: ns_Per(N)                    — N connections, N goroutines
 #   guard:   penalty = Shared(N)/Per(N)   — how much the connection serialises
 #
-# The verdict is on ns_Shared(N). The control is NOT a divisor. That was the
-# first design and the measurement rejected it, twice over:
+# The verdict is on ns_Shared(N). The control is NOT a divisor — #121 proposes
+# exactly that, and it was measured and rejected. Over interleaved
+# identical-code passes on the reference host, worst drift:
 #
-#   * ns_Per(N) is a throughput number that falls as ~1/N, so it is tiny — ~9 ns
-#     against the shared arm's ~110 ns on the reference host. Adding ONE
-#     uncontended mutex acquisition to the write path moves it ~+140% and moves
-#     the shared arm ~+4%, so Shared/Per would report a large IMPROVEMENT for a
-#     change that added a lock. A gate that goes green on the regression it is
-#     named after is worse than no gate.
-#   * Measured rather than argued: over interleaved identical-code passes on the
-#     reference host, the worst drift of the ratio Shared(N)/Per(N) was 23.4% on
-#     the DATA pair against 8.4% for ns_Shared(N) alone, and the variants
-#     normalising by the -cpu=1 arm were worse still (up to 92.7%), because the
-#     single-goroutine measurement is the noisiest number in the set. Every ratio
-#     considered was LOUDER than the raw number it was supposed to stabilise.
+#     ns_Shared(N) alone                          8.4% (DATA), 20.4% (HEADERS)
+#     Shared(N) / Per(N)                         23.4% (DATA)
+#     Shared(N) / Per(1)                         92.7% (DATA)
+#     speedup ratio, Shared(1→N) over Per(1→N)   63.5% (DATA)
+#
+# Every normalisation considered was LOUDER than the raw number it was supposed
+# to stabilise, and anything built on the -cpu=1 arm is worst, because the
+# single-goroutine measurement is the noisiest number in the set. A ratio of two
+# noisy medians is two noises, not one cancelled.
+#
+# Note what is NOT claimed here. An earlier draft argued the ratio would invert
+# on an added lock — that a new uncontended mutex would move the control far more
+# than the shared arm and so read as an improvement. Measured, it does not:
+# wrapping the whole of writeServerHeaders in a second connection-wide mutex
+# moved the shared arm +2.22% and the control +2.53%, both inside noise (see
+# below). The ratio is rejected because it is noisier, which is measured, not
+# because it inverts, which is not.
 #
 # So the control earns its place as a guard and as context, not as a divisor:
 #
@@ -71,15 +77,22 @@
 #     reported NOT MEASURABLE rather than judged.
 #   * context — the report prints the control's numbers beside the verdict, and
 #     stops there. It does not classify the regression as "contention" or "work".
-#     That classifier was written and then removed: two injected connection-wide
-#     locks — an exclusive peer-settings read on the DATA path, and a second
-#     mutex wrapped around the whole HEADERS write — moved the shared arm by
-#     nothing measurable (+7.6% within noise, and −4.6% respectively). The write
-#     path is already ~100% serialised on wmu, so a second lock takes away no
-#     parallelism that wmu has not already taken. Read the pair of numbers: the
-#     control at -cpu=N is a throughput figure and therefore a hypersensitive
-#     detector of added WORK, so a control that moved with the shared arm points
-#     at the work rather than the lock.
+#     That classifier was written and then removed, because its "contention"
+#     branch could not be made to fire. Two injected connection-wide locks, each
+#     compared against byte-identical source over a full run:
+#
+#         fcOutMu held across the whole of writeServerHeaders, outside wmu
+#             HEADERS shared +2.22%, control +2.53%; DATA shared +0.09%
+#         the above, plus psMu.RLock -> exclusive Lock in writeServerData
+#             HEADERS shared +3.42%; DATA shared +9.52%, control -0.74%
+#
+#     A second connection-wide mutex around every HEADERS write is inside the
+#     noise. wmu already serialises the path completely — CLAUDE.md's #95 figure
+#     is that one connection's HEADERS throughput never improves past one core —
+#     so another lock takes away no parallelism wmu has not already taken. A
+#     classifier whose "contention" verdict has never fired on a real regression
+#     is a guess with a confident voice; the numbers are printed instead. See
+#     issue #205.
 #
 # What that means for what this gate can catch, stated rather than implied: on
 # today's code the detectable regression is "the serialised section got longer".
@@ -325,16 +338,10 @@ awk -v hi="$CPU" -v thr="$THRESHOLD" -v minp="$MIN_PENALTY" \
       bad = (d > thr + 0)
       printf "%-14s %10.4g %10.4g %+8.2f %10.4g %10.4g %+8.2f %9.2f %8s\n", pr, bS, cS, d, bC, cC, dc, pen, (bad ? "FAIL" : "ok")
       if (bad) {
-        # Both deltas, no verdict on WHICH kind of regression it is. The obvious
-        # rule — "the control did not share it, so it is the lock" — was not
-        # shipped because it could not be exercised: two injected connection-wide
-        # locks (an exclusive peer-settings read on the DATA path, and a second
-        # mutex wrapping the whole HEADERS write) produced NO measurable
-        # regression on the shared arm at all, one of them measuring faster than
-        # the clean build. The write path is already ~100% serialised on wmu, so
-        # there is no parallelism left for another lock to take away. A classifier
-        # whose "contention" branch has never fired on a real regression is a
-        # guess with a confident voice; the numbers are printed instead.
+        # Both deltas, no verdict on WHICH kind of regression it is. The rule
+        # "the control did not share it, so it is the lock" was not shipped
+        # because its contention branch could not be exercised — see the header,
+        # and issue #205. The numbers are printed instead.
         printf "  %-14s shared %.4g -> %.4g ns (%+.2f%%, limit +%g%%); uncontended control %.4g -> %.4g ns (%+.2f%%)\n", \
                pr, bS, cS, d, thr + 0, bC, cC, dc > findings
       }

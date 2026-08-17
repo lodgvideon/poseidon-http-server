@@ -125,15 +125,22 @@ interleaved, and fails when the shared-connection number regresses beyond
   a required PR check. The false-positive rate of a timing gate on GitHub's
   shared runners has never been measured for this repository; blocking on an
   unmeasured flake rate is how a check gets disabled.
-- It gates **`ns_Shared(N)`**, not a ratio. Every normalisation tried was
-  noisier than the raw number, and dividing by the `_PerConn` control at the
-  same `-cpu` inverts on the regression it is named after: an added uncontended
-  lock moves the control ~+140% and the shared arm ~+4%, so the ratio would
-  report an improvement. The control is a **guard** (below a 2× shared/control
-  penalty the machine cannot resolve a lock, and the pair is reported NOT
-  MEASURABLE rather than judged) and an **attribution** (a regression the
-  control did not share is contention; one it shared is `bench-gate`'s
-  question).
+- It gates **`ns_Shared(N)`**, not a ratio — which is what #121 proposed. Worst
+  drift over interleaved identical-code passes: `ns_Shared(N)` 8.4%,
+  `Shared(N)/Per(N)` 23.4%, `Shared(N)/Per(1)` 92.7%, speedup ratio 63.5%. Every
+  normalisation was louder than the number it was meant to stabilise. The
+  `_PerConn` control is kept as a **guard** — below a 2× shared/control ratio the
+  machine cannot resolve a lock and the pair is reported NOT MEASURABLE rather
+  than judged — and as printed context. It does **not** classify a regression as
+  contention or work: that classifier's contention branch could not be made to
+  fire (below).
+- **It cannot see a newly added lock, and neither can anything else here.**
+  Wrapping the whole of `writeServerHeaders` in a second connection-wide mutex
+  moved the shared arm +2.22% and the control +2.53% — inside noise. `wmu`
+  already serialises the path completely, so there is no parallelism left for
+  another lock to take away. What the gate detects is **the serialised section
+  getting longer**. Do not cite a `_SharedConn` benchmark as evidence that a new
+  lock is free; see #205.
 - It covers the **HEADERS and DATA pairs only**. `RegisterStream` is
   allocator-bound and its control's median swung 175 ns → 672 ns on identical
   code; the `_TCP` pair cannot resolve a change to what `wmu` protects (#197).
