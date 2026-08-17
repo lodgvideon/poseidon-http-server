@@ -121,6 +121,49 @@ type Server struct {
 	// and one handshake buys an attacker a connection this package will never
 	// reap. It exists for closed deployments that keep connections alive by other
 	// means.
+	//
+	// # What it does not bound (issue #186)
+	//
+	// It bounds a connection whose peer has ACKNOWLEDGED what this server sent and
+	// then goes quiet — the ordinary idle client. It does NOT bound one that leaves
+	// something of this server's unacknowledged, because while a packet is in flight
+	// the idle deadline is unreachable, not merely late.
+	//
+	// RFC 9000 §10.1 requires that "endpoints MUST increase the idle timeout period
+	// to be at least three times the current Probe Timeout", and RFC 9002 §6.2.1
+	// doubles that PTO on every expiry. The transport re-evaluates the deadline as
+	// lastActivity+3*PTO on each probe, so at the k'th probe it sits 3*base*2^k
+	// ahead of a clock that has only reached base*(2^k - 1): it recedes about twice
+	// as fast as time passes and is never met. What ends the connection instead is
+	// the transport abandoning its probe ladder after maxPTOBackoff=8 doublings, at
+	// base*(2^9 - 1) — a poseidon-http-client constant, not a function of this field.
+	//
+	// Measured on loopback (http3server/idleprobe_manual_test.go, `-tags idleprobe`),
+	// against a peer that completes the handshake and stops reading its socket, so
+	// this server's HANDSHAKE_DONE and control-stream SETTINGS stay unacknowledged:
+	//
+	//	IdleTimeout   1s     30s    600s   none(<0)   held
+	//	              340.33s each, identical to 10ms, ending in a read timeout
+	//	              rather than quic.ErrIdleTimeout — the idle timer never fired.
+	//
+	// 340.33s is 511*666ms: a server-role quic.Conn is built with no RTT sample
+	// (quic/server.go NewServerConn), so its base PTO is the 2*kInitialRtt fallback.
+	// The same ladder governs ordinary traffic at a realistic base: a peer that
+	// sends one request and then stops reading held a 1s-IdleTimeout connection for
+	// 17.32s. So the overrun is not confined to a pathological peer, and it is not
+	// a multiple of the configured value — it is unrelated to it.
+	//
+	// This is the transport's to fix and is filed as poseidon-http-client#798; RFC
+	// 9002 §6.2.1 says the relationship should run the other way — "The total length
+	// of time over which consecutive PTOs expire is limited by the idle timeout."
+	// A deadline invented in this package could not stand in for it: quic.Conn
+	// exposes no last-activity accessor, and Poll returns nil on a probe expiry
+	// exactly as it does on a received datagram (quic/conn_recv.go handleExpiry ends
+	// in flush), so this package cannot tell an idle connection from a busy one. Any
+	// timer it added would be a blind connection-lifetime cap that reaped healthy
+	// long-lived requests too — which is why #143's own timer was rejected. Until
+	// the transport lands the bound, front an internet-facing deployment with a rate
+	// limiter, as the package doc already advises.
 	IdleTimeout time.Duration
 }
 
@@ -146,6 +189,11 @@ func (s *Server) transportParams() quic.ServerTransportParams {
 // PTOs anyway (RFC 9000 §10.1: "endpoints MUST increase the idle timeout period to
 // be at least three times the current Probe Timeout"), so the clamp cannot produce a
 // connection that closes under loss recovery.
+//
+// That floor turned out to bind far harder than "cannot close too early": while
+// anything is unacknowledged it outruns the clock and the idle timeout cannot close
+// the connection at all. See Server.IdleTimeout and issue #186 — it is why the 1ms
+// clamp is the least interesting thing about a small IdleTimeout.
 func (s *Server) idleTimeoutMillis() uint64 {
 	d := s.IdleTimeout
 	switch {
