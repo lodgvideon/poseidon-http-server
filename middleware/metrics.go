@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"sort"
 	"strconv"
@@ -166,12 +167,68 @@ type seriesCounter struct {
 	lastSeen atomic.Int64
 }
 
+// metricViews is an immutable copy of the four metric maps, published as one
+// atomic pointer. It is what the request path reads.
+//
+// This is the answer to "what does the hot path do INSTEAD of taking a lock"
+// (CLAUDE.md): a request resolves its series with a single atomic pointer LOAD
+// plus a plain map lookup. A load leaves the cache line in the shared state on
+// every core, so it costs nothing extra as cores are added — unlike
+// [sync.RWMutex.RLock], which is a read-modify-write on one reader counter and
+// therefore serialises 16 cores onto one cache line even though it never blocks
+// (issue #120: 13.3% of all CPU at -cpu=16, 100% of it from RLock/RUnlock).
+//
+// A view is built under [MetricsCollector.mu] and never mutated afterwards, so
+// concurrent readers need no synchronisation of their own. The maps it holds are
+// clones: the *values* (the [seriesCounter] and [histogram] pointers) are shared
+// with the live maps, so a counter incremented through a view is the same
+// counter the exposition path reads.
+type metricViews struct {
+	counters   map[string]*seriesCounter
+	durations  map[string]*seriesCounter
+	reqBytes   map[string]*seriesCounter
+	histograms map[string]*histogram
+
+	// entries is the total live-map entry count at publication, used to pace
+	// rebuilds. See maybePublishViewsLocked.
+	entries int
+}
+
+// eagerViewEntries is the total live-entry count below which the views are
+// rebuilt on every insertion, which keeps them exact. A rebuild is O(entries),
+// so past this point rebuilds are paced to a doubling of the entry count, making
+// the amortised cost per insertion constant; keys inserted between rebuilds are
+// simply invisible to the fast path and fall through to the locked path, which
+// is what every request did before this existed.
+//
+// Every *bounded* configuration stays in the eager regime: the default caps the
+// four maps at 4*(DefaultMaxSeries+1) = 4100 entries. The paced branch exists
+// only for MetricsConfig.MaxSeries < 0 (the documented unbounded opt-out), where
+// an eager rebuild would be quadratic in the number of series — turning the
+// memory DoS that MaxSeries<0 accepts into a CPU DoS as well.
+const eagerViewEntries = 8192
+
+// metricsKeyBufSize is the stack scratch space a request builds its two metric
+// keys in. Both keys are looked up as map[string(buf)], which the compiler
+// resolves without copying the bytes to the heap, so a request whose labels are
+// already tracked allocates nothing at all. A path longer than this still works
+// and is never truncated — append spills to the heap — it just costs one
+// allocation, which is still fewer than the four this replaced.
+const metricsKeyBufSize = 256
+
 // MetricsCollector tracks request-level metrics in a thread-safe manner.
 // The data can be exposed via Prometheus, OpenMetrics, or simple /metrics scraping.
 //
 // Label cardinality is bounded: see [MetricsConfig] and [DefaultMaxSeries].
 type MetricsCollector struct {
+	// mu guards the four live maps below and transportSrc. The request path does
+	// NOT take it in steady state — it reads the immutable views instead (see
+	// metricViews). It is taken to insert a series, to sweep, and to snapshot for
+	// exposition; WritePrometheus formats outside it.
 	mu sync.RWMutex
+
+	// views is the lock-free read side of the four maps. Written only under mu.
+	views atomic.Pointer[metricViews]
 
 	// requestCount tracks total requests by method+path+status.
 	counters map[string]*seriesCounter
@@ -232,6 +289,7 @@ func NewMetricsCollectorWithConfig(cfg MetricsConfig) *MetricsCollector {
 		now:        clock,
 	}
 	c.lastSweep.Store(clock().UnixNano())
+	c.publishViewsLocked(0) // nothing else can reach c yet
 	return c
 }
 
@@ -262,6 +320,56 @@ func resolveSeriesIdleTTL(cfg time.Duration) time.Duration {
 	}
 }
 
+// touch refreshes a series' recency stamp for the idle sweep, and skips the
+// write entirely when idle sweeping is off, since nothing will ever read it.
+//
+// It is a plain store, and that is a measured decision rather than an obvious
+// one. Reading the stamp first and writing only when it had drifted by TTL/64
+// looks like it should be cheaper — a shared-line load instead of an
+// exclusive-line store — and it is NOT: lastSeen sits in the same cache line as
+// the counter every request increments, so the line is already owned exclusively
+// by whichever core last recorded a hit, and the "cheap" load pays the same
+// coherence transfer plus a branch. Measured at -cpu=16, the conditional version
+// was 11.4% slower on BenchmarkMetricsMiddleware_Parallel and 4.2% slower on
+// BenchmarkMetricsMiddlewareParallel_Tracked (p=0.000, n=10 each). Do not
+// reintroduce it without separating the stamp from the counter first.
+//
+// nowNanos is the caller's single clock read, threaded through so that bounding
+// cardinality still costs no extra clock reads per request.
+func (c *MetricsCollector) touch(lastSeen *atomic.Int64, nowNanos int64) {
+	if c.seriesTTL <= 0 {
+		return // idle sweeping is disabled; nothing reads the stamp
+	}
+	lastSeen.Store(nowNanos)
+}
+
+// publishViewsLocked rebuilds the immutable read views from the live maps and
+// publishes them. Caller holds the write lock (or is the constructor, before the
+// collector is reachable).
+//
+// The values are shared, not copied: a view holds the same *seriesCounter and
+// *histogram pointers the live maps hold, so an increment through a view lands
+// in the series the exposition path reads.
+func (c *MetricsCollector) publishViewsLocked(entries int) {
+	c.views.Store(&metricViews{
+		counters:   maps.Clone(c.counters),
+		durations:  maps.Clone(c.durations),
+		reqBytes:   maps.Clone(c.reqBytes),
+		histograms: maps.Clone(c.histograms),
+		entries:    entries,
+	})
+}
+
+// maybePublishViewsLocked republishes the views after an insertion, eagerly
+// while the collector is small and on a doubling of the entry count once it is
+// not. See eagerViewEntries. Caller holds the write lock.
+func (c *MetricsCollector) maybePublishViewsLocked() {
+	n := len(c.counters) + len(c.durations) + len(c.reqBytes) + len(c.histograms)
+	if n <= eagerViewEntries || n >= 2*c.views.Load().entries {
+		c.publishViewsLocked(n)
+	}
+}
+
 // nowNanos reads the collector clock. The Metrics middleware reads the clock
 // once per request and threads the result through, so this is only paid by
 // direct API callers.
@@ -277,14 +385,35 @@ func (c *MetricsCollector) SetTransportSource(src func() server.TransportStats) 
 	c.mu.Unlock()
 }
 
-// counterKey returns the metrics key for a request.
+// counterKey returns the metrics key for a request. It builds the string by
+// concatenation rather than with fmt.Sprintf (issue #107), which costs a
+// format-string parse and an extra allocation for the same bytes. The request
+// path does not call this at all — it uses appendCounterKey — so this is now
+// only the lookup helper for TotalRequests and for direct API callers.
 func counterKey(method, path string, status int) string {
-	return fmt.Sprintf("%s|%s|%d", method, path, status)
+	return method + "|" + path + "|" + strconv.Itoa(status)
 }
 
 // durationKey returns the metrics key for duration tracking.
 func durationKey(method, path string) string {
 	return method + "|" + path
+}
+
+// appendDurationKey writes durationKey(method, path) into dst. Given stack
+// scratch space it produces the key without allocating; see metricsKeyBufSize.
+func appendDurationKey(dst []byte, method, path string) []byte {
+	dst = append(dst, method...)
+	dst = append(dst, '|')
+	return append(dst, path...)
+}
+
+// appendCounterKey extends a duration key already written by appendDurationKey
+// into the counter key for status, which is the same bytes plus "|<status>".
+// Sharing one buffer between the two keys is not a micro-optimisation for its
+// own sake: it is what keeps a request to one scratch buffer, and the duration
+// key stays valid because appending only ever writes past its length.
+func appendCounterKey(durKey []byte, status int) []byte {
+	return strconv.AppendInt(append(durKey, '|'), int64(status), 10)
 }
 
 // getOrCreateCounter returns an existing counter or creates a new one.
@@ -302,9 +431,49 @@ func (c *MetricsCollector) getOrCreateBytes(store map[string]*seriesCounter, key
 	return c.series(store, key, overflowSeriesKey, c.nowNanos())
 }
 
-// getOrCreateHistogram returns an existing histogram or creates one.
-func (c *MetricsCollector) getOrCreateHistogram(key string) *histogram {
-	return c.histogramSeries(key, c.nowNanos())
+// lookupSeries resolves key to its counter WITHOUT taking any lock, given the
+// view of store published by the last insertion or sweep. key is a []byte so
+// that the caller can build it in stack scratch space: `view[string(key)]` is
+// the one map access the compiler resolves without copying the bytes to the
+// heap, so a request whose labels are tracked allocates nothing.
+//
+// Two cases are answered from the view, and between them they are every request
+// a running server serves:
+//
+//   - an already-tracked label — one atomic load, one map lookup;
+//   - an untracked label while the store is full, i.e. every request of a
+//     unique-path flood — the fold is resolved from the same view.
+//
+// Anything else (first sight of a label, or a label inserted since the last
+// rebuild in the paced regime) falls through to series, which is the locked path
+// this used to be.
+func (c *MetricsCollector) lookupSeries(view, live map[string]*seriesCounter, key []byte, overflow string, nowNanos int64) *seriesCounter {
+	if ctr, ok := view[string(key)]; ok {
+		c.touch(&ctr.lastSeen, nowNanos)
+		return ctr
+	}
+	if c.foldsView(len(view), nowNanos) {
+		if ctr, ok := view[overflow]; ok {
+			c.touch(&ctr.lastSeen, nowNanos)
+			return ctr
+		}
+	}
+	return c.series(live, string(key), overflow, nowNanos)
+}
+
+// lookupHistogram is lookupSeries for the histogram map.
+func (c *MetricsCollector) lookupHistogram(view map[string]*histogram, key []byte, nowNanos int64) *histogram {
+	if h, ok := view[string(key)]; ok {
+		c.touch(&h.lastSeen, nowNanos)
+		return h
+	}
+	if c.foldsView(len(view), nowNanos) {
+		if h, ok := view[overflowSeriesKey]; ok {
+			c.touch(&h.lastSeen, nowNanos)
+			return h
+		}
+	}
+	return c.histogramSeries(string(key), nowNanos)
 }
 
 // series returns the counter for key in store, creating it if the store has
@@ -324,17 +493,22 @@ func (c *MetricsCollector) getOrCreateHistogram(key string) *histogram {
 // The write lock is taken only to actually insert a series, or when an idle
 // sweep has come due — both bounded by the cap and the TTL, neither driven by
 // request rate.
+//
+// Since #120 both of those read-lock cases are normally answered one level up by
+// lookupSeries, from an immutable view and with no lock at all; this remains the
+// path for direct API callers ([MetricsCollector.ObserveDuration] aside), for
+// first sight of a label, and for a label the views have not caught up with.
 func (c *MetricsCollector) series(store map[string]*seriesCounter, key, overflow string, nowNanos int64) *seriesCounter {
 	c.mu.RLock()
 	if ctr, ok := store[key]; ok {
 		c.mu.RUnlock()
-		ctr.lastSeen.Store(nowNanos)
+		c.touch(&ctr.lastSeen, nowNanos)
 		return ctr
 	}
 	if c.foldsLocked(store, nowNanos) {
 		if ctr, ok := store[overflow]; ok {
 			c.mu.RUnlock()
-			ctr.lastSeen.Store(nowNanos)
+			c.touch(&ctr.lastSeen, nowNanos)
 			return ctr
 		}
 	}
@@ -359,6 +533,7 @@ func (c *MetricsCollector) series(store map[string]*seriesCounter, key, overflow
 	ctr := &seriesCounter{}
 	ctr.lastSeen.Store(nowNanos)
 	store[key] = ctr
+	c.maybePublishViewsLocked()
 	return ctr
 }
 
@@ -368,13 +543,13 @@ func (c *MetricsCollector) histogramSeries(key string, nowNanos int64) *histogra
 	c.mu.RLock()
 	if h, ok := c.histograms[key]; ok {
 		c.mu.RUnlock()
-		h.lastSeen.Store(nowNanos)
+		c.touch(&h.lastSeen, nowNanos)
 		return h
 	}
 	if c.maxSeries > 0 && len(c.histograms) >= c.maxSeries && !c.sweepDue(nowNanos) {
 		if h, ok := c.histograms[overflowSeriesKey]; ok {
 			c.mu.RUnlock()
-			h.lastSeen.Store(nowNanos)
+			c.touch(&h.lastSeen, nowNanos)
 			return h
 		}
 	}
@@ -397,6 +572,7 @@ func (c *MetricsCollector) histogramSeries(key string, nowNanos int64) *histogra
 	h := newHistogram(defaultDurationBuckets)
 	h.lastSeen.Store(nowNanos)
 	c.histograms[key] = h
+	c.maybePublishViewsLocked()
 	return h
 }
 
@@ -405,7 +581,17 @@ func (c *MetricsCollector) histogramSeries(key string, nowNanos int64) *histogra
 // reason to escalate: it may free a slot for this very label. Caller holds the
 // read lock.
 func (c *MetricsCollector) foldsLocked(store map[string]*seriesCounter, nowNanos int64) bool {
-	return c.maxSeries > 0 && len(store) >= c.maxSeries && !c.sweepDue(nowNanos)
+	return c.foldsView(len(store), nowNanos)
+}
+
+// foldsView is foldsLocked expressed against a size, so the lock-free path can
+// ask the same question of a published view. A view can only UNDER-report the
+// live size (it is rebuilt after every insertion until eagerViewEntries, and
+// after every sweep), and under-reporting merely declines to fold, sending the
+// request to the locked path which decides again with the exact size. It can
+// therefore never fold a label that the live store still had room for.
+func (c *MetricsCollector) foldsView(size int, nowNanos int64) bool {
+	return c.maxSeries > 0 && size >= c.maxSeries && !c.sweepDue(nowNanos)
 }
 
 // sweepDue reports whether a full store should stop folding long enough to
@@ -421,12 +607,19 @@ func (c *MetricsCollector) sweepDue(nowNanos int64) bool {
 // maybeSweepLocked runs the idle sweep if one has come due, recording that it
 // ran so concurrent callers that also saw it due do not repeat the scan. Caller
 // holds the write lock.
+//
+// Republishing the views is part of sweeping, not of the caller's bookkeeping: a
+// view that still holds a swept-away series would keep handing it out, and the
+// increments landing on it would be invisible to every subsequent scrape. Both
+// callers can return early between the sweep and their own insertion, so leaving
+// the republish to them would leak exactly that.
 func (c *MetricsCollector) maybeSweepLocked(nowNanos int64) {
 	if !c.sweepDue(nowNanos) {
 		return
 	}
 	c.lastSweep.Store(nowNanos)
 	c.sweepLocked(nowNanos)
+	c.publishViewsLocked(len(c.counters) + len(c.durations) + len(c.reqBytes) + len(c.histograms))
 }
 
 // sweepLocked drops every series untouched for at least seriesTTL. All four maps
@@ -451,11 +644,13 @@ func (c *MetricsCollector) sweepLocked(nowNanos int64) {
 }
 
 // ObserveDuration records a single request duration into the per-method+path
-// latency histogram. It is allocation-light: the histogram lookup uses the
-// shared RWMutex only on first sight of a key; the observation itself is
-// atomic and lock-free.
+// latency histogram. Once the method+path has been seen it is allocation-free
+// and lock-free: the key is built in stack scratch space, the histogram is
+// resolved from the published view, and the observation itself is atomic.
 func (c *MetricsCollector) ObserveDuration(method, path string, d time.Duration) {
-	c.getOrCreateHistogram(durationKey(method, path)).observe(d)
+	var kb [metricsKeyBufSize]byte
+	key := appendDurationKey(kb[:0], method, path)
+	c.lookupHistogram(c.views.Load().histograms, key, c.nowNanos()).observe(d)
 }
 
 // Metrics returns a middleware that collects request metrics.
@@ -488,18 +683,26 @@ func (c *MetricsCollector) Metrics() server.Middleware {
 				path = c.pathLabel(req)
 			}
 
+			// Both keys are built once, into one stack buffer, and looked up as
+			// map[string(bytes)] — no allocation for a label already tracked.
+			var kb [metricsKeyBufSize]byte
+			dKey := appendDurationKey(kb[:0], req.Method, path)
+			cKey := appendCounterKey(dKey, status)
+
+			// One atomic load serves all four lookups. A view that has gone stale
+			// between them only costs the locked path, never a wrong answer.
+			v := c.views.Load()
+
 			// Increment request counter.
-			key := counterKey(req.Method, path, status)
-			c.series(c.counters, key, overflowCounterKey, nowNanos).Add(1)
+			c.lookupSeries(v.counters, c.counters, cKey, overflowCounterKey, nowNanos).Add(1)
 
 			// Record duration (total) and latency histogram.
-			dKey := durationKey(req.Method, path)
-			c.series(c.durations, dKey, overflowSeriesKey, nowNanos).Add(int64(elapsed))
-			c.histogramSeries(dKey, nowNanos).observe(elapsed)
+			c.lookupSeries(v.durations, c.durations, dKey, overflowSeriesKey, nowNanos).Add(int64(elapsed))
+			c.lookupHistogram(v.histograms, dKey, nowNanos).observe(elapsed)
 
 			// Record request body size.
 			if len(req.Body) > 0 {
-				c.series(c.reqBytes, dKey, overflowSeriesKey, nowNanos).Add(int64(len(req.Body)))
+				c.lookupSeries(v.reqBytes, c.reqBytes, dKey, overflowSeriesKey, nowNanos).Add(int64(len(req.Body)))
 			}
 
 			return err
@@ -536,6 +739,19 @@ func (c *MetricsCollector) TotalDuration(method, path string) time.Duration {
 
 // WritePrometheus writes metrics in Prometheus text exposition format.
 // This can be served directly at /metrics via an http.Handler.
+//
+// The collector lock is held to snapshot the series, not to format them (issue
+// #109). Building the exposition for a collector at the default cardinality
+// bound is ~17k Fprintf calls and measures at ~10ms; holding the read lock
+// across that blocks the write lock for the whole time, and the write lock is
+// what a first-sight series, an idle sweep and a republication of the lock-free
+// views all wait on. Four clones of shared pointers is the allocation CLAUDE.md
+// says to prefer over the lock.
+//
+// The guarantee is the one it always had: the SET of series is a point-in-time
+// snapshot, while each series' values are read per-field through atomics at an
+// unspecified instant at or after that point. Increments never took this lock,
+// so they were never excluded from the build either.
 func (c *MetricsCollector) WritePrometheus() string {
 	var sb strings.Builder
 
@@ -543,9 +759,14 @@ func (c *MetricsCollector) WritePrometheus() string {
 	sb.WriteString("# TYPE poseidon_requests_total counter\n")
 
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	counters := maps.Clone(c.counters)
+	durations := maps.Clone(c.durations)
+	reqBytes := maps.Clone(c.reqBytes)
+	histograms := maps.Clone(c.histograms)
+	transportSrc := c.transportSrc
+	c.mu.RUnlock()
 
-	for key, ctr := range c.counters {
+	for key, ctr := range counters {
 		// Parse method|path|status from key.
 		parts := strings.SplitN(key, "|", 3)
 		if len(parts) != 3 {
@@ -557,7 +778,7 @@ func (c *MetricsCollector) WritePrometheus() string {
 
 	sb.WriteString("\n# HELP poseidon_request_duration_seconds_total Total request duration.\n")
 	sb.WriteString("# TYPE poseidon_request_duration_seconds_total counter\n")
-	for key, ctr := range c.durations {
+	for key, ctr := range durations {
 		parts := strings.SplitN(key, "|", 2)
 		if len(parts) != 2 {
 			continue
@@ -569,7 +790,7 @@ func (c *MetricsCollector) WritePrometheus() string {
 
 	sb.WriteString("\n# HELP poseidon_request_bytes_total Total request body bytes by method and path.\n")
 	sb.WriteString("# TYPE poseidon_request_bytes_total counter\n")
-	for key, ctr := range c.reqBytes {
+	for key, ctr := range reqBytes {
 		parts := strings.SplitN(key, "|", 2)
 		if len(parts) != 2 {
 			continue
@@ -580,7 +801,7 @@ func (c *MetricsCollector) WritePrometheus() string {
 
 	sb.WriteString("\n# HELP poseidon_request_duration_seconds Request latency distribution in seconds.\n")
 	sb.WriteString("# TYPE poseidon_request_duration_seconds histogram\n")
-	for key, h := range c.histograms {
+	for key, h := range histograms {
 		parts := strings.SplitN(key, "|", 2)
 		if len(parts) != 2 {
 			continue
@@ -612,18 +833,19 @@ func (c *MetricsCollector) WritePrometheus() string {
 	sb.WriteString("# TYPE poseidon_active_requests gauge\n")
 	fmt.Fprintf(&sb, "poseidon_active_requests %d\n", c.active.Load())
 
-	c.writeTransport(&sb)
+	writeTransport(&sb, transportSrc)
 
 	return sb.String()
 }
 
 // writeTransport appends HTTP/2 transport metrics when a source is registered.
-// Caller holds c.mu (read lock).
-func (c *MetricsCollector) writeTransport(sb *strings.Builder) {
-	if c.transportSrc == nil {
+// src is read from the collector under the lock and passed in, so the callback
+// itself runs outside it.
+func writeTransport(sb *strings.Builder, src func() server.TransportStats) {
+	if src == nil {
 		return
 	}
-	t := c.transportSrc()
+	t := src()
 
 	sb.WriteString("\n# HELP poseidon_connections_active Current open HTTP/2 connections.\n")
 	sb.WriteString("# TYPE poseidon_connections_active gauge\n")
