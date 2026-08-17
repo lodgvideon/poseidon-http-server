@@ -133,10 +133,16 @@ func (w *responseWriter) promiseFields(promisePath, promiseScheme string, promis
 //
 // Push must be called BEFORE the main response headers are sent.
 //
-// The :scheme pseudo-header is derived from the originating request's
-// scheme (RFC 7540 §8.2: "the server SHOULD use the same scheme as
-// the request"). If the writer has no request context (e.g. constructed
-// directly via NewResponseWriter for tests), "https" is used as a
+// The :scheme pseudo-header is derived from the originating request's scheme.
+// No RFC states that as a rule. RFC 9113 §8.4.1 requires only that the promised
+// request be complete and valid — "The header fields in PUSH_PROMISE and any
+// subsequent CONTINUATION frames MUST be a valid and complete set of request
+// header fields (Section 8.3.1)" — and §8.3.1 makes exactly one :scheme
+// mandatory without saying which. Inheriting the originating request's is this
+// server's choice, by analogy with the authority rule §8.4 does bind: "The
+// server MUST include a value in the ':authority' pseudo-header field for which
+// the server is authoritative". If the writer has no request context (e.g.
+// constructed directly via NewResponseWriter for tests), "https" is used as a
 // safe default. Use PushWithScheme to override explicitly.
 func (w *responseWriter) Push(promisePath string, promiseHeaders []hpack.HeaderField) (ResponseWriter, error) {
 	return w.PushWithScheme(promisePath, w.deriveScheme(), promiseHeaders)

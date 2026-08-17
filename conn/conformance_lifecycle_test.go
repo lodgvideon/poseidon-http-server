@@ -50,7 +50,7 @@ func (g *goAwayLog) OnGoAway(_ frame.FrameHeader, lastID uint32, code frame.ErrC
 //	§6.8 — "A server that is attempting to gracefully shut down a connection
 //	SHOULD send an initial GOAWAY frame with the last stream identifier set to
 //	2^31-1 and a NO_ERROR code... After allowing time for any in-flight stream
-//	creation (at least one round-trip time), the server can send another GOAWAY
+//	creation (at least one round-trip time), the server MAY send another GOAWAY
 //	frame with an updated last stream identifier."
 //
 // Announcing the real last-stream-id in one shot makes every stream the client

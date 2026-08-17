@@ -25,11 +25,17 @@ func (s *Server) ListenAndServeTLS(ctx context.Context, certFile, keyFile string
 		NextProtos:   []string{"h2"},
 		MinVersion:   tls.VersionTLS12,
 		// RFC 9113 §9.2.2: "A deployment of HTTP/2 over TLS 1.2
-		// SHOULD NOT use any of the cipher suites that are listed in Appendix A."
+		// SHOULD NOT use any of the prohibited cipher suites listed in Appendix A."
 		// Appendix A is a denylist of several hundred entries; the tractable way to
-		// honour it is to name the allowed suites instead. These six are the
-		// AEAD-with-ECDHE set §9.2.2 describes as the target ("TLS_ECDHE_RSA_WITH_
-		// AES_128_GCM_SHA256... is available in TLS 1.2").
+		// honour it is to name the allowed suites instead. §9.2.2 names exactly one
+		// suite, and it is in the list below: "deployments of HTTP/2 that use
+		// TLS 1.2 MUST support TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 [TLS-ECDHE]
+		// with the P-256 elliptic curve". The other five extend that to the
+		// ECDSA and ChaCha20 equivalents, which Appendix A's own note explains is
+		// the right axis: the denylist "includes those cipher suites that do not
+		// offer an ephemeral key exchange and those that are based on the TLS
+		// null, stream, or block cipher type". Extending §9.2.2's one MUST to the
+		// whole ECDHE-AEAD family is our generalisation, not the RFC's.
 		//
 		// crypto/tls ignores CipherSuites for TLS 1.3, so this bounds only the 1.2
 		// negotiation — which is the entire scope of Appendix A.
