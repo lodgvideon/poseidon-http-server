@@ -154,8 +154,8 @@ func isProhibitedField(name, value []byte, isTrailer bool) bool {
 //	 before all regular field lines."
 //	RFC 9113 §8.3 — "The same pseudo-header field name MUST NOT appear more
 //	 than once in a field block."
-//	RFC 9113 §8.3.1 — ":authority" MUST NOT include the deprecated userinfo
-//	 subcomponent for "http" or "https" schemed URIs."
+//	RFC 9113 §8.3.1 — "':authority' MUST NOT include the deprecated userinfo
+//	 subcomponent for 'http' or 'https' schemed URIs."
 //	RFC 9113 §8.3.1 — "This pseudo-header field MUST NOT be empty for "http"
 //	 or "https" URIs"
 //	RFC 9113 §8.3.1 — "All HTTP/2 requests MUST include exactly one valid

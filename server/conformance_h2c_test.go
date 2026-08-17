@@ -151,13 +151,13 @@ func TestConformance_RFC9110_Sec78_IgnoreUpgradeInHTTP10Request(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9112_Sec22_RejectRequestWithoutHost pins RFC 9112 §3.2
+// TestConformance_RFC9112_Sec32_RejectRequestWithoutHost pins RFC 9112 §3.2
 //
 //	"A server MUST respond with a 400 (Bad Request) status code to any
 //	 HTTP/1.1 request message that lacks a Host header field and to any
 //	 request message that contains more than one Host header field line or
 //	 a Host header field with an invalid field value."
-func TestConformance_RFC9112_Sec22_RejectRequestWithoutHost(t *testing.T) {
+func TestConformance_RFC9112_Sec32_RejectRequestWithoutHost(t *testing.T) {
 	c := upgradeConn(t)
 	_, _ = fmt.Fprintf(c, "GET / HTTP/1.1\r\n"+
 		"Upgrade: h2c\r\n"+
@@ -246,7 +246,7 @@ func TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1(t *testin
 	}
 
 	// "Upon receiving the 101 response, the client MUST send a connection
-	// preface, which includes a SETTINGS frame." (RFC 7540 §3.2)
+	// preface (Section 3.5), which includes a SETTINGS frame." (RFC 7540 §3.2)
 	rwc := &bufioConn{Conn: c, Reader: br}
 	fr := frame.NewFramer(rwc, rwc)
 	if _, err := rwc.Write(clientPreface); err != nil {

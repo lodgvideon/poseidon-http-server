@@ -554,7 +554,7 @@ func NewHTTPRequest(req *Request) (*http.Request, error) {
 	}
 	// RFC 9113 §8.2.3: "If there are multiple Cookie header
 	// fields after decompression, these MUST be concatenated into a single octet
-	// string using the two-octet delimiter of 0x3B, 0x20 (the ASCII string '; ')
+	// string using the two-octet delimiter of 0x3b, 0x20 (the ASCII string '; ')
 	// before being passed into a non-HTTP/2 context, such as an HTTP/1.1
 	// connection, or a generic HTTP server application."
 	//

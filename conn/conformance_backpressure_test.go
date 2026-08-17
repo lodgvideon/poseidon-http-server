@@ -13,8 +13,10 @@ import (
 // TestConformance_RFC9113_Sec521_WindowBoundsUnconsumedData pins the point of
 // flow control, which the server had opted out of.
 //
-//	§5.2.1 — "The sender of a flow-controlled frame MUST NOT
-//	send more than the receiver allows."
+//	§5.2.1 — "Flow control is directional with overall control provided by
+//	the receiver. A receiver MAY choose to set any window size that it desires
+//	for each stream and for the entire connection. A sender MUST respect
+//	flow-control limits imposed by a receiver."
 //
 // A receiver that returns credit the moment a DATA frame ARRIVES, rather than
 // when the application takes delivery of it, always allows more — so the

@@ -260,7 +260,7 @@ func TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError(t *tes
 	}
 }
 
-// TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit pins both clauses of
+// TestConformance_RFC9113_Sec69_ZeroWindowUpdateScopeSplit pins both clauses of
 // RFC 9113 §6.9 — "A receiver MUST treat the receipt of a WINDOW_UPDATE frame
 // with a flow-control window increment of 0 as a stream error (Section 5.4.2) of
 // type PROTOCOL_ERROR; errors on the connection flow-control window MUST be
@@ -268,7 +268,7 @@ func TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError(t *tes
 //
 // The two sub-cases are what stops the fix over-correcting: scoping every zero
 // increment to a stream passes the first and fails the second.
-func TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit(t *testing.T) {
+func TestConformance_RFC9113_Sec69_ZeroWindowUpdateScopeSplit(t *testing.T) {
 	zero := rawFrame(frame.FrameWindowUpdate, 0, 1, []byte{0, 0, 0, 0})
 
 	t.Run("on_a_stream_is_a_stream_error", func(t *testing.T) {
@@ -308,12 +308,13 @@ func TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit(t *testing.T) {
 }
 
 // TestConformance_RFC9113_Sec610_MalformedFrameDuringOpenFieldBlock pins §6.10
-// against §6.3: while a field block is open, "any frame other than a
-// CONTINUATION frame on the same stream" is a connection error of type
-// PROTOCOL_ERROR (RFC 9113 §6.10). That outranks §6.3's stream scoping, and
-// the codec rejects the malformed PRIORITY on length before guardHeaderBlock can
-// ever see it — so the reader loop is the only place left that can tell the
-// difference.
+// against §6.3. While a field block is open, RFC 9113 §6.10 says "this frame
+// MUST be followed by another CONTINUATION frame. A receiver MUST treat the
+// receipt of any other type of frame or a frame on a different stream as a
+// connection error (Section 5.4.1) of type PROTOCOL_ERROR." That outranks
+// §6.3's stream scoping, and the codec rejects the malformed PRIORITY on length
+// before guardHeaderBlock can ever see it — so the reader loop is the only
+// place left that can tell the difference.
 //
 // This test is a regression guard on the fix itself: stream-scoped recovery
 // without the open-block gate passes every other test in this file and fails

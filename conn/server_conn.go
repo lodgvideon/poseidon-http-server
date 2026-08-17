@@ -815,7 +815,7 @@ func (sc *ServerConn) clampGoAwayID(id uint32) uint32 {
 //	identifier set to 2^31-1 and a NO_ERROR code. This signals to the client
 //	that a shutdown is imminent and that initiating further requests is
 //	prohibited. After allowing time for any in-flight stream creation (at least
-//	one round-trip time), the server can send another GOAWAY frame with an
+//	one round-trip time), the server MAY send another GOAWAY frame with an
 //	updated last stream identifier."
 //
 // Announcing the real last-stream-id in one shot instead makes every stream the
@@ -1128,8 +1128,8 @@ type settingsRecorder struct {
 	fr *frame.Framer
 	// apply, when set, publishes the peer's SETTINGS to the connection the
 	// instant they are processed — before any later frame in the same batch is
-	// dispatched. RFC 9113 §6.5: SETTINGS "applies to the
-	// connection, not a single stream". A client may pipeline preface, SETTINGS
+	// dispatched. RFC 9113 §6.5: "SETTINGS frames always apply to a
+	// connection, never a single stream." A client may pipeline preface, SETTINGS
 	// and its first HEADERS into one segment, and the handshake forwards that
 	// HEADERS to the real handler, so a stream can register mid-handshake; if the
 	// settings are published only afterwards it seeds its windows from the

@@ -10,7 +10,7 @@ import (
 // Conformance tests for RFC 9113 §8.2.1 field validation and §8.2.2's ban on
 // connection-specific fields.
 //
-//	§8.2.1 — "implementations MUST perform the following
+//	§8.2.1 — "Implementations MUST perform the following
 //	minimal validation of field names and values"
 //	  §8.2.1 names must avoid 0x00-0x20, 0x41-0x5a (uppercase) and 0x7f-0xff
 //	  §8.2.1 names must not include a colon, except a single leading one

@@ -89,11 +89,12 @@ Corrected, with a `TestConformance_*` test per rule (see
   client hung forever.
 - **HTTP/1.0 requests no longer upgrade.** RFC 9110 §7.8 requires the Upgrade
   field be ignored, and §15.2 forbids a `1xx` response to an HTTP/1.0 client.
-- **A missing `Host` field is now `400`**, per RFC 9112 §2.2.
+- **A missing `Host` field is now `400`**, per RFC 9112 §3.2.
 - **Upgrade requests carrying content are declined.** Unread HTTP/1.1 body
   octets were previously handed to `conn.NewServerConn` and re-parsed as HTTP/2
   frames — a request-smuggling primitive. Declining is permitted: a server *"can
-  respond to the request as though the Upgrade header field were absent"*.
+  respond to the request as though the Upgrade header field were absent"*
+  (RFC 7540 §3.2).
 
 The h2c Upgrade mechanism is **obsolete** in the current HTTP/2 specification:
 RFC 9113 *"marks the HTTP2-Settings header field and the h2c upgrade token, both

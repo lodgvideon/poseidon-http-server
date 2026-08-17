@@ -186,8 +186,8 @@ func TestRegression_ResetReleasesTheStreamEvenWhenTheWriteFails(t *testing.T) {
 }
 
 // TestConformance_RFC9113_Sec92_HandshakeSettingsApplyToPipelinedStreams pins
-// RFC 9113 §6.5 — SETTINGS "applies to the connection, not a single stream"
-// — for the stream that arrives inside the handshake window.
+// RFC 9113 §6.5 — "SETTINGS frames always apply to a connection, never a single
+// stream." — for the stream that arrives inside the handshake window.
 //
 // A client is allowed to send its preface, SETTINGS and its first HEADERS in one
 // TCP segment, and browsers and curl do. The server forwards that HEADERS to the

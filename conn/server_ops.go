@@ -31,9 +31,13 @@ func (sc *ServerConn) lookupStream(id uint32) *ServerStream { return sc.tbl.look
 // without registering it. REFUSED_STREAM signals the request was not processed,
 // so the client may safely retry it on a fresh connection.
 //
-// A full accept queue is refused the same way and for the same reason: both are
-// "this server will not process the request", which is what §8.7 reserves
-// REFUSED_STREAM for. Returning false suppresses event delivery on both paths
+// A full accept queue is refused the same way and for the same reason: in both
+// the stream is closed before the request reaches the application, which is what
+// RFC 9113 §8.7 reserves REFUSED_STREAM for — "The REFUSED_STREAM error code can
+// be included in a RST_STREAM frame to indicate that the stream is being closed
+// prior to any processing having occurred. Any request that was sent on the
+// reset stream can be safely retried." The paraphrase is ours; the quotation is
+// §8.7's. Returning false suppresses event delivery on both paths
 // while OnHeaders still decodes the field block, so the shared HPACK dynamic
 // table stays in step with the client's encoder.
 func (sc *ServerConn) registerStream(id uint32, s *ServerStream) bool {
@@ -315,8 +319,11 @@ func (sc *ServerConn) onWindowUpdate(streamID, increment uint32) error {
 		// the handler before writeServerRSTStream puts the frame on the wire, so a
 		// handler that reacts by calling Close would otherwise emit a second
 		// RST_STREAM — which RFC 9113 §5.4.2 asks endpoints to
-		// avoid: "An endpoint SHOULD NOT send more than one RST_STREAM frame for
-		// any stream."
+		// avoid: "Normally, an endpoint SHOULD NOT send more than one RST_STREAM
+		// frame for any stream." The "Normally" is the RFC's own, and it matters:
+		// the next sentence licenses extra RST_STREAMs for frames that arrive on
+		// an already-closed stream. This site is not that case — nothing has
+		// arrived, the handler would be duplicating our own reset.
 		s.advance(stReset)
 		// RFC 9113 §6.9.1: a WINDOW_UPDATE overflowing a STREAM flow-control
 		// window is a stream error (RST_STREAM(FLOW_CONTROL_ERROR)), not a

@@ -259,9 +259,10 @@ func (ss *ServerStream) Recv(ctx context.Context) (StreamEvent, error) {
 // buffered, so the window bounded nothing and a fast uploader could outrun a
 // briefly descheduled handler until the per-stream event channel overflowed and
 // the stream was reset. RFC 9113 §5.2.1 is explicit that this
-// is what the window is for: "The sender of a flow-controlled frame MUST NOT
-// send more than the receiver allows", and a receiver that always allows more
-// has opted out of the mechanism.
+// is what the window is for: "Flow control is directional with overall control
+// provided by the receiver... A sender MUST respect flow-control limits imposed
+// by a receiver", and a receiver that always allows more has opted out of the
+// mechanism.
 //
 // Called on the handler goroutine, which already writes under wmu elsewhere.
 // The connection-level window keeps its receipt-time refund: §6.9 requires

@@ -288,11 +288,11 @@ func upgradeRequestFields(req *http.Request) []hpack.HeaderField {
 //     HTTP2-Settings
 //   - request with content    RFC 9112 §9.6  — MUST read the entire body or
 //     close; declining the upgrade is always
-//     allowed (§3.2: a server "can respond to
-//     the request as though the Upgrade header
-//     field were absent") and it keeps unread
-//     HTTP/1.1 octets from being re-read as
-//     HTTP/2 frames.
+//     allowed (RFC 7540 §3.2: a server "can
+//     respond to the request as though the
+//     Upgrade header field were absent") and it
+//     keeps unread HTTP/1.1 octets from being
+//     re-read as HTTP/2 frames.
 func (s *Server) handleHTTP1Upgrade(ctx context.Context, nc net.Conn, br *bufio.Reader, lim *probeLimitReader, cfg *tls.Config) {
 
 	req, err := http.ReadRequest(br)
