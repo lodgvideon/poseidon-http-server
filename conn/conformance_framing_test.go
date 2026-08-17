@@ -260,7 +260,7 @@ func TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError(t *tes
 	}
 }
 
-// TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit pins both clauses of
+// TestConformance_RFC9113_Sec69_ZeroWindowUpdateScopeSplit pins both clauses of
 // RFC 9113 §6.9 — "A receiver MUST treat the receipt of a WINDOW_UPDATE frame
 // with a flow-control window increment of 0 as a stream error (Section 5.4.2) of
 // type PROTOCOL_ERROR; errors on the connection flow-control window MUST be
@@ -268,7 +268,7 @@ func TestConformance_RFC9113_Sec63_MalformedPriorityLength_IsAStreamError(t *tes
 //
 // The two sub-cases are what stops the fix over-correcting: scoping every zero
 // increment to a stream passes the first and fails the second.
-func TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit(t *testing.T) {
+func TestConformance_RFC9113_Sec69_ZeroWindowUpdateScopeSplit(t *testing.T) {
 	zero := rawFrame(frame.FrameWindowUpdate, 0, 1, []byte{0, 0, 0, 0})
 
 	t.Run("on_a_stream_is_a_stream_error", func(t *testing.T) {

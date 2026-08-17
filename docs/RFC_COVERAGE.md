@@ -78,7 +78,7 @@ serve HTTP/1.1.
 
 | Section | Type | Test |
 |---------|------|------|
-| §3.2 | Conformance | `TestConformance_RFC9112_Sec22_RejectRequestWithoutHost` |
+| §3.2 | Conformance | `TestConformance_RFC9112_Sec32_RejectRequestWithoutHost` |
 | §5.1 | Conformance | `TestConformance_RFC9112_Sec51_WhitespaceBeforeColonRejected` |
 | §9.6 | Conformance | `TestConformance_RFC9112_Sec96_CloseOptionDeclinesUpgrade` |
 | §9.6 | Conformance | `TestConformance_RFC9112_Sec96_SecondCloseFieldLineCounts` |
@@ -113,7 +113,7 @@ landed on §8.3 as the HTTP/2-native way to state the rule.
 | §6.8 | Conformance | `TestConformance_RFC9113_Sec68_PushRefusedAfterPeerGoAway` |
 | §6.9, §6.8 | Conformance | `TestConformance_RFC9113_Sec69_DataOnRetiredStreamCountsAgainstConnectionWindow` |
 | §6.9/§6.9.1 split: connection on receipt, stream on consumption | Conformance | `TestConformance_RFC9113_Sec69_LiveStreamRefundsOnlyWhatWasRead` |
-| §6.9 (both clauses) | Conformance | `TestConformance_RFC9113_Sec691_ZeroWindowUpdateScopeSplit` |
+| §6.9 (both clauses) | Conformance | `TestConformance_RFC9113_Sec69_ZeroWindowUpdateScopeSplit` |
 | §6.10, §5.5 | Conformance | `TestConformance_RFC9113_Sec610_MalformedFrameDuringOpenFieldBlock` |
 | §8.1 trailers | Conformance | `TestConformance_RFC9113_Sec81_TrailerRules` |
 | §8.2.1, §8.2.2 | Conformance | `TestConformance_RFC9113_Sec821_MalformedFieldSyntax_StreamError` |
