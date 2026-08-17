@@ -202,6 +202,28 @@ func benchParConn(b *testing.B, nStreams int) (*ServerConn, []*ServerStream, *be
 // benchParWaitCredit blocks until the reader goroutine has applied the script's
 // WINDOW_UPDATE frames. Without it a benchmark can start before the credit
 // lands and spend its first iterations blocked in acquireSendCredits.
+//
+// It polls rather than taking the PING/PING-ACK barrier #124 gave the sibling
+// harness in conn/bench_test.go, and issue #164 records why it cannot: the
+// barrier needs the client to READ the server's ACK, and benchScriptConn
+// replays a fixed pre-built script and drops every write (see Read/Write above),
+// so there is no channel for an ACK to arrive on. That much is a fact about the
+// transport.
+//
+// What #164 then calls "the real fix" — giving benchScriptConn a readable
+// write-back path so both harnesses can take the barrier — would make the
+// postcondition WEAKER, not stronger, so it is deliberately not done. A PING ACK
+// proves the server processed every frame written before the PING; it says
+// nothing about the resulting flow-control state, which is what the benchmark
+// actually needs and what the sibling harness has to infer. This loop reads that
+// state directly, under the very locks acquireSendCredits reads it under, and
+// the script's LAST frame is the final WINDOW_UPDATE — so "every window is
+// credited" already implies "the whole script has been applied". A barrier would
+// buy back the 1 ms sleep, which lands entirely in setup, before b.ResetTimer,
+// and costs the measurement nothing.
+//
+// The 5s deadline is a setup guard, not a measurement constant: nothing it
+// bounds scales with -benchtime, exactly as benchSetupTimeout does not.
 func benchParWaitCredit(b *testing.B, sc *ServerConn, streams []*ServerStream) {
 	b.Helper()
 	deadline := time.Now().Add(5 * time.Second)
