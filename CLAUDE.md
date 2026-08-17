@@ -130,7 +130,7 @@ Rules that follow:
   from a benchmark that never reached the lock. Get the curve with
 
   ```sh
-  go test -run='^$' -bench='Parallel|FCOutCond' -benchmem \
+  go test -run='^$' -bench='Parallel|FCOut' -benchmem \
           -benchtime=500ms -count=10 -cpu=1,2,4,8,16 ./conn ./server ./middleware
   ```
 
@@ -147,9 +147,17 @@ Rules that follow:
     99.2% of all end-to-end mutex delay. One connection's HEADERS throughput
     never improves past one core and is ~34% worse at 16; sixteen connections
     doing the identical work improve 6.3×.
-  - `fcOutCond.Broadcast()` (6 sites, `Signal()` still 0) — **contended, O(N) in
-    parked streams.** One connection-level WINDOW_UPDATE costs 4.4 ns with no
-    waiters and 155 ns with 64.
+  - Outbound flow-control wakeups — **fixed in #118, keep it fixed.** Was one
+    `sync.Cond` for the whole connection (6 `Broadcast()` sites, `Signal()` 0),
+    so every grant woke every parked writer: a connection-level WINDOW_UPDATE
+    cost 5.5 ns with no waiters and 146 ns with 64, and a per-stream one — which
+    can only ever release the stream it names — 19 ns and 395 ns.
+    `conn/fc_waiters.go` replaced the condition variable with a private channel
+    per waiter on two intrusive lists, so a grant costs what it releases rather
+    than what is parked: 4.9 ns and 24 ns at 64 waiters (−96.6% and −93.9%,
+    n=30). Both are now flat in the waiter count. Do not reintroduce a shared
+    condition variable here; `BenchmarkFCOutStreamGrant` and
+    `BenchmarkFCOutCondBroadcast` are what would notice.
   - `Server.mu` (taken per stream in `spawnStream`) — **measured, not
     contended**: 0.0009% of end-to-end mutex delay, and that sliver is
     `newproc`/`newobject`, not the mutex. Leave it alone.
