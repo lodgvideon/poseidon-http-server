@@ -221,12 +221,17 @@ else
   # Three rounds would need +40% to reach 0/250, which is most of what
   # `bench-gate` already tolerates. Five costs about a minute more and lets the
   # limit sit at +30%.
-  # The order ALTERNATES between rounds, and that is not decoration. Running the
-  # baseline first in every round was measured to hand the second arm a
-  # systematic advantage on this host: two end-to-end runs of byte-identical code
-  # reported the DATA pair +22.69% and +12.84% purely from position, eating most
-  # of a +30% budget in the direction of a false red. Alternating gives each arm
-  # the same mix of first and second slots.
+  # The order ALTERNATES between rounds so that neither arm always gets the same
+  # slot. This is a precaution, NOT a measured correction — said explicitly
+  # because it was briefly claimed as one. Two runs that looked like a +22.69%
+  # and +12.84% position effect on "identical" code turned out to be a real
+  # change: origin/main had moved to #200 mid-session, and the DATA pair really
+  # was ~20% faster there. With a baseline pinned to identical source the fixed
+  # order showed +0.10% and -3.25%, i.e. no position effect this host can see.
+  # Alternation costs nothing and is kept; no number is claimed for it.
+  #
+  # With an odd CONTENTION_ROUNDS the split is 3:2, not even. Left odd because 5
+  # is the round count whose false-red rate was actually measured.
   : >"$baseline"; : >"$current"
   for r in $(seq 1 "$ROUNDS"); do
     if [ $((r % 2)) -eq 1 ]; then
