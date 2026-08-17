@@ -161,10 +161,18 @@ Rules that follow:
   - `Server.mu` (taken per stream in `spawnStream`) — **measured, not
     contended**: 0.0009% of end-to-end mutex delay, and that sliver is
     `newproc`/`newobject`, not the mutex. Leave it alone.
-  - `MetricsCollector.mu` (four map lookups per request) — **contended as cache
-    traffic, not as waiting.** Barely visible in a mutex profile (an `RLock`
-    seldom blocks), yet `RLock`/`RUnlock` on its reader counter are 21.6% of all
-    CPU on a path that scales only 1.36× across 16 cores.
+  - `MetricsCollector.mu` — **fixed in #120, keep it fixed.** The request path
+    took four map lookups under an `RLock`. It never blocked, and that was the
+    point: `RLock`/`RUnlock` on the reader counter were 13.3% of all CPU at
+    `-cpu=16` — 100% of the `Int32.Add` traffic — on a path scaling 1.36×.
+    `middleware/metrics.go` now publishes an immutable `metricViews` snapshot
+    behind an `atomic.Pointer`, rebuilt under the write lock on insert and on
+    sweep, so a request does one atomic load and a map lookup and takes **no
+    lock and no allocation**, the overflow path included. Cost is 40–78% lower
+    at every core count; the *scaling factor* did not improve, because what
+    remains is genuinely serial — per-request atomics, tracked in #201. Do not
+    put a shared lock back on this path; `middleware/bench_parallel_test.go` is
+    what would notice.
 
 ## Conventions
 
