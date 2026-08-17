@@ -74,8 +74,8 @@ var status431Fields = []hpack.HeaderField{
 // fieldEntryOverhead is the per-field constant of the HPACK entry-size formula
 // (RFC 7541 §4.1), which is what SETTINGS_MAX_HEADER_LIST_SIZE is measured in:
 // RFC 9113 §6.5.2 sizes the list "based on the uncompressed size of field
-// lines, including the length of the name and value in octets plus an overhead
-// of 32 octets for each field line".
+// lines, including the length of the name and value in units of octets plus an
+// overhead of 32 octets for each field line".
 const fieldEntryOverhead = 32
 
 // fieldSpan records one decoded field's extent inside serverConnHandler.fieldBuf.
@@ -647,7 +647,7 @@ func (h *serverConnHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, [
 	if err := h.guardHeaderBlock(); err != nil {
 		return err
 	}
-	// RFC 9113 §6.8: "Once sent, the sender will ignore frames
+	// RFC 9113 §6.8: "Once the GOAWAY is sent, the sender will ignore frames
 	// sent on streams initiated by the receiver if the stream has an identifier
 	// higher than the included last stream identifier. Receivers of a GOAWAY frame
 	// MUST NOT open additional streams on the connection". For a server the only

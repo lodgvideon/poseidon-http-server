@@ -23,12 +23,12 @@ import (
 //	       a field block. A field block for an HTTP request or response that
 //	       contains a repeated pseudo-header field name MUST be treated as
 //	       malformed (Section 8.1.1)."
-//	§8.3.1 "\":authority\" MUST NOT include the deprecated userinfo subcomponent
-//	       for \"http\" or \"https\" schemed URIs."
-//	§8.3.1 "This pseudo-header field MUST NOT be empty for \"http\" or \"https\"
+//	§8.3.1 "':authority' MUST NOT include the deprecated userinfo subcomponent
+//	       for 'http' or 'https' schemed URIs."
+//	§8.3.1 "This pseudo-header field MUST NOT be empty for 'http' or 'https'
 //	       URIs"
 //	§8.3.1 "All HTTP/2 requests MUST include exactly one valid value for the
-//	       \":method\", \":scheme\", and \":path\" pseudo-header fields, unless
+//	       ':method', ':scheme', and ':path' pseudo-header fields, unless
 //	       they are CONNECT requests (Section 8.5). An HTTP request that omits
 //	       mandatory pseudo-header fields is malformed (Section 8.1.1)."
 //

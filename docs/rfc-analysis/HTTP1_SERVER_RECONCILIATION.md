@@ -61,7 +61,7 @@ only HTTP/1.1 surface, and it fails almost every obligation that applies to it:
 | 7540 §3.2 | *"A server MUST ignore an "h2" token in an Upgrade header field."* | `h2` is accepted as an upgrade token (`h2c.go:63-64`) |
 | 7540 §3.2.1 | *"A server MUST NOT upgrade the connection to HTTP/2 if this header field is not present or if more than one is present."* | `HTTP2-Settings` is never read — repo-wide it appears only in two test files |
 | 7540 §3.2 | *"These frames MUST include a response to the request that initiated the upgrade."* | the parsed request is discarded at `h2c.go:83`; `conn/` has no notion of an upgrade (zero grep hits) |
-| 9112 §2.2 | *"A server MUST respond with a 400 (Bad Request) … to any HTTP/1.1 request message that lacks a Host header field"* | a Host-less upgrade request gets 101 |
+| 9112 §3.2 | *"A server MUST respond with a 400 (Bad Request) … to any HTTP/1.1 request message that lacks a Host header field"* | a Host-less upgrade request gets 101 |
 | 9110 §7.8 | *"A server MUST NOT switch to a protocol that was not indicated by the client"* | a client offering only `h2` is switched to `h2c` |
 | 9110 §7.8 | *"A server that receives an Upgrade header field in an HTTP/1.0 request MUST ignore that Upgrade field."* | version-blind; `GET / HTTP/1.0` + `Upgrade: h2c` → 101 |
 | 9110 §15.2 | *"a server MUST NOT send a 1xx response to an HTTP/1.0 client."* | same root — `req.Proto` is never read |

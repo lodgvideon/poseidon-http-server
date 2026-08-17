@@ -13,7 +13,7 @@ import (
 
 // TestConformance_RFC9113_Sec823_CookiesConcatenated pins RFC 9113 §8.2.3 —
 // "If there are multiple Cookie header fields after decompression, these MUST be
-// concatenated into a single octet string using the two-octet delimiter of 0x3B,
+// concatenated into a single octet string using the two-octet delimiter of 0x3b,
 // 0x20 (the ASCII string '; ') before being passed into a non-HTTP/2 context."
 //
 // §8.2.3 is why a conformant client produces them: "To allow for better

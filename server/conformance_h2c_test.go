@@ -246,7 +246,7 @@ func TestConformance_RFC7540_Sec32_ResponseToUpgradingRequestOnStream1(t *testin
 	}
 
 	// "Upon receiving the 101 response, the client MUST send a connection
-	// preface, which includes a SETTINGS frame." (RFC 7540 §3.2)
+	// preface (Section 3.5), which includes a SETTINGS frame." (RFC 7540 §3.2)
 	rwc := &bufioConn{Conn: c, Reader: br}
 	fr := frame.NewFramer(rwc, rwc)
 	if _, err := rwc.Write(clientPreface); err != nil {
