@@ -23,6 +23,28 @@ package conn
 //
 // and confirm the lock is actually reached with -mutexprofile/-blockprofile.
 //
+// Which pair answers which question — measured, not assumed. A 15 ns spin was
+// injected into bumpFramesSent, which every write path calls while HOLDING wmu,
+// so the injection is a regression in the critical section itself. Two rounds,
+// -benchtime=400ms -count=8, alternating against an unmodified binary:
+//
+//	                             round 1            round 2
+//	_SharedConn (scripted)       +13.03% p=0.000    +16.79% p=0.000
+//	_PerConn    (scripted)       +26.33% p=0.000    +17.56% p=0.007
+//	_SharedConnTCP               ~       p=0.130     -5.22% p=0.010
+//	_PerConnTCP                  ~       p=0.328     +8.18% p=0.000
+//
+// So: a change to what wmu protects is resolvable on the SCRIPTED pair and is
+// NOT resolvable on the TCP pair, whose two rounds disagree in sign on the same
+// injected slowdown. That follows from what each pair is for — the TCP variants
+// put the write(2) back inside the critical section, and at ~10.5 us/op a 15 ns
+// change is 0.14% of the number. Read the TCP pair for "does the syscall
+// dominate the lock", and the scripted pair for "did this change the lock".
+//
+// Both pairs do resolve a large regression: a spin sized to be a real ~2x was
+// caught on every benchmark in this file in both rounds at p=0.000, the TCP
+// pair included (+37.8%/+48.5% and +78.2%/+110.0%).
+//
 // Harness note (issue #99): conn/bench_test.go's harness allocates a 1 MiB drain
 // buffer in a goroutine that races b.ResetTimer, charging it to the measured
 // work. Nothing here allocates after ResetTimer: the client byte script, the
