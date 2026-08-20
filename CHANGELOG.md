@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.7.1...v0.8.0) (2026-08-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **middleware:** metric label cardinality is now bounded by default (MaxSeries=1024, SeriesIdleTTL=15m). Past 1024 distinct label combinations requests are reported as method/path/status="__other__" instead of their real values, and an untouched series is dropped after 15m, which Prometheus sees as staleness and a later counter reset. Request totals stay exact. Restore the previous unbounded behaviour with MetricsConfig{MaxSeries: -1, SeriesIdleTTL: -1}.
+
+### Features
+
+* HTTP/3 server (RFC 9114) ([#47](https://github.com/lodgvideon/poseidon-http-server/issues/47)) ([dcb0928](https://github.com/lodgvideon/poseidon-http-server/commit/dcb092844e142850152a6cde9bbe7c319a3968da))
+
+
+### Bug Fixes
+
+* **ci:** gate on benchstat's verdict per metric, not on scraped percentages ([#138](https://github.com/lodgvideon/poseidon-http-server/issues/138)) ([3d92860](https://github.com/lodgvideon/poseidon-http-server/commit/3d92860407d82386b8222c721611c3255e5e7458))
+* **conn:** cancel abandoned stream contexts when the reader loop tears down ([#155](https://github.com/lodgvideon/poseidon-http-server/issues/155)) ([fdefbb6](https://github.com/lodgvideon/poseidon-http-server/commit/fdefbb622e7253269336b1c0eda863f5f9b3ea25)), closes [#139](https://github.com/lodgvideon/poseidon-http-server/issues/139)
+* **conn:** count StreamsAccepted at delivery, and bind stream contexts before publication ([#190](https://github.com/lodgvideon/poseidon-http-server/issues/190)) ([c855b26](https://github.com/lodgvideon/poseidon-http-server/commit/c855b26216217fb77e63b44d9dd7022d5e8ce19f))
+* **conn:** represent stream state, and stop a response reaching the wire after RST_STREAM ([#67](https://github.com/lodgvideon/poseidon-http-server/issues/67)) ([d495b0e](https://github.com/lodgvideon/poseidon-http-server/commit/d495b0e407cc2c0ecf4b95537cfb82e895e5c73f))
+* **conn:** set stream priority before publishing the stream to AcceptStream ([#157](https://github.com/lodgvideon/poseidon-http-server/issues/157)) ([87c4027](https://github.com/lodgvideon/poseidon-http-server/commit/87c4027f0e479d68f5fe348f71e074b79d1c2a3f))
+* **conn:** size the accept queue from MaxConcurrentStreams and refuse overflow with REFUSED_STREAM ([#137](https://github.com/lodgvideon/poseidon-http-server/issues/137)) ([19741c9](https://github.com/lodgvideon/poseidon-http-server/commit/19741c94544c2182c694d21dc4fdfd6d4d3d1a5c)), closes [#119](https://github.com/lodgvideon/poseidon-http-server/issues/119)
+* **conn:** stop AcceptStream handing back streams that are already dead ([#152](https://github.com/lodgvideon/poseidon-http-server/issues/152)) ([182502e](https://github.com/lodgvideon/poseidon-http-server/commit/182502ee3ec48800b293af26b26f2a3d33fdad63)), closes [#133](https://github.com/lodgvideon/poseidon-http-server/issues/133)
+* **conn:** stop re-deriving stream state at the call site ([#64](https://github.com/lodgvideon/poseidon-http-server/issues/64)) ([e2b014c](https://github.com/lodgvideon/poseidon-http-server/commit/e2b014c9bd0694692af0aefef5c438b3e99db425))
+* **http3server:** answer an oversize request instead of hanging its peer, and send the codes RFC 9114 names ([#191](https://github.com/lodgvideon/poseidon-http-server/issues/191)) ([cd26e79](https://github.com/lodgvideon/poseidon-http-server/commit/cd26e794160aadbb1ded5644d76310aec42d57d2))
+* **http3server:** enforce H3_CLOSED_CRITICAL_STREAM and H3_FRAME_UNEXPECTED ([#170](https://github.com/lodgvideon/poseidon-http-server/issues/170)) ([73fe7b7](https://github.com/lodgvideon/poseidon-http-server/commit/73fe7b790f9340ceb4911b8552b5c27c13325e5c))
+* **http3server:** populate http.Request.TLS from the QUIC handshake ([#131](https://github.com/lodgvideon/poseidon-http-server/issues/131)) ([a4aa9c3](https://github.com/lodgvideon/poseidon-http-server/commit/a4aa9c3979147bc2366b561c393de89a6702e591)), closes [#102](https://github.com/lodgvideon/poseidon-http-server/issues/102)
+* **http3server:** read the client's control stream and bound responses by its SETTINGS ([#151](https://github.com/lodgvideon/poseidon-http-server/issues/151)) ([3f73210](https://github.com/lodgvideon/poseidon-http-server/commit/3f73210609bec2803d60760968a0ff8a23318d6a))
+* **http3server:** reject invalid §4.1 frame sequences, and advertise max_idle_timeout ([#182](https://github.com/lodgvideon/poseidon-http-server/issues/182)) ([147d9fc](https://github.com/lodgvideon/poseidon-http-server/commit/147d9fca4505d4331c47bd12ab342c562869155b))
+* **middleware:** bound metric label cardinality (memory-DoS fix) ([#111](https://github.com/lodgvideon/poseidon-http-server/issues/111)) ([e1382aa](https://github.com/lodgvideon/poseidon-http-server/commit/e1382aa6f101d20fecad7461da0e7ff2b38bb933))
+* **server:** populate the peer address on every request context ([#105](https://github.com/lodgvideon/poseidon-http-server/issues/105)) ([88ebc16](https://github.com/lodgvideon/poseidon-http-server/commit/88ebc16102ffcbac28bf25c869e7a28c2bb09abd)), closes [#87](https://github.com/lodgvideon/poseidon-http-server/issues/87)
+
+
+### Performance Improvements
+
+* **conn:** wake the writers a flow-control grant releases, not all of them ([#200](https://github.com/lodgvideon/poseidon-http-server/issues/200)) ([6dadae8](https://github.com/lodgvideon/poseidon-http-server/commit/6dadae8f816fa971d50857f5c1bde0a59f06e013))
+* **middleware:** take no lock and no allocation on the metrics request path ([#204](https://github.com/lodgvideon/poseidon-http-server/issues/204)) ([16f0e74](https://github.com/lodgvideon/poseidon-http-server/commit/16f0e74caa5584d5f3a4aecde1c8db2f48e903df))
+
+
+### Dependencies
+
+* bump poseidon-http-client to v0.13.0 ([#184](https://github.com/lodgvideon/poseidon-http-server/issues/184)) ([4dbeed8](https://github.com/lodgvideon/poseidon-http-server/commit/4dbeed8cc3c7f43d0aed4a83865232ca6487f38d))
+
 ## [0.7.1](https://github.com/lodgvideon/poseidon-http-server/compare/v0.7.0...v0.7.1) (2026-08-08)
 
 
