@@ -63,6 +63,8 @@ make test-race      # go test -race -count=1 ./...   (CI runs with -race)
 make coverage-gate  # race coverage + scripts/coverage-gate.sh (min 80%, COVERAGE_MIN)
 make bench          # benchmarks, -benchmem
 make bench-gate     # scripts/bench-gate.sh — per-metric gate, see below
+make contention-gate           # scripts/contention-gate.sh — same-runner A/B, see below
+make contention-gate-selftest  # assert that gate still reaches red AND green
 make lint           # go vet ./... + golangci-lint run
 make tidy           # go mod tidy
 ```
@@ -109,10 +111,42 @@ above allocation count.
 
 Why: an allocation is a steady tax the GC amortises, and `make bench-gate`
 already measures it. Lock contention is superlinear in core count and appears
-only under concurrency — where, today, **no gate looks at all**. A connection-wide
-write mutex serialises every stream on that connection no matter how many cores
-are idle, so the allocation contract can be perfect and the server still not
-scale.
+only under concurrency. A connection-wide write mutex serialises every stream on
+that connection no matter how many cores are idle, so the allocation contract can
+be perfect and the server still not scale.
+
+**What now looks at it (#121).** `make contention-gate` runs
+`scripts/contention-gate.sh`: a same-runner A/B on `conn`'s
+`_SharedConn`/`_PerConn` pairs that builds both arms locally, runs them
+interleaved, and fails when the shared-connection number regresses beyond
+`CONTENTION_THRESHOLD` (default +30%). Know its limits before quoting it:
+
+- It is **nightly and non-blocking** (`.github/workflows/perf-nightly.yml`), not
+  a required PR check. The false-positive rate of a timing gate on GitHub's
+  shared runners has never been measured for this repository; blocking on an
+  unmeasured flake rate is how a check gets disabled.
+- It gates **`ns_Shared(N)`**, not a ratio — which is what #121 proposed. Worst
+  drift over interleaved identical-code passes: `ns_Shared(N)` 8.4%,
+  `Shared(N)/Per(N)` 23.4%, `Shared(N)/Per(1)` 92.7%, speedup ratio 63.5%. Every
+  normalisation was louder than the number it was meant to stabilise. The
+  `_PerConn` control is kept as a **guard** — below a 2× shared/control ratio the
+  machine cannot resolve a lock and the pair is reported NOT MEASURABLE rather
+  than judged — and as printed context. It does **not** classify a regression as
+  contention or work: that classifier's contention branch could not be made to
+  fire (below).
+- **It cannot see a newly added lock, and neither can anything else here.**
+  Wrapping the whole of `writeServerHeaders` in a second connection-wide mutex
+  moved the shared arm +2.22% and the control +2.53% — inside noise. `wmu`
+  already serialises the path completely, so there is no parallelism left for
+  another lock to take away. What the gate detects is **the serialised section
+  getting longer**. Do not cite a `_SharedConn` benchmark as evidence that a new
+  lock is free; see #205.
+- It covers the **HEADERS and DATA pairs only**. `RegisterStream` is
+  allocator-bound and its control's median swung 175 ns → 672 ns on identical
+  code; the `_TCP` pair cannot resolve a change to what `wmu` protects (#197).
+- Unlike `bench-gate` it has **no self-baselining branch**, and
+  `scripts/contention-gate-selftest.sh` asserts on every nightly run that the
+  gate still reaches red, green, not-measurable and nothing-compared.
 
 Rules that follow:
 

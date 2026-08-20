@@ -1,0 +1,125 @@
+goos: windows
+goarch: amd64
+pkg: github.com/lodgvideon/poseidon-http-server/conn
+cpu: AMD Ryzen 7 7700 8-Core Processor              
+BenchmarkParallelWriteHeaders_SharedConn-16    	 2981581	       114.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 2686470	       122.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3024612	       121.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3418000	        98.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3602070	       107.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	39714057	         9.437 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	36234072	         9.202 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	40677966	         9.649 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	34234118	         9.683 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	36264565	         9.839 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3435248	       111.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3211222	       107.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3229255	       107.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3304588	       103.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3629265	        98.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	68674767	         5.036 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	75053162	         5.011 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	65191448	         5.772 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	60595268	         5.635 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	62374004	         5.394 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: windows
+goarch: amd64
+pkg: github.com/lodgvideon/poseidon-http-server/conn
+cpu: AMD Ryzen 7 7700 8-Core Processor              
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3089532	       115.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 2813420	       127.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 2972734	       127.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3283928	       132.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 2821723	       130.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	34807495	         9.880 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	32936870	         9.740 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	31152378	         9.925 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	38564128	         9.009 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	36807793	        10.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3337712	       109.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3444889	       103.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3595874	       105.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3476826	        97.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3842815	        94.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	69763384	         4.485 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	75614366	         4.677 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	79408844	         4.391 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	77188712	         4.667 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	79298647	         4.405 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: windows
+goarch: amd64
+pkg: github.com/lodgvideon/poseidon-http-server/conn
+cpu: AMD Ryzen 7 7700 8-Core Processor              
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3586117	        97.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3809337	       113.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3551784	       102.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3282505	       112.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3210472	       103.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	37254739	         9.935 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	35233688	        10.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	22268742	        14.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	25969633	        12.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	33379658	        10.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3260284	       108.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3445324	       106.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3644484	       103.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3242404	       104.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3389310	       106.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	69769167	         5.236 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	72160195	         4.834 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	70429423	         5.016 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	70891347	         4.794 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	68211530	         4.996 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: windows
+goarch: amd64
+pkg: github.com/lodgvideon/poseidon-http-server/conn
+cpu: AMD Ryzen 7 7700 8-Core Processor              
+BenchmarkParallelWriteHeaders_SharedConn-16    	 2588047	       125.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3627459	       101.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3590005	       120.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3681085	       105.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3554414	       109.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	33897027	         9.889 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	36209289	         9.549 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	32513275	         9.926 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	30791073	         9.923 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	28359854	        10.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3237063	       105.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3421116	       106.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3260060	       107.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3224242	       106.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3205912	       110.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	85642916	         4.669 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	81028156	         4.888 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	51329976	         6.253 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	57806557	         5.961 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	54666382	         6.805 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: windows
+goarch: amd64
+pkg: github.com/lodgvideon/poseidon-http-server/conn
+cpu: AMD Ryzen 7 7700 8-Core Processor              
+BenchmarkParallelWriteHeaders_SharedConn-16    	 2873400	       111.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3429469	       105.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3432303	       114.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3397299	       109.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_SharedConn-16    	 3127549	       162.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	31402689	        10.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	34528068	         9.377 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	37964270	         9.927 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	34794710	        10.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteHeaders_PerConn-16       	34380342	         9.654 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3346486	       105.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3443858	       104.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3325683	       100.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3515380	       107.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_SharedConn-16       	 3634124	       100.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	64659817	         4.810 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	81269611	         4.482 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	81989613	         4.639 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	79337094	         4.552 ns/op	       0 B/op	       0 allocs/op
+BenchmarkParallelWriteData_PerConn-16          	80788132	         4.540 ns/op	       0 B/op	       0 allocs/op
+PASS

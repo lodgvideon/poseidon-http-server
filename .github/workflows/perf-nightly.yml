@@ -1,0 +1,153 @@
+name: Perf (nightly)
+
+# Two perf measurements that are too slow for the PR path, on the same nightly
+# cadence as fuzz.yml. Neither blocks a merge, and that is the design, not a
+# compromise — see below.
+#
+# ---------------------------------------------------------------------------
+# Job 1: contention (issue #121)
+# ---------------------------------------------------------------------------
+#
+# Runs scripts/contention-gate.sh, which compares the connection write path's
+# serialisation against an older commit ON THIS RUNNER, in this job, interleaved.
+# Both arms are measured here because the metric is dimensionless but not
+# machine-independent: a connection-wide lock costs more the more cores are idle
+# behind it, so a number recorded elsewhere cannot be compared against one
+# recorded here.
+#
+# Why it is not a required PR check. The false-positive rate of a timing gate on
+# GitHub's shared runners is unknown to this repository — it has never run one.
+# On the reference host (16 threads, otherwise busy) the metric's identical-code
+# drift was measured before this job was written; the same measurement has never
+# been taken on ubuntu-latest, and #197 showed the raw sec/op figures there would
+# be a different question entirely. A blocking check whose flake rate nobody has
+# measured gets disabled after the second false red, and a disabled check
+# measures nothing. So: nightly, visible, non-blocking, and the raw numbers are
+# uploaded so the first weeks of runs answer the question a blocking check would
+# need answered first.
+#
+# The job's FIRST step is a self-test on committed fixtures: it asserts the gate
+# exits 1 on a recorded regression and 0 on a recorded clean pair. That step runs
+# no benchmarks and has no timing dependence, so it is the one part of this
+# workflow whose verdict is deterministic on any runner. It exists because this
+# repository has already shipped a gate that could not fail (`make bench-gate`
+# with no committed baseline — #101, #103, #177), and "the gate is capable of
+# failing" is not a property to assume once and never check again.
+#
+# ---------------------------------------------------------------------------
+# Job 2: bench-completion (issue #110)
+# ---------------------------------------------------------------------------
+#
+# ci.yml's `bench` job runs every benchmark at -benchtime=1x. That is
+# structurally unable to catch a benchmark that only breaks at scale, which is
+# what issue #66 was: BenchmarkOnDataReceived passed at b.N=1, failed for every
+# b.N > 10485, and stayed broken across a release because -benchtime=1x was the
+# only benchtime any workflow ever ran.
+#
+# #110 drafted this as `bash scripts/bench-gate.sh`. It runs the underlying
+# command instead, deliberately. With testdata/benchmarks/baseline.txt absent
+# from the repository, bench-gate.sh takes its self-baseline branch, writes the
+# run to disk and prints "PASS" having compared nothing (#101, #103; the open
+# decision is #177). A nightly that prints PASS for a comparison it never made is
+# the failure mode this workflow is trying not to repeat. The command below makes
+# the one claim that is true today and was the missing check for #66: every
+# benchmark in the module still completes at a realistic benchtime. When #177
+# lands, this job is where a real bench-gate invocation belongs.
+on:
+  schedule:
+    - cron: '10 4 * * *' # nightly, 04:10 UTC — after fuzz.yml at 03:30
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Baseline ref for the contention comparison (default: main as of 7 days ago)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  contention:
+    name: contention gate (conn write path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # fetch-depth: 0 — the gate exports the baseline arm with `git archive
+      # <ref>`, so the history has to be present.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.6'
+
+      # Deterministic, no benchmarks, no timing. If the gate has stopped being
+      # able to fail, this step fails before anything expensive runs.
+      - name: Self-test — the gate can still go red, and still go green
+        run: bash scripts/contention-gate-selftest.sh
+
+      # The input arrives through env, not through ${{ }} inside the script: a
+      # workflow_dispatch input is attacker-controlled text and interpolating it
+      # into a shell body is a command-injection hole.
+      - name: Resolve baseline ref
+        id: base
+        env:
+          REQUESTED_REF: ${{ inputs.base_ref }}
+        run: |
+          set -euo pipefail
+          ref="${REQUESTED_REF:-}"
+          if [ -z "$ref" ]; then
+            ref="$(git rev-list -1 --before='7 days ago' HEAD)"
+          fi
+          if [ -z "$ref" ]; then
+            echo "no commit older than 7 days in this history; nothing to compare against" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          git --no-pager log -1 --format='baseline arm: %h %ad %s' --date=short "$ref"
+
+      # nproc is read by the script itself; -cpu is pinned to it so the report
+      # records the core count the verdict was reached at.
+      - name: Contention gate
+        env:
+          CONTENTION_BASE_REF: ${{ steps.base.outputs.ref }}
+          CONTENTION_OUT: contention-out
+        run: bash scripts/contention-gate.sh
+
+      # Uploaded on success as well as failure: the first weeks of green runs are
+      # the measurement that says whether this could ever be a blocking check.
+      - name: Upload contention measurement
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: contention-measurement
+          path: |
+            contention-out/baseline.txt
+            contention-out/current.txt
+            contention-out/contention-gate-report.txt
+          if-no-files-found: warn
+
+  bench-completion:
+    name: benchmarks complete at -benchtime=2s -count=10
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.6'
+
+      # No pipe. A pipeline's exit status is its last command's, so `go test |
+      # tee` reports tee's success and a broken benchmark passes the job.
+      - name: Run every benchmark at full benchtime
+        run: go test -bench=. -benchmem -benchtime=2s -count=10 -run='^$' ./... > bench-full.txt
+
+      - name: Upload benchmark output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bench-full-benchtime
+          path: bench-full.txt
+          if-no-files-found: warn

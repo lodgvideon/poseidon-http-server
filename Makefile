@@ -1,4 +1,4 @@
-.PHONY: build lint test test-race bench bench-gate coverage coverage-gate conformance-gate tidy loadtest
+.PHONY: build lint test test-race bench bench-gate contention-gate contention-gate-selftest coverage coverage-gate conformance-gate tidy loadtest
 
 COVERAGE_MIN ?= 80
 GO ?= go
@@ -45,6 +45,19 @@ bench:
 
 bench-gate:
 	./scripts/bench-gate.sh
+
+# contention-gate — same-runner A/B on conn's parallel write benchmarks (#121).
+# Unlike bench-gate it has NO self-baselining branch: it builds both arms here
+# and compares them, so CONTENTION_BASE_REF (default origin/main) has to resolve
+# and the run takes a few minutes. See the header of the script.
+contention-gate:
+	./scripts/contention-gate.sh
+
+# contention-gate-selftest — assert the gate still reaches red, green,
+# not-measurable and nothing-compared, on committed fixtures. Runs no
+# benchmarks; takes about a second.
+contention-gate-selftest:
+	./scripts/contention-gate-selftest.sh
 
 # loadtest — manual load/soak harness (see loadtest/README.md). Selected via
 # LOADTEST={h2load|ghz|k6} (default h2load). Requires a running server and the
