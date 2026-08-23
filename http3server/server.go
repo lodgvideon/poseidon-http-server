@@ -901,9 +901,18 @@ func encodeResponse(rw *responseWriter, fieldSectionLimit uint64) ([]byte, error
 		Value: []byte(strconv.Itoa(rw.status)),
 	})
 	for name, values := range rw.header {
+		lower := lowerASCII(name) // field names are lowercase on the wire
+		// RFC 9114 §4.2 and §4.3 — no connection-specific fields, and :status is
+		// the only pseudo-header a response may carry. Dropped rather than
+		// refused; see httpfields.ProhibitedInResponse. Without this a handler
+		// setting Connection, Transfer-Encoding or a ':'-prefixed key had it
+		// encoded verbatim into the field section.
+		if httpfields.ProhibitedInResponse([]byte(lower)) {
+			continue
+		}
 		for _, v := range values {
 			fields = append(fields, hpack.HeaderField{
-				Name:  []byte(lowerASCII(name)), // field names are lowercase on the wire
+				Name:  []byte(lower),
 				Value: []byte(v),
 			})
 		}
@@ -954,6 +963,15 @@ func (w *responseWriter) Header() http.Header { return w.header }
 
 func (w *responseWriter) WriteHeader(status int) {
 	if w.wroteHeader {
+		return
+	}
+	// A 1xx is not a final status (RFC 9114 §4.1), and §4.4 leaves HTTP/3 with
+	// no 101 at all. Latching one here put `:status: 101` — or 100, or 103 — on
+	// the wire as the whole response, with FIN, and no final response could
+	// follow. Declining it lets the handler's real status land; sending interim
+	// responses properly needs this writer to stop buffering the whole response
+	// to the end, which is a separate change. See httpfields.InterimStatus.
+	if httpfields.InterimStatus(status) {
 		return
 	}
 	w.wroteHeader = true

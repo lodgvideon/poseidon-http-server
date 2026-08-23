@@ -48,7 +48,7 @@ codec. Drop-in `http.Handler` replacement (chi/echo/gin/net/http).
 | `server/pprof/` | The opt-in `/debug/pprof/` handler, and **only** place in the module that imports `net/http/pprof`. Split out of `server/` because that import registers on `http.DefaultServeMux` from its `init`, so it armed pprof for every consumer (#210). `server/pprof_isolation_test.go` fails if the edge comes back. |
 | `grpcserver/` | gRPC framing, status trailers, health check, reflection. |
 | `http3server/` | HTTP/3 over QUIC (RFC 9114). The only package with a wider dependency footprint — see `docs/HTTP3_SERVER_GUIDE.md`. |
-| `internal/httpfields/` | The inbound field rules HTTP/2 and HTTP/3 share — field-name/value characters, the connection-specific-field ban, `TE: trailers`, request pseudo-headers. Imported by **both** `conn/` and `http3server/`; see ADR-0010 before adding anything here. |
+| `internal/httpfields/` | The field rules HTTP/2 and HTTP/3 share, **both directions**. Inbound: field-name/value characters, the connection-specific-field ban, `TE: trailers`, request pseudo-headers. Outbound: what a response may not carry, and 1xx not being a final status. Imported by `conn/`, `server/` and `http3server/`; see ADR-0010 before adding anything here. A receiver rejects the message, a sender drops the field — that asymmetry is deliberate. |
 | `middleware/` | gzip, metrics (Prometheus), ratelimit, realip, security headers, slog access log, tracing. |
 | `cmd/poseidon-server/` | The 12-factor `poseidon-server` binary. |
 | `examples/` | Runnable example servers (http, tls, secure, h2c, grpc, push, observability). |

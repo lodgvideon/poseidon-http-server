@@ -213,6 +213,94 @@ func TestValidRequestPseudoHeaders(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ProhibitedInResponse — the sender-side rule
+// ---------------------------------------------------------------------------
+
+func TestProhibitedInResponse(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		fname string
+		want  bool
+	}{
+		// Ordinary response fields.
+		{"content-type", "content-type", false},
+		{"date", "date", false},
+		{"set-cookie", "set-cookie", false},
+		{"server", "server", false},
+		{"empty name", "", true},
+
+		// The one pseudo-header a response may carry.
+		{":status", ":status", false},
+		// Pseudo-headers are case-sensitive, so this is not :status.
+		{":STATUS", ":STATUS", true},
+		{":authority", ":authority", true},
+		{":method", ":method", true},
+		{":path", ":path", true},
+		{":scheme", ":scheme", true},
+		{"an invented pseudo-header", ":x-anything", true},
+		{"a bare colon", ":", true},
+
+		// Connection-specific (RFC 9113 §8.2.2, RFC 9114 §4.2).
+		{"connection", "connection", true},
+		{"keep-alive", "keep-alive", true},
+		{"proxy-connection", "proxy-connection", true},
+		{"transfer-encoding", "transfer-encoding", true},
+		{"upgrade", "upgrade", true},
+
+		// The native write path takes names from the caller, so the check cannot
+		// assume they were lowercased.
+		{"Connection", "Connection", true},
+		{"TRANSFER-ENCODING", "TRANSFER-ENCODING", true},
+		{"Keep-Alive", "Keep-Alive", true},
+		{"Upgrade", "Upgrade", true},
+		{"Proxy-Connection", "Proxy-Connection", true},
+
+		// TE is a request-only field: §4.2 permits it "in an HTTP/3 request
+		// header", and a response is not a request, so no value rescues it.
+		{"te", "te", true},
+		{"TE", "TE", true},
+		{"tE", "tE", true},
+
+		// Length-first matching must not over-match neighbours.
+		{"upgraded (8)", "upgraded", false},
+		{"connexion0 (10)", "connexion0", false},
+		{"x-forwarded-host (16)", "x-forwarded-host", false},
+		{"x-transfer-encode (17)", "x-transfer-encode", false},
+		{"te-like but longer", "tea", false},
+		{"single t", "t", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ProhibitedInResponse([]byte(tc.fname)); got != tc.want {
+				t.Errorf("ProhibitedInResponse(%q) = %v, want %v", tc.fname, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInterimStatus(t *testing.T) {
+	t.Parallel()
+
+	interim := []int{100, 101, 102, 103, 150, 199}
+	final := []int{0, 99, 200, 201, 204, 301, 400, 404, 500, 503, 599, 600}
+
+	for _, s := range interim {
+		if !InterimStatus(s) {
+			t.Errorf("InterimStatus(%d) = false, want true", s)
+		}
+	}
+	for _, s := range final {
+		if InterimStatus(s) {
+			t.Errorf("InterimStatus(%d) = true, want false", s)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // The allocation contract (ADR-0001)
 // ---------------------------------------------------------------------------
 
@@ -256,6 +344,36 @@ func TestValidRequestPseudoHeaders_NoAllocations(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Benchmarks — the numbers bench-gate watches
 // ---------------------------------------------------------------------------
+
+// TestProhibitedInResponse_NoAllocations holds the sender-side check to the same
+// contract as the receiver-side one: it runs once per response field, so an
+// allocation here is one per header on every response. EqualFold is used instead
+// of a plain compare because the native path's names may be any case — it does
+// not allocate, and rewriting it as strings.ToLower would.
+func TestProhibitedInResponse_NoAllocations(t *testing.T) {
+	names := [][]byte{
+		[]byte("content-type"), []byte("date"), []byte(":status"),
+		[]byte("connection"), []byte("Transfer-Encoding"), []byte("te"),
+		[]byte("x-request-id"),
+	}
+	got := testing.AllocsPerRun(200, func() {
+		for i := range names {
+			_ = ProhibitedInResponse(names[i])
+		}
+	})
+	if got != 0 {
+		t.Errorf("ProhibitedInResponse allocated %v times per run, want 0 (ADR-0001)", got)
+	}
+}
+
+func BenchmarkProhibitedInResponse(b *testing.B) {
+	name := []byte("content-type")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = ProhibitedInResponse(name)
+	}
+}
 
 func BenchmarkProhibited(b *testing.B) {
 	name, value := []byte("x-request-id"), []byte("0123456789abcdef")

@@ -101,6 +101,27 @@ Two constraints bind anything added here:
   the *next* almost-shared rule in here even when it needs transport knowledge.
   The test is the one stated above: if it needs to know who is asking, it stays
   out.
+### Amendment, 2026-08-23 — the same boundary, applied outbound
+
+Not a change of decision: an application of it that the original list did not
+enumerate, recorded here so the list does not read as exhaustive.
+
+The response path had the mirror-image hole, on **both** transports. `WriteHeader`
+and `WriteHeaders` in `server/` and `encodeResponse` in `http3server/` built the
+field section straight out of what the handler supplied and validated none of it,
+so a response could carry connection-specific fields or — because
+`textproto.CanonicalMIMEHeaderKey` leaves a name containing `:` untouched — an
+arbitrary pseudo-header a handler put in the map. A 1xx passed to `WriteHeader`
+latched as the final status, ending the exchange on an interim response.
+
+"A property of the message, not of the transport" covers a response as much as a
+request, so `ProhibitedInResponse` and `InterimStatus` live here too and both
+transports call them. The direction does change one thing worth naming: a
+**receiver** rejects the message, a **sender** drops the offending field —
+answering 500 because a handler set `Connection: close` would break ordinary
+net/http code for no safety gain, and removing the field is what RFC 9114 §4.2
+instructs an intermediary to do.
+
 - **Neutral — this does not make `http3server` conformant.** It closes one class.
   What else RFC 9114 requires that `http3server` does not do is tracked separately;
   in particular this server still does not surface a trailer section at all, and
