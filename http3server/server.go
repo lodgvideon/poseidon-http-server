@@ -559,10 +559,38 @@ type connFrameError struct {
 	typ  uint64 // the frame type that is not permitted here
 	code uint64 // the HTTP/3 error code to close the connection with (§8.1)
 	why  string // the rule broken, for the error string only
+	// typUnknown suppresses the type in the message. A frame whose header was
+	// itself cut off has no type to name, and printing 0 there would name DATA.
+	typUnknown bool
 }
 
 func (e *connFrameError) Error() string {
+	if e.typUnknown {
+		return "http3server: a frame " + e.why
+	}
 	return "http3server: frame type " + strconv.FormatUint(e.typ, 16) + " " + e.why
+}
+
+// truncatedFrame is RFC 9114 §7.1's verdict on bytes still unconsumed when the
+// stream ended: "When a stream terminates cleanly, if the last frame on the
+// stream was truncated, this MUST be treated as a connection error of type
+// H3_FRAME_ERROR."
+//
+// rest is the tail the FrameReader could not turn into a frame. Its header is
+// re-parsed only to name the type in the error; a header too short to parse is
+// itself the truncation and simply goes unnamed.
+func truncatedFrame(rest []byte) *connFrameError {
+	e := &connFrameError{
+		code: http3.H3FrameError,
+		why:  "was truncated by the clean end of the stream (RFC 9114 §7.1)",
+	}
+	typ, _, _, err := http3.ParseFrameHeader(rest)
+	if err != nil {
+		e.typUnknown = true
+		return e
+	}
+	e.typ = typ
+	return e
 }
 
 // decodeRequest turns a request stream's frames into an http.Request. RFC 9114 §4.1
@@ -603,7 +631,26 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 	for {
 		typ, payload, err := fr.ReadFrame()
 		if errors.Is(err, http3.ErrNeedMore) {
-			break // a partial trailing frame: the request holds nothing more
+			// ErrNeedMore is both "the buffer is spent" and "a frame is cut off",
+			// and on this path the difference is the whole of RFC 9114 §7.1.
+			// readRequestStream returns only once the peer sent FIN, so there is
+			// never more to come: unconsumed bytes here are a truncated last
+			// frame, which §7.1 makes a connection error of type H3_FRAME_ERROR.
+			// Buffered() is what tells the two apart.
+			//
+			// Scoped to a message whose header section already arrived. A stream
+			// that never produced one is #180's case, not this one — §8.1 defines
+			// H3_REQUEST_INCOMPLETE as "the client's stream terminated without
+			// containing a fully formed request", the stream is aborted with it
+			// below, and TestDecodeRequest_NoHeadersIsIncomplete pins that. What
+			// is fixed here is the case with teeth: a COMPLETE request header
+			// followed by a body that was cut off was served to the handler as a
+			// finished request, with the delivered bytes silently dropped and the
+			// body reported as empty.
+			if seen && fr.Buffered() > 0 {
+				return nil, truncatedFrame(stream[len(stream)-fr.Buffered():])
+			}
+			break // consumed to the last octet: the message ends here
 		}
 		if err != nil {
 			return nil, err
@@ -758,6 +805,9 @@ func buildRequest(fields []hpack.HeaderField, body []byte) (*http.Request, error
 	if method == "" || scheme == "" || path == "" {
 		return nil, http3.ErrH3Message
 	}
+	if err := checkContentLength(header, len(body)); err != nil {
+		return nil, err
+	}
 	u, err := url.ParseRequestURI(path)
 	if err != nil {
 		return nil, http3.ErrH3Message
@@ -779,6 +829,58 @@ func buildRequest(fields []hpack.HeaderField, body []byte) (*http.Request, error
 	}
 	req.URL.Scheme = scheme
 	return req, nil
+}
+
+// checkContentLength enforces RFC 9114 §4.1's content-length rule against the
+// DATA that actually arrived: a message is malformed "if the value of the
+// Content-Length header field does not equal the sum of the DATA frame lengths
+// received".
+//
+// Before this the field was never read. req.ContentLength was set from the bytes
+// the decoder had accumulated, so a request advertising `content-length: 100`
+// and sending five was normalised into a self-consistent five-byte request that
+// a handler could not tell from an honest one — while the original, disagreeing
+// header stayed in req.Header for a proxying handler to forward. This server and
+// any conformant intermediary in front of it would then disagree about where the
+// message ends, which is the shape of a request-smuggling differential rather
+// than a conformance nit.
+//
+// §4.1.2 makes a detected malformed request a stream error of type
+// H3_MESSAGE_ERROR, which is what http3.ErrH3Message maps to in
+// requestAbortCode. The connection is not at fault and survives.
+func checkContentLength(header http.Header, received int) error {
+	vs := header["Content-Length"]
+	if len(vs) == 0 {
+		return nil
+	}
+	// RFC 9110 §8.6 — a recipient may accept repeated Content-Length only when
+	// every value is the same; differing values cannot be resolved into one
+	// length, so the message is malformed rather than a matter of preference.
+	for _, v := range vs[1:] {
+		if v != vs[0] {
+			return http3.ErrH3Message
+		}
+	}
+	// §8.6 defines the value as 1*DIGIT. strconv alone is too permissive here —
+	// it accepts a leading sign, so "+5" would pass as five and let a peer say
+	// one thing to this server and another to the next hop, which is the exact
+	// disagreement this function exists to prevent.
+	if vs[0] == "" {
+		return http3.ErrH3Message
+	}
+	for i := range len(vs[0]) {
+		if vs[0][i] < '0' || vs[0][i] > '9' {
+			return http3.ErrH3Message
+		}
+	}
+	// 63 bits, not 64: the result is compared against an int64 length, and a
+	// value that overflows into a negative would compare equal to nothing while
+	// still parsing.
+	declared, err := strconv.ParseUint(vs[0], 10, 63)
+	if err != nil || declared != uint64(received) {
+		return http3.ErrH3Message
+	}
+	return nil
 }
 
 // encodeResponse builds the response stream: a HEADERS frame with the QPACK field
