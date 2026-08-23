@@ -407,10 +407,27 @@ ready by default.
 
 ### pprof
 
-`server.PprofHandler()` exposes `/debug/pprof/`. It is **opt-in** (`--enable-pprof`
-/ `POSEIDON_ENABLE_PPROF=true`) because it surfaces runtime internals — keep it
-off in production or restrict access (e.g. NetworkPolicy). The binary logs a
-warning when it is enabled.
+`server/pprof.Handler()` exposes `/debug/pprof/`. It is **opt-in**
+(`--enable-pprof` / `POSEIDON_ENABLE_PPROF=true`) because it surfaces runtime
+internals — keep it off in production or restrict access (e.g. NetworkPolicy).
+The binary logs a warning when it is enabled.
+
+```go
+import pprofhandler "github.com/lodgvideon/poseidon-http-server/server/pprof"
+
+srv.Handle("/debug/pprof/", pprofhandler.Handler())
+```
+
+It lives in its own package on purpose. `net/http/pprof` registers seven handlers
+on `http.DefaultServeMux` from its `init`, so while this constructor sat in
+package `server` a plain `import ".../server"` was enough to make `/debug/pprof/`
+answer 200 on the default mux of every program using the library — no opt-in
+involved (issue #210). Importing `server/pprof` is now the opt-in; if you do not
+import it, nothing in this module links `net/http/pprof`.
+
+> **Breaking, from the next minor release.** `server.PprofHandler()` →
+> `server/pprof.Handler()`. One import line and one call site to update; ask
+> `gh release list -L 1` for the line this landed in.
 
 ### Tracing
 

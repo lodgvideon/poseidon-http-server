@@ -45,6 +45,7 @@ codec. Drop-in `http.Handler` replacement (chi/echo/gin/net/http).
 |---|---|
 | `conn/` | HTTP/2 connection + stream state machine — frame loop, flow control, HPACK sync, Rapid-Reset accounting. The performance-critical core. |
 | `server/` | High-level `http.Handler`-compatible server: h2c, `/healthz`+`/readyz`, body limits, graceful drain. |
+| `server/pprof/` | The opt-in `/debug/pprof/` handler, and **only** place in the module that imports `net/http/pprof`. Split out of `server/` because that import registers on `http.DefaultServeMux` from its `init`, so it armed pprof for every consumer (#210). `server/pprof_isolation_test.go` fails if the edge comes back. |
 | `grpcserver/` | gRPC framing, status trailers, health check, reflection. |
 | `http3server/` | HTTP/3 over QUIC (RFC 9114). The only package with a wider dependency footprint — see `docs/HTTP3_SERVER_GUIDE.md`. |
 | `internal/httpfields/` | The inbound field rules HTTP/2 and HTTP/3 share — field-name/value characters, the connection-specific-field ban, `TE: trailers`, request pseudo-headers. Imported by **both** `conn/` and `http3server/`; see ADR-0010 before adding anything here. |

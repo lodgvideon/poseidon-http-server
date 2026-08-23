@@ -48,6 +48,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-server/middleware"
 	"github.com/lodgvideon/poseidon-http-server/server"
+	pprofhandler "github.com/lodgvideon/poseidon-http-server/server/pprof"
 )
 
 func main() {
@@ -65,7 +66,7 @@ func main() {
 	// --- Sub-handlers -----------------------------------------------------
 	metricsHandler := metrics.MetricsHandler() // GET /metrics
 	healthHandler := server.HealthHandler(health)
-	pprofHandler := server.PprofHandler() // /debug/pprof/*
+	pprofHandler := pprofhandler.Handler() // /debug/pprof/*
 
 	// Application router. We dispatch the observability endpoints first so
 	// they bypass the demo middleware noise, then fall through to the app.
