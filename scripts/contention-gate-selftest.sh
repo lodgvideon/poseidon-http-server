@@ -2,10 +2,16 @@
 # contention-gate-selftest.sh — assert that scripts/contention-gate.sh is still
 # capable of reaching each of its verdicts.
 #
-# It runs no benchmarks. Every arm is a recorded run committed under
-# testdata/contention/, so the verdicts below are deterministic on any machine
-# and this script is the one part of the nightly whose result does not depend on
-# the runner's mood.
+# It runs no benchmarks. Checks 1-7 replay arms recorded under
+# testdata/contention/, and check 8 compiles two arms without measuring them, so
+# every verdict below is deterministic on any machine and this script is the one
+# part of the nightly whose result does not depend on the runner's mood.
+#
+# Checks 1-7 alone were not enough, and the gap had teeth: they exercise the
+# comparator and never the code that feeds it, so when the measurement path broke
+# on a relative CONTENTION_OUT this script passed in the same job that then died
+# in round 1. Check 8 exists because "the instrument responds" has to cover
+# obtaining the measurement, not only judging it.
 #
 # Why it exists. This repository has already shipped a gate that could not fail:
 # `make bench-gate` self-baselines when testdata/benchmarks/baseline.txt is
@@ -113,8 +119,38 @@ else
   fi
 fi
 
+# 8. The MEASUREMENT path can still produce two runnable arms.
+#
+#    Checks 1-7 replay recorded arms and compile nothing, so they exercise the
+#    comparator and never the thing that feeds it. That gap is not theoretical:
+#    every nightly run from #208 landing until this check was added failed in
+#    round 1, while this selftest — the step that runs first, specifically to
+#    assert the instrument works — passed in the same job. The comparator was
+#    fine. The gate could not obtain anything to compare.
+#
+#    CONTENTION_OUT is deliberately RELATIVE here, because that is what
+#    .github/workflows/perf-nightly.yml passes and a relative output directory
+#    was the whole bug: the baseline arm compiles inside a subshell that cd's
+#    into the exported tree, and `go test -c -o` resolves a relative -o against
+#    its own working directory while still exiting 0.
+#
+#    Build-only, so this compiles but runs no benchmarks and stays deterministic.
+buildout="selftest-buildpath-out"
+rm -rf "${root:?}/$buildout"
+if out="$(cd "$root" && env CONTENTION_OUT="$buildout" CONTENTION_BASE_REF=HEAD \
+                            CONTENTION_BUILD_ONLY=1 bash "$gate" 2>&1)"; then
+  printf 'selftest: ok   %-22s exit 0\n' "build-path/relative-out"
+else
+  rc=$?
+  printf 'selftest: FAIL %-22s want exit 0, got %s\n' "build-path/relative-out" "$rc" >&2
+  printf '%s\n' "$out" | sed 's/^/    | /' >&2
+  fails=$((fails + 1))
+fi
+rm -rf "${root:?}/$buildout"
+
 if [ "$fails" -ne 0 ]; then
   echo "selftest: $fails assertion(s) failed — contention-gate.sh no longer behaves as documented." >&2
   exit 1
 fi
-echo "selftest: PASS — the gate reaches red, green, not-measurable, nothing-compared and error."
+echo "selftest: PASS — the gate reaches red, green, not-measurable, nothing-compared and error,"
+echo "selftest: and its measurement path still builds two runnable arms."

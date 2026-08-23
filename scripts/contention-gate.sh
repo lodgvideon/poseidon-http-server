@@ -159,6 +159,21 @@ fi
 
 OUT="${CONTENTION_OUT:-$(mktemp -d 2>/dev/null || echo ./contention-gate-out)}"
 mkdir -p "$OUT"
+# Absolute from here on, and that is load-bearing rather than tidiness.
+#
+# The baseline arm is compiled from INSIDE $basetree, in a subshell that cd's
+# there. `go test -c -o` resolves a RELATIVE -o against its own working
+# directory, creates the parent for it, and exits 0 — so a relative $OUT puts
+# the binary at $basetree/$OUT/base.test while this script goes on to execute
+# $OUT/base.test from the repository root, where nothing was written.
+#
+# Not hypothetical: .github/workflows/perf-nightly.yml sets
+# CONTENTION_OUT=contention-out, a relative path, so EVERY nightly run since the
+# job landed (#208) died in round 1 with a bare "No such file or directory" —
+# blamed on a build step that had reported success. Three runs, three failures,
+# none of them a real measurement. No local run ever showed it because the
+# default above is `mktemp -d`, which is already absolute.
+OUT="$(cd "$OUT" && pwd)"
 
 BENCH_RE='^BenchmarkParallelWrite(Headers|Data)_(Shared|Per)Conn$'
 PAIRS="WriteHeaders WriteData"
@@ -166,6 +181,23 @@ PAIRS="WriteHeaders WriteData"
 run_arm() { # run_arm <binary> <outfile>
   "$1" -test.run='^$' -test.bench="$BENCH_RE" \
        -test.benchtime="$BENCHTIME" -test.count="$COUNT" -test.cpu="$CPU" >>"$2" 2>&1
+}
+
+# require_binary <path> <arm-name>
+#
+# `go test -c` exiting 0 is NOT evidence that the binary landed where this script
+# will look for it — see the note on $OUT above, where exactly that combination
+# turned every nightly red for three runs while the build log stayed empty. A
+# compile step whose success is checked only by its exit status can hand the next
+# step a path that does not exist, so the path is checked too.
+require_binary() {
+  if [ ! -x "$1" ]; then
+    echo "contention-gate: ERROR — the $2 arm reported a successful compile but left no" >&2
+    echo "contention-gate: runnable binary at '$1'." >&2
+    echo "contention-gate: if that path is relative, that is the bug: -o is resolved" >&2
+    echo "contention-gate: against the compiler's working directory, not this script's." >&2
+    exit 2
+  fi
 }
 
 baseline="$OUT/baseline.txt"
@@ -216,6 +248,21 @@ else
     echo "contention-gate: ERROR — could not build the current arm from the working tree:" >&2
     cat "$OUT/build-cur.log" >&2
     exit 2
+  fi
+  require_binary "$binbase" "baseline"
+  require_binary "$bincur" "current"
+
+  # Build-only mode: both arms exist and are runnable, stop before measuring.
+  # It is what scripts/contention-gate-selftest.sh drives to cover THIS path —
+  # every other check in that script replays recorded arms and builds nothing,
+  # which is why the gate could be broken here and self-test green at the same
+  # time. Compiling is deterministic, so the selftest keeps its property of not
+  # depending on the runner's mood.
+  if [ -n "${CONTENTION_BUILD_ONLY:-}" ]; then
+    echo "contention-gate: build-only — both arms compiled and runnable:"
+    echo "contention-gate:   baseline ($BASE_REF): $binbase"
+    echo "contention-gate:   current  (worktree):  $bincur"
+    exit 0
   fi
 
   # Interleaved, so a machine that drifts during the run drifts through both arms
@@ -355,6 +402,24 @@ cat "$report"
 
 if [ "$gate_rc" -eq 3 ]; then
   echo "contention-gate: ERROR — no pair had samples in both arms. Nothing was compared." >&2
+  # Say WHICH arm was empty and what that usually means. "No pair had samples"
+  # is true but sends a reader looking for a parsing bug, when the common cause
+  # is an arm that ran no benchmarks at all — a baseline ref predating the
+  # benchmarks (the nightly's first three runs, once the path bug above was out
+  # of the way) or a -bench pattern that no longer matches their names.
+  for arm in "baseline:$baseline" "current:$current"; do
+    name="${arm%%:*}"; file="${arm#*:}"
+    if ! grep -qE '^Benchmark' "$file" 2>/dev/null; then
+      echo "contention-gate: the $name arm produced NO benchmark output at all ($file)." >&2
+      if [ "$name" = "baseline" ]; then
+        echo "contention-gate: '$BASE_REF' most likely predates these benchmarks — check with" >&2
+        echo "contention-gate:   git ls-tree -r --name-only $BASE_REF -- conn/ | grep parallel" >&2
+        echo "contention-gate: and set CONTENTION_BASE_REF to a commit that has them." >&2
+      else
+        echo "contention-gate: the working tree matched nothing for: $BENCH_RE" >&2
+      fi
+    fi
+  done
   exit 3
 elif [ "$gate_rc" -eq 4 ]; then
   echo "contention-gate: NOT MEASURABLE — no pair reached a ${MIN_PENALTY}x shared/uncontended ratio." >&2

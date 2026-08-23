@@ -82,9 +82,14 @@ jobs:
         with:
           go-version: '1.26.6'
 
-      # Deterministic, no benchmarks, no timing. If the gate has stopped being
-      # able to fail, this step fails before anything expensive runs.
-      - name: Self-test — the gate can still go red, and still go green
+      # Deterministic: no benchmarks and no timing dependence. It replays recorded
+      # arms to prove the comparator still reaches every verdict, and compiles two
+      # real arms (without measuring them) to prove the gate can still obtain
+      # something to compare — the half that was missing while the first three
+      # nightly runs failed with this step green. If the gate has stopped being
+      # able to fail, or stopped being able to run, this fails before anything
+      # expensive does.
+      - name: Self-test — the gate can still go red, go green, and still build its arms
         run: bash scripts/contention-gate-selftest.sh
 
       # The input arrives through env, not through ${{ }} inside the script: a
@@ -103,6 +108,23 @@ jobs:
           if [ -z "$ref" ]; then
             echo "no commit older than 7 days in this history; nothing to compare against" >&2
             exit 1
+          fi
+          # Never compare against a commit older than the benchmarks themselves.
+          #
+          # "main as of 7 days ago" is a proxy for "about a week of drift" and it
+          # knows nothing about when the benchmarks it compares were written.
+          # conn/bench_parallel_test.go landed in #125 on 2026-08-16; the date
+          # rule resolved to #98, from EARLIER THE SAME DAY, so the baseline arm
+          # ran zero benchmarks and the gate correctly refused to compare
+          # anything — exit 3, red, and never a regression. Left alone it would
+          # have healed by calendar drift a day or two later, which is worse than
+          # failing: the same hole reopens silently the next time a benchmark is
+          # added or renamed.
+          oldest="$(git log --diff-filter=A --format=%H -- conn/bench_parallel_test.go | tail -1)"
+          if [ -n "$oldest" ] && ! git merge-base --is-ancestor "$oldest" "$ref"; then
+            echo "note: $(git log -1 --format='%h (%ad)' --date=short "$ref") predates the parallel"
+            echo "note: benchmarks; using the commit that introduced them instead."
+            ref="$oldest"
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           git --no-pager log -1 --format='baseline arm: %h %ad %s' --date=short "$ref"

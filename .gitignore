@@ -20,6 +20,14 @@ vendor/
 *.prof
 *.test
 
+# Contention gate working directories. `*.out` above does not cover these — it
+# matches a .out suffix, not a -out one — so running the gate the way
+# perf-nightly.yml does (CONTENTION_OUT=contention-out) leaves an untracked
+# directory of build logs, test binaries and raw benchmark output in the root.
+contention-out/
+selftest-buildpath-out/
+contention-gate-out/
+
 # Logs
 .logs/
 http-server
