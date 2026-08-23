@@ -1,4 +1,32 @@
-package conn
+// Package httpfields holds the inbound field rules that HTTP/2 and HTTP/3 share.
+//
+// The rules are the same rules. RFC 9113 §8.2.1 and RFC 9114 §4.1/§4.2 impose the
+// same character checks, the same connection-specific-field ban, the same TE rule
+// and the same request pseudo-header rules on a receiver; only the error code
+// differs (PROTOCOL_ERROR for HTTP/2, H3_MESSAGE_ERROR for HTTP/3), and that is
+// the caller's business, not this package's.
+//
+// # Why this is its own package
+//
+// These checks used to live unexported inside conn/, so http3server — which does
+// not import conn — could not reach them and shipped with none of them: a request
+// arriving over HTTP/3 could carry Transfer-Encoding, a CRLF-split field value or
+// an uppercase field name that the HTTP/2 front door on the same binary refuses.
+// Forwarded to an HTTP/1.1 backend that is a smuggling and header-injection
+// differential between two doors of one server (issue #209).
+//
+// So the rule for anything added here: it is a property of an HTTP message, not of
+// a transport. Anything that needs to know about frames, streams, HPACK dynamic
+// tables or QPACK belongs in conn/ or http3server/, not here.
+//
+// # Hot path
+//
+// [Prohibited] is called once per decoded field from inside the HTTP/2 decode
+// callback that already runs, so it must stay allocation-free (ADR-0001). Every
+// comparison below is length-first with string(b) == "lit", which the compiler
+// does not allocate for. Do not "simplify" these into map lookups or
+// strings.ToLower.
+package httpfields
 
 import (
 	"bytes"
@@ -6,7 +34,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-// Inbound HTTP field validation (RFC 9110 §5.5 via RFC 9113 §8.2.1).
+// Inbound HTTP field validation (RFC 9110 §5.5 via RFC 9113 §8.2.1, RFC 9114 §4.2).
 //
 // RFC 9110 §5.5:
 //
@@ -16,10 +44,11 @@ import (
 //	 value MUST either reject the message or replace each of those characters
 //	 with SP before further processing or forwarding of that message."
 //
-// This server rejects. RFC 9113 §8.1.1 fixes how:
+// This server rejects. RFC 9113 §8.1.1 fixes how for HTTP/2:
 // "Malformed requests or responses that are detected MUST be treated as a
 // stream error (Section 5.4.2) of type PROTOCOL_ERROR" — the offending stream
-// is reset and the connection survives.
+// is reset and the connection survives. RFC 9114 §4.1.2 says the same for
+// HTTP/3 with H3_MESSAGE_ERROR.
 //
 // RFC 9113 §8.2.1 turns that into four checks a receiver
 // must perform, "a minimal set of validations":
@@ -36,6 +65,11 @@ import (
 //	 position."
 //	"A field value MUST NOT start or end with an ASCII whitespace
 //	 character (ASCII SP or HTAB, 0x20 or 0x09)."
+//
+// RFC 9114 §4.2 restates the uppercase half for HTTP/3 — "A request or response
+// containing uppercase characters in field names MUST be treated as malformed" —
+// and §4.1's malformed list carries the rest as "invalid characters in field
+// names or values".
 //
 // Interior HTAB and obs-text stay legal — RFC 9110 §5.5 says
 // values "containing other CTL characters are also invalid; however, recipients
@@ -101,6 +135,9 @@ var teTrailers = []byte("trailers")
 //	Transfer-Encoding, and Upgrade). Any message containing connection-specific
 //	header fields MUST be treated as malformed."
 //
+// RFC 9114 §4.2 carries the identical list and the identical verdict for HTTP/3,
+// which is why this lives here rather than in conn/.
+//
 // TE is the documented exception and is checked separately, by value: gRPC
 // clients send "te: trailers" on every request.
 //
@@ -120,14 +157,15 @@ func isConnectionSpecificName(n []byte) bool {
 	return false
 }
 
-// isProhibitedField reports whether one decoded field makes the message
-// malformed, covering §8.2.1's four character checks and §8.2.2's
-// connection-specific ban. isTrailer selects the extra rule that applies only
-// to a trailer section.
+// Prohibited reports whether one decoded field makes the message malformed,
+// covering RFC 9113 §8.2.1's four character checks and §8.2.2's
+// connection-specific ban — and, identically, RFC 9114 §4.1's malformed list and
+// §4.2's field rules. isTrailer selects the extra rule that applies only to a
+// trailer section.
 //
 // Hot path: called once per decoded field inside the decode callback that
 // already runs. No allocation.
-func isProhibitedField(name, value []byte, isTrailer bool) bool {
+func Prohibited(name, value []byte, isTrailer bool) bool {
 	if hasProhibitedFieldName(name) || hasProhibitedFieldChar(value) {
 		return true
 	}
@@ -161,6 +199,9 @@ func isProhibitedField(name, value []byte, isTrailer bool) bool {
 //	RFC 9113 §8.3.1 — "All HTTP/2 requests MUST include exactly one valid
 //	 value for the ":method", ":scheme", and ":path" pseudo-header fields,
 //	 unless they are CONNECT requests (Section 8.5)."
+//
+// RFC 9114 §4.3 and §4.3.1 restate every one of these for HTTP/3 with the same
+// pseudo-header set and the same CONNECT exemption (§4.4).
 //
 // Before this existed the target URI was reconstructed with no validation at
 // all: a missing :authority was silently repaired with the literal "localhost"
@@ -231,9 +272,9 @@ func scanRequestPseudoHeaders(fields []hpack.HeaderField) (requestPseudoHeaders,
 	return ph, true
 }
 
-// validRequestPseudoHeaders reports whether a decoded request field block
-// satisfies RFC 9113 §8.3. One pass, no allocation.
-func validRequestPseudoHeaders(fields []hpack.HeaderField) bool {
+// ValidRequestPseudoHeaders reports whether a decoded request field block
+// satisfies RFC 9113 §8.3 (equivalently RFC 9114 §4.3.1). One pass, no allocation.
+func ValidRequestPseudoHeaders(fields []hpack.HeaderField) bool {
 	ph, ok := scanRequestPseudoHeaders(fields)
 	if !ok {
 		return false
@@ -252,7 +293,7 @@ func validRequestPseudoHeaders(fields []hpack.HeaderField) bool {
 		return false
 	}
 	// §8.3.1 — the mandatory-:scheme/:path rule exempts CONNECT, which omits
-	// both (§8.5).
+	// both (§8.5; RFC 9114 §4.4 for HTTP/3).
 	if bytes.Equal(ph.method, methodCONNECT) { // methods ARE case-sensitive (§9.1)
 		return true
 	}

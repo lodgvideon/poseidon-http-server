@@ -20,6 +20,7 @@ history.
 | [ADR-0006](0006-responsewriter-interface-and-pusher.md) | `ResponseWriter` as an interface + Push via optional `Pusher` | Accepted |
 | [ADR-0007](0007-rapid-reset-mitigation.md) | Rapid Reset (CVE-2023-44487) mitigation strategy | Accepted |
 | [ADR-0009](0009-stream-state-as-one-value.md) | Stream state is one value, not a set of flags | Accepted |
+| [ADR-0010](0010-message-rules-shared-across-transports.md) | Message rules live above the transport that carries them | Accepted |
 
 ## Template
 

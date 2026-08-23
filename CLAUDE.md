@@ -47,6 +47,7 @@ codec. Drop-in `http.Handler` replacement (chi/echo/gin/net/http).
 | `server/` | High-level `http.Handler`-compatible server: h2c, `/healthz`+`/readyz`, body limits, graceful drain. |
 | `grpcserver/` | gRPC framing, status trailers, health check, reflection. |
 | `http3server/` | HTTP/3 over QUIC (RFC 9114). The only package with a wider dependency footprint — see `docs/HTTP3_SERVER_GUIDE.md`. |
+| `internal/httpfields/` | The inbound field rules HTTP/2 and HTTP/3 share — field-name/value characters, the connection-specific-field ban, `TE: trailers`, request pseudo-headers. Imported by **both** `conn/` and `http3server/`; see ADR-0010 before adding anything here. |
 | `middleware/` | gzip, metrics (Prometheus), ratelimit, realip, security headers, slog access log, tracing. |
 | `cmd/poseidon-server/` | The 12-factor `poseidon-server` binary. |
 | `examples/` | Runnable example servers (http, tls, secure, h2c, grpc, push, observability). |
@@ -221,10 +222,24 @@ Rules that follow:
   while there were 9, which is what a count in prose does. They cover the alloc
   contract, the goroutine model, gRPC framing, h2c, the `ResponseWriter`
   interface, Rapid-Reset mitigation, the tagged-module consumption of the client
-  codec, and **stream state as one value** (ADR-0009 — the record behind
+  codec, **stream state as one value** (ADR-0009 — the record behind
   `streamState`/`streamTable` and the four rounds of stream-lifecycle defects
-  that produced them; the one an agent touching `conn/` needs first).
-  Cite/update them when changing a decision.
+  that produced them; the one an agent touching `conn/` needs first), and
+  **message rules above the transport** (ADR-0010 — why `internal/httpfields`
+  exists and what may go in it; the one an agent touching either request path
+  needs). Cite/update them when changing a decision.
+
+- **Two transports, one set of message rules.** `conn/` (HTTP/2) and
+  `http3server/` (HTTP/3) share no code and never will share much — but RFC 9114
+  §4.1/§4.2/§4.3 restates RFC 9113 §8.2.1/§8.2.2/§8.3 nearly clause for clause,
+  and for a while only `conn/` enforced any of it. `http3server` accepted
+  `Transfer-Encoding`, CR/LF in field values, uppercase field names and duplicate
+  pseudo-headers that the HTTP/2 door of the same binary refused — a smuggling
+  and header-injection differential at the next HTTP/1.1 hop, not a conformance
+  nit (issue #209, ADR-0010). Before adding a receiver-side check to either
+  package, ask whether it is a property of the **message** or of the
+  **transport**. If the message, it goes in `internal/httpfields` and both call
+  it; only the reporting differs (PROTOCOL_ERROR vs H3_MESSAGE_ERROR).
 
 ## Releasing (has a known gotcha)
 

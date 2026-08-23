@@ -49,6 +49,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/http3"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 	"github.com/lodgvideon/poseidon-http-client/quic"
+	"github.com/lodgvideon/poseidon-http-server/internal/httpfields"
 )
 
 // Default limits. maxRequestBytes bounds a buffered request; maxFieldSection
@@ -700,7 +701,41 @@ func decodeFields(section []byte) ([]hpack.HeaderField, error) {
 
 // buildRequest maps a decoded field section and body onto an http.Request
 // (RFC 9114 §4.3.1: :method, :scheme, :path and :authority).
+//
+// It validates before it maps. §4.1 lists what makes a message malformed —
+// "prohibited fields or pseudo-header fields, missing mandatory pseudo-header
+// fields, invalid values for pseudo-header fields, pseudo-header fields after
+// fields, an invalid sequence of HTTP messages, uppercase field names, [or]
+// invalid characters in field names or values" — and §4.1.2 makes a detected
+// malformed request a stream error of type H3_MESSAGE_ERROR, which is what
+// requestAbortCode maps http3.ErrH3Message to.
+//
+// The checks live in internal/httpfields because they are the same checks
+// RFC 9113 §8.2.1/§8.2.2/§8.3 puts on the HTTP/2 path, enforced there by
+// conn/server_handler.go. Until issue #209 they were unexported inside conn/ and
+// this function had none of them: an HTTP/3 request could carry
+// Transfer-Encoding, a CRLF-split field value or an uppercase field name that
+// the HTTP/2 front door of the same binary refuses — a smuggling and
+// header-injection differential at the next HTTP/1.1 hop, not a conformance nit.
 func buildRequest(fields []hpack.HeaderField, body []byte) (*http.Request, error) {
+	// §4.2 — the character rules, the connection-specific-field ban
+	// (Connection, Proxy-Connection, Keep-Alive, Transfer-Encoding, Upgrade) and
+	// the TE-may-only-be-"trailers" rule, one pass over the section. isTrailer is
+	// false: decodeRequest does not surface a trailer section to this function.
+	for i := range fields {
+		if httpfields.Prohibited(fields[i].Name, fields[i].Value, false) {
+			return nil, http3.ErrH3Message
+		}
+	}
+	// §4.3/§4.3.1 — pseudo-headers must be defined, unique, and ahead of every
+	// regular field, and :authority carries no userinfo. The mandatory-field
+	// checks below are deliberately kept as well: this helper exempts CONNECT
+	// (§4.4), which this server does not implement, so dropping them would newly
+	// admit a request shape that is currently refused.
+	if !httpfields.ValidRequestPseudoHeaders(fields) {
+		return nil, http3.ErrH3Message
+	}
+
 	var method, scheme, path, authority string
 	header := http.Header{}
 	for _, f := range fields {
