@@ -200,8 +200,9 @@ this server.
 - **No graceful drain and no GOAWAY.** Cancelling `ctx` returns from `Serve`
   and closes each connection as its Poll loop observes the cancellation;
   in-flight requests are cut. There is no HTTP/2-`Shutdown` analogue.
-- **None of the `server/` machinery**: no middleware chain, no metrics, no
-  connection/stream accounting beyond the transport limits above.
+- **None of the `server/` machinery** is wired in: no middleware chain, no
+  metrics, no connection/stream accounting beyond the transport limits above.
+  A chain can be bridged in by hand, though — see below.
 
 **Transport level** (`quic.Listener`, see poseidon-http-client's
 `docs/QUIC_SERVER_DESIGN.md`):
@@ -216,6 +217,46 @@ this server.
   handshake time.
 - **No key update on server connections** (RFC 9001 §6 is not armed), and no
   connection ID rotation — one fixed 8-byte SCID per connection.
+
+## Using the `middleware/` chain over HTTP/3
+
+`middleware` is written against `server.Handler`, and `http3server.Server` takes
+an `http.Handler`, so the two do not compose directly. `server.ToHTTPHandler`
+bridges them:
+
+```go
+chain := server.Chain(
+    middleware.Recovery(logger),
+    middleware.RequestID(),
+    middleware.SecurityHeaders(middleware.DefaultSecurityHeadersConfig()),
+)
+
+h3 := &http3server.Server{
+    Handler:   server.ToHTTPHandler(chain(myNativeHandler)),
+    TLSConfig: tlsCfg,
+}
+```
+
+Verified working: the request reaches the native handler with `Method`, `Path`,
+`Scheme` and `Authority` populated, and middleware response headers survive onto
+the HTTP/3 response.
+
+Two things to know before relying on it:
+
+- It works here **because** `buildRequest` gives the `http.Request` an
+  absolute-form URL — `URL.Scheme` and `URL.Host` are both set from `:scheme`
+  and `:authority`. The same adapter drops `Authority` and `Scheme` when fed a
+  request that came from `net/http` itself, where `URL` is path-only (issue
+  #211). That bug does not bite on this path; it will bite if you put the same
+  bridged handler behind a stdlib `ServeMux`.
+- The bridge is per-request only. Nothing in `middleware` sees the HTTP/3
+  connection, so connection-level middleware behaviour — anything counting
+  connections or reading `server.PeerAddr` — is still unavailable
+  (poseidon-http-client#710).
+
+Sharing one chain between the HTTP/2 and HTTP/3 servers is the point: build it
+once, hand `chain(h)` to `server.Options.Handler` and
+`server.ToHTTPHandler(chain(h))` to `http3server.Server.Handler`.
 
 ## Dependencies
 
