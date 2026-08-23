@@ -37,9 +37,22 @@ func (stdLogger) Printf(format string, args ...interface{}) { log.Printf(format,
 // Options configures a Server. The zero value is usable; each field documents
 // its default when left empty.
 type Options struct {
-	Addr                     string
-	Handler                  Handler
-	HTTPHandler              http.Handler
+	Addr string
+
+	// Handler answers requests on the native zero-allocation path. Exactly one
+	// of Handler and HTTPHandler must be set; validate rejects neither being set.
+	Handler Handler
+
+	// HTTPHandler is sugar for Handler: FromHTTPHandler(h). It exists so a
+	// chi/echo/gin/http.ServeMux router can be dropped in without the caller
+	// naming the adapter, and it is resolved to exactly that in resolvedHandler.
+	//
+	// Handler WINS if both are set — HTTPHandler is then silently ignored, which
+	// is why setting both is a configuration mistake rather than a composition.
+	// Reach for the stdlib-compat path knowingly: it allocates, and ADR-0001
+	// scopes the zero-allocation contract to the native path only.
+	HTTPHandler http.Handler
+
 	Middleware               []Middleware
 	ConnOpts                 conn.ServerConnOptions
 	MaxConcurrentConnections int

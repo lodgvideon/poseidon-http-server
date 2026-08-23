@@ -3,6 +3,7 @@ package conn
 import (
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-server/internal/httpfields"
 )
 
 // serverConnOps is the contract server_handler.go needs from ServerConn.
@@ -458,7 +459,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// must still decode or the shared HPACK dynamic table desyncs.
 	listSize, oversized := 0, false
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
-		if !malformed && isProhibitedField(f.Name, f.Value, isTrailer) {
+		if !malformed && httpfields.Prohibited(f.Name, f.Value, isTrailer) {
 			malformed = true
 		}
 		listSize += len(f.Name) + len(f.Value) + fieldEntryOverhead
@@ -522,7 +523,7 @@ func (h *serverConnHandler) emitHeaderBlock(s *ServerStream, hb []byte, endStrea
 	// RFC 9113 §8.3 — request pseudo-headers must be present, unique, defined,
 	// and ahead of every regular field. Only a request header block carries
 	// them; a trailer section is judged by the character rules alone.
-	if !isTrailer && !validRequestPseudoHeaders(h.scratch) {
+	if !isTrailer && !httpfields.ValidRequestPseudoHeaders(h.scratch) {
 		malformed = true
 	}
 	// RFC 9113 §8.1 — a trailer section is the end of the

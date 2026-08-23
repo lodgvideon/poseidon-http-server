@@ -6,6 +6,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-server/internal/httpfields"
 )
 
 // ---------------------------------------------------------------------------
@@ -165,7 +166,7 @@ func (ss *ServerStream) Push(ctx context.Context, promiseHeaders []hpack.HeaderF
 	// pseudo-header rules. Checked here rather than in the server/ wrapper so a
 	// direct user of this package gets the same guarantee, and checked before an
 	// identifier is reserved.
-	if !validRequestPseudoHeaders(promiseHeaders) {
+	if !httpfields.ValidRequestPseudoHeaders(promiseHeaders) {
 		return nil, ErrPushMalformedPromise
 	}
 

@@ -26,6 +26,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-server/conn"
 	"github.com/lodgvideon/poseidon-http-server/middleware"
 	"github.com/lodgvideon/poseidon-http-server/server"
+	pprofhandler "github.com/lodgvideon/poseidon-http-server/server/pprof"
 )
 
 // Version metadata, overridden at build time via -ldflags.
@@ -284,7 +285,7 @@ func buildOptions(cfg Config, logger *slog.Logger, health *server.HealthState) (
 	// pprof — opt-in only.
 	if cfg.EnablePprof {
 		logger.Warn("pprof enabled: /debug/pprof/ exposes runtime internals; restrict access")
-		mux.Handle("/debug/pprof/", server.ToHTTPHandler(server.PprofHandler()))
+		mux.Handle("/debug/pprof/", server.ToHTTPHandler(pprofhandler.Handler()))
 	}
 
 	// Middleware chain (onion order, outermost first):
