@@ -1,10 +1,17 @@
-// Package httpfields holds the inbound field rules that HTTP/2 and HTTP/3 share.
+// Package httpfields holds the field rules that HTTP/2 and HTTP/3 share, in both
+// directions.
 //
 // The rules are the same rules. RFC 9113 §8.2.1 and RFC 9114 §4.1/§4.2 impose the
 // same character checks, the same connection-specific-field ban, the same TE rule
-// and the same request pseudo-header rules on a receiver; only the error code
-// differs (PROTOCOL_ERROR for HTTP/2, H3_MESSAGE_ERROR for HTTP/3), and that is
-// the caller's business, not this package's.
+// and the same pseudo-header rules on both endpoints; only the error code differs
+// (PROTOCOL_ERROR for HTTP/2, H3_MESSAGE_ERROR for HTTP/3), and that is the
+// caller's business, not this package's.
+//
+// Receiving: [Prohibited] and [ValidRequestPseudoHeaders] say whether an arriving
+// message is malformed. Sending: [ProhibitedInResponse] and [InterimStatus] say
+// what a response this server generates may not contain. The two directions are
+// separate because the verdicts differ — a receiver rejects the message, a sender
+// drops the field.
 //
 // # Why this is its own package
 //
@@ -183,6 +190,90 @@ func Prohibited(name, value []byte, isTrailer bool) bool {
 	}
 	return isConnectionSpecificName(name)
 }
+
+// ---------------------------------------------------------------------------
+// Sender side: what a response field section may not carry
+// ---------------------------------------------------------------------------
+
+// responseStatus is the only pseudo-header defined for a response.
+var responseStatus = []byte(":status")
+
+// ProhibitedInResponse reports whether a field name must not appear in a
+// response field section this server generates.
+//
+//	RFC 9113 §8.2.2 / RFC 9114 §4.2 — "An endpoint MUST NOT generate an
+//	 HTTP/2 message containing connection-specific header fields", the same list
+//	 [Prohibited] enforces on the way in.
+//	RFC 9113 §8.3 / RFC 9114 §4.3 — pseudo-header fields are limited to those
+//	 defined, and ":status" is the only one defined for a response.
+//	RFC 9114 §4.2 — TE "MAY be present in an HTTP/3 request header"; a response
+//	 is not a request, so TE has no place in one at any value.
+//
+// # Why strip rather than fail
+//
+// A handler written for net/http sets Connection: close as a matter of routine,
+// and answering 500 because of it would break ordinary code for no safety gain.
+// Removing the field is also literally what §4.2 instructs an intermediary
+// translating from HTTP/1.x to do. So a caller drops the field and sends the
+// rest.
+//
+// The pseudo-header half is not routine and is the reason this is not merely
+// tidiness: textproto.CanonicalMIMEHeaderKey leaves a name containing ':'
+// untouched, so w.Header().Set(":authority", …) reached the wire verbatim on
+// both transports. A handler that builds a header name out of user input could
+// therefore be made to inject a pseudo-header into the response.
+//
+// Hot path: called once per response field. Length-first, and EqualFold rather
+// than a plain compare because the native HTTP/2 write path takes field names
+// from the caller and cannot assume they were lowercased. Allocation-free.
+func ProhibitedInResponse(name []byte) bool {
+	if len(name) == 0 {
+		return true
+	}
+	if name[0] == ':' {
+		return !bytes.Equal(name, responseStatus) // pseudo-headers are case-sensitive
+	}
+	if len(name) == 2 && (name[0]|0x20) == 't' && (name[1]|0x20) == 'e' {
+		return true
+	}
+	switch len(name) {
+	case 7:
+		return bytes.EqualFold(name, sUpgrade)
+	case 10:
+		return bytes.EqualFold(name, sConnection) || bytes.EqualFold(name, sKeepAlive)
+	case 16:
+		return bytes.EqualFold(name, sProxyConnection)
+	case 17:
+		return bytes.EqualFold(name, sTransferEncoding)
+	}
+	return false
+}
+
+var (
+	sUpgrade          = []byte("upgrade")
+	sConnection       = []byte("connection")
+	sKeepAlive        = []byte("keep-alive")
+	sProxyConnection  = []byte("proxy-connection")
+	sTransferEncoding = []byte("transfer-encoding")
+)
+
+// InterimStatus reports whether status is a 1xx, which may not be used as a
+// response's final status.
+//
+//	RFC 9113 §8.1 / RFC 9114 §4.1 — a response is "zero or more interim
+//	 responses (1xx) followed by a single final response".
+//
+// Both servers latched the first status a handler passed and ignored every
+// later one, so WriteHeader(http.StatusContinue) or StatusEarlyHints ended the
+// exchange on an interim response and no final one ever followed — and on
+// HTTP/3, RFC 9114 §4.4 additionally has no 101 at all, since HTTP/3 does not
+// carry the Upgrade mechanism.
+//
+// Zero or more interim responses includes zero, so declining to send one is
+// conformant where letting it stand as the final response is not. Sending them
+// properly is a separate piece of work: it needs the response written in stages
+// rather than at the end, which http3server's buffered writer does not yet do.
+func InterimStatus(status int) bool { return status >= 100 && status < 200 }
 
 // Request pseudo-header validation, verbatim rules:
 //

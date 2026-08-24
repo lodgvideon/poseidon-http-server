@@ -24,6 +24,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-server/conn"
+	"github.com/lodgvideon/poseidon-http-server/internal/httpfields"
 )
 
 // ---------------------------------------------------------------------------
@@ -248,6 +249,12 @@ func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	if w.written {
 		return nil
 	}
+	// A 1xx cannot be the final status (RFC 9113 §8.1). Latching one here ended
+	// the exchange on an interim response and no final one ever followed, so it
+	// is declined instead — see httpfields.InterimStatus.
+	if httpfields.InterimStatus(status) {
+		return nil
+	}
 	w.status = status
 	w.written = true
 
@@ -265,7 +272,16 @@ func (w *responseWriter) WriteHeaders(status int, headers []hpack.HeaderField) e
 	if dateRequired(status) && !hasField(headers, sFieldDate) {
 		fields = append(fields, hpack.HeaderField{Name: sFieldDate, Value: httpDate(time.Now())})
 	}
-	fields = append(fields, headers...)
+	// RFC 9113 §8.2.2 and §8.3 — a response field section carries no
+	// connection-specific fields and no pseudo-header but :status. Filtered here
+	// rather than refused: see httpfields.ProhibitedInResponse. The fields slice
+	// was already allocated above, so dropping entries costs no allocation.
+	for i := range headers {
+		if httpfields.ProhibitedInResponse(headers[i].Name) {
+			continue
+		}
+		fields = append(fields, headers[i])
+	}
 
 	return w.sw.sendHeaders(w.reqCtx(), fields, false)
 }
@@ -352,6 +368,11 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 	if w.written {
 		return
 	}
+	// See WriteHeaders: a 1xx is not a final status and is declined, so a later
+	// WriteHeader still gets to set one.
+	if httpfields.InterimStatus(statusCode) {
+		return
+	}
 	w.status = statusCode
 	w.written = true
 
@@ -373,6 +394,13 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 	}
 	for k, vv := range hdr {
 		lower := strings.ToLower(k)
+		// As on the native path: connection-specific fields and any
+		// pseudo-header other than :status are dropped rather than emitted.
+		// http.Header leaves a ':'-prefixed key uncanonicalised, so without this
+		// w.Header().Set(":authority", …) reached the wire verbatim.
+		if httpfields.ProhibitedInResponse([]byte(lower)) {
+			continue
+		}
 		for _, v := range vv {
 			fields = append(fields, hpack.HeaderField{
 				Name:  []byte(lower),
