@@ -618,12 +618,43 @@ func HTTPRequestToRequest(r *http.Request) *Request {
 			})
 		}
 	}
+	// r.URL means two different things depending on where the request came from,
+	// and reading it as if it always meant one of them was issue #211.
+	//
+	// net/http fills the authority and scheme into r.URL only for a request a
+	// CLIENT built. On a request a SERVER received, r.URL is the request-target —
+	// path and query, nothing else — and the authority is in r.Host. Taking them
+	// from r.URL therefore produced an empty Authority and Scheme for every
+	// request arriving through net/http, which left Host-based routing blind and
+	// made the adapter pair ToHTTPHandler(FromHTTPHandler(h)) answer 400 to
+	// everything: NewHTTPRequest refuses an http/https target with no authority.
+	//
+	// r.Host is the right source for both shapes — net/http documents it as the
+	// authority for a server request, and populates it from the absolute-form
+	// target for a client-built one.
+	authority := r.Host
+	if authority == "" {
+		authority = r.URL.Host
+	}
+	// A server request carries the scheme in the connection, not the target.
+	scheme := r.URL.Scheme
+	if scheme == "" {
+		scheme = schemeHTTP
+		if r.TLS != nil {
+			scheme = schemeHTTPS
+		}
+	}
 	req := &Request{
-		Method:    r.Method,
-		Path:      r.URL.Path,
+		Method: r.Method,
+		// Path is the RAW :path, query included — that is what the field is
+		// documented as and what the inbound HTTP/2 path puts there, so routers
+		// matching on the full request line see the same string either way.
+		// r.URL.Path alone silently dropped every query parameter across the
+		// round trip.
+		Path:      r.URL.RequestURI(),
 		RawQuery:  r.URL.RawQuery,
-		Scheme:    r.URL.Scheme,
-		Authority: r.URL.Host,
+		Scheme:    scheme,
+		Authority: authority,
 		Headers:   headers,
 	}
 	// Expose the request body to the Poseidon handler. r.Body is already an
