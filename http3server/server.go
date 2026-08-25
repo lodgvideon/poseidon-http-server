@@ -81,6 +81,13 @@ var (
 	// errRequestTooLarge: the request outgrew maxRequestBytes. Not a reset at all —
 	// §4.1's "abort reading the request stream, send a complete response" path.
 	errRequestTooLarge = errors.New("http3server: request exceeds the buffered-request limit")
+	// errRequestFieldsTooLarge: the request's field section outgrew the size this
+	// server advertises as SETTINGS_MAX_FIELD_SECTION_SIZE. Answered rather than
+	// reset, for the reason §4.2.2 names: "A server that receives a larger header
+	// section than it is willing to handle can send an HTTP 431 (Request Header
+	// Fields Too Large) status code." A reset would leave the peer guessing which
+	// of its requests are too big to ever succeed.
+	errRequestFieldsTooLarge = errors.New("http3server: request field section exceeds the advertised limit")
 	// errRequestIncomplete: the stream ended without a fully formed request, either
 	// because the peer reset it mid-message or because it carried no HEADERS frame.
 	errRequestIncomplete = errors.New("http3server: request stream ended without a complete message")
@@ -357,6 +364,12 @@ func (s *Server) serveRequest(ctx context.Context, c *quic.Conn, rs *quic.Stream
 	}
 	req, err := decodeRequest(body)
 	if err != nil {
+		if errors.Is(err, errRequestFieldsTooLarge) {
+			// §4.2.2 names the answer for this one, so it gets answered rather
+			// than reset — the same reasoning as refuseOversizeRequest (#179).
+			s.refuseOversizeFields(rs, cs)
+			return
+		}
 		var cfe *connFrameError
 		if errors.As(err, &cfe) {
 			// Not a malformed request but an illegal frame sequence: §7.2 requires
@@ -486,17 +499,30 @@ func requestAbortCode(err error) uint64 {
 // then gets a cancellation with the code §4.1.1 gives an unprocessed request, rather
 // than the silence this function exists to remove.
 func (s *Server) refuseOversizeRequest(rs *quic.Stream, cs *connState) {
+	s.refuseWith(rs, cs, http.StatusRequestEntityTooLarge, oversizeBody)
+}
+
+// refuseWith performs the three steps above for a request this server declines
+// before any of it reaches a handler: stop the peer sending, answer completely,
+// close the sending side cleanly.
+//
+// The response is built here rather than through the handler because §4.1.1
+// counts passing "some data from the stream ... to some higher layer of
+// software" as processing, and nothing here has been understood.
+//
+// body's length is what the Content-Length states, so the caller's two constants
+// cannot drift: §4.1.2 makes a response whose Content-Length disagrees with its
+// DATA frames malformed.
+func (s *Server) refuseWith(rs *quic.Stream, cs *connState, status int, body []byte) {
 	// 1. Abort reading the request stream. This is the step whose absence was the bug:
 	//    it is what unblocks a peer parked on flow control.
 	_ = rs.StopSending(http3.H3NoError)
 
-	// 2. Send a complete response. Built here rather than through the handler — §4.1.1
-	//    counts passing "some data from the stream ... to some higher layer of software"
-	//    as processing, and this request is refused before any of it is understood.
-	rw := &responseWriter{header: http.Header{}, status: http.StatusRequestEntityTooLarge}
+	// 2. Send a complete response.
+	rw := &responseWriter{header: http.Header{}, status: status}
 	rw.header.Set("Content-Type", "text/plain; charset=utf-8")
-	rw.header.Set("Content-Length", strconv.Itoa(len(oversizeBody)))
-	_, _ = rw.body.Write(oversizeBody)
+	rw.header.Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = rw.body.Write(body)
 	resp, err := encodeResponse(rw, cs.peerMaxFieldSection.Load())
 	if err != nil {
 		_ = rs.Reset(http3.H3RequestRejected)
@@ -512,6 +538,27 @@ func (s *Server) refuseOversizeRequest(rs *quic.Stream, cs *connState) {
 // states, so the two cannot drift: §4.1.2 makes a response whose Content-Length
 // disagrees with the DATA frames malformed.
 var oversizeBody = []byte("request body exceeds the server's limit\n")
+
+// refuseOversizeFields answers a request whose field section outgrew the size
+// this server advertises, with the status RFC 9114 §4.2.2 names for it:
+//
+//	"A server that receives a larger header section than it is willing to handle
+//	 can send an HTTP 431 (Request Header Fields Too Large) status code."
+//
+// Same three steps as refuseOversizeRequest and for the same reason (#179): stop
+// the peer sending, send a complete response, close the sending side cleanly. A
+// bare reset would abort only this server's direction and leave the peer to
+// discover by timeout that the request can never succeed — and, worse, with no
+// way to tell "too big, do not retry" from "try again".
+//
+// Everything else about the answer — and why it is an answer at all — is the same
+// as the 413's, so it goes through the same refuseWith.
+func (s *Server) refuseOversizeFields(rs *quic.Stream, cs *connState) {
+	s.refuseWith(rs, cs, http.StatusRequestHeaderFieldsTooLarge, oversizeFieldsBody)
+}
+
+// oversizeFieldsBody is the 431's content, sized by the same rule as oversizeBody.
+var oversizeFieldsBody = []byte("request header fields exceed the server's limit\n")
 
 // readRequestStream buffers a whole request. The connection's Poll loop feeds the
 // stream; this waits on its readiness until the client signals the end with a FIN.
@@ -729,10 +776,41 @@ func decodeRequest(stream []byte) (*http.Request, error) {
 	return buildRequest(fields, body)
 }
 
-// decodeFields decodes a QPACK field section under the static-table profile.
+// decodeFields decodes a QPACK field section under the static-table profile,
+// holding it to the size this server advertises.
+//
+// # Why the size is checked here and not on the frame
+//
+// openControlStream advertises SETTINGS_MAX_FIELD_SECTION_SIZE = maxFieldSection
+// (64 KiB), and encodeResponse has always held this server's own responses to
+// it. Nothing applied it to what arrived. The only inbound bound was the 1 MiB
+// whole-request cap on the FrameReader, so a peer could send a field section
+// sixteen times the advertised limit and have every field of it decoded and
+// materialised — a limit announced and not kept is not a limit.
+//
+// The frame's byte length is not a substitute. §4.2.2 sizes a field section on
+// "the uncompressed size of fields, including the length of the name and value
+// in bytes plus an overhead of 32 bytes for each field", and QPACK compresses:
+// a small frame can decode into an arbitrarily large field list, which is the
+// whole shape of a decompression-bomb. So the count is taken as the fields come
+// out of the decoder, not from the bytes that went in.
+//
+// Unlike the HTTP/2 path (conn/server_handler.go), this stops at the limit
+// rather than decoding the rest and flagging. It can afford to: this server runs
+// the static-table profile (SETTINGS_QPACK_MAX_TABLE_CAPACITY = 0), so there is
+// no dynamic table to fall out of step with the peer's encoder. Under a dynamic
+// table an abandoned section would desync the connection, which is exactly why
+// the HTTP/2 side finishes the block.
 func decodeFields(section []byte) ([]hpack.HeaderField, error) {
-	var fields []hpack.HeaderField
+	var (
+		fields []hpack.HeaderField
+		size   uint64
+	)
 	err := qpack.NewDecoder().DecodeFieldSection(section, nil, func(name, value []byte) error {
+		size += uint64(len(name)) + uint64(len(value)) + fieldLineOverhead
+		if size > maxFieldSection {
+			return errRequestFieldsTooLarge
+		}
 		// name/value alias the decoder's scratch, so copy them.
 		fields = append(fields, hpack.HeaderField{
 			Name:  append([]byte(nil), name...),
