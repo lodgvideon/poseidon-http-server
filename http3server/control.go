@@ -69,6 +69,15 @@ type connState struct {
 	controlFrames http3.FrameReader // frames buffered off that stream
 	settingsRead  bool              // its first frame has been read and was SETTINGS
 
+	// The two identifier spaces §5.2 and §7.2.7 require a receiver to keep
+	// monotonic, whether or not it acts on them. Neither is a push feature: they
+	// are the state the "MUST NOT go backwards / forwards" rules are checked
+	// against, and without them a peer contradicting itself goes unnoticed.
+	maxPushID     uint64 // highest MAX_PUSH_ID received (§7.2.7); must not decrease
+	maxPushIDSeen bool
+	goawayID      uint64 // last GOAWAY identifier received (§5.2); must not increase
+	goawaySeen    bool
+
 	// The peer's QPACK instruction streams (RFC 9204 §4.2). They are retained and
 	// drained rather than acted on: this server speaks the static-table profile
 	// (SETTINGS_QPACK_MAX_TABLE_CAPACITY=0), so a conforming peer's encoder stream
@@ -283,15 +292,117 @@ func (cs *connState) readControl(c *quic.Conn) error {
 			// PUSH_PROMISE at a server (§7.2.5), and the reserved HTTP/2-carryover
 			// types (§7.2.8) are each H3_FRAME_UNEXPECTED.
 			return connError(c, http3.H3FrameUnexpected)
+		case http3.FrameCancelPush, http3.FrameMaxPushID, http3.FrameGoaway:
+			// The three control frames that carry exactly one identifier. The rules
+			// are in identifierFault, so this switch keeps naming frame types rather
+			// than growing a second subject.
+			if code := cs.identifierFault(typ, payload); code != 0 {
+				return connError(c, code)
+			}
+
 		default:
-			// GOAWAY (§5.2), CANCEL_PUSH (§7.2.3) and MAX_PUSH_ID (§7.2.7) are
-			// legal here from a client and are read but not acted on: this server
-			// never pushes, so a push-ID frame has nothing to control, and the
-			// connection-lifecycle half of GOAWAY is issue #80. Genuinely unknown
-			// and GREASE types MUST be ignored (§9), which is the same thing.
+			// Genuinely unknown types and the GREASE types of §7.2.8 MUST be
+			// ignored (§9). Nothing else reaches here: every frame type this
+			// server has a rule for is named above.
 		}
 	}
 	return nil
+}
+
+// identifierFault applies the rules RFC 9114 puts on the three control frames
+// that carry exactly one identifier, and updates the state those rules are
+// checked against. It returns the §8.1 code the connection must be closed with,
+// or 0 when the frame is acceptable.
+//
+// All three used to be discarded, on the reasoning that this server never pushes
+// so a push-ID frame has nothing to control. That is right about push FULFILMENT
+// and wrong about the push-ID SPACE: the identifier rules bind a receiver whether
+// or not it uses the identifiers, and H3_ID_ERROR was emitted nowhere in the
+// package before this.
+//
+// Framing is judged first, because a payload that is not one identifier is not a
+// question about identifiers at all (§7.1).
+func (cs *connState) identifierFault(typ uint64, payload []byte) uint64 {
+	id, ok := singleVarintPayload(payload)
+	if !ok {
+		return http3.H3FrameError
+	}
+	switch typ {
+	case http3.FrameCancelPush:
+		// §7.2.3 — "If a server receives a CANCEL_PUSH frame for a Push ID that
+		// has not yet been mentioned by a PUSH_PROMISE frame, this MUST be treated
+		// as a connection error of type H3_ID_ERROR." This server never sends
+		// PUSH_PROMISE, so no Push ID has ever been mentioned on this connection
+		// and every CANCEL_PUSH names one that was not. The section's other rule —
+		// a Push ID above the maximum — points the same way, since no maximum has
+		// been raised for a server that does not push.
+		return http3.H3IDError
+
+	case http3.FrameMaxPushID:
+		// §7.2.7 — "A server MUST treat receipt of a MAX_PUSH_ID frame that
+		// contains a smaller value than previously received as a connection error
+		// of type H3_ID_ERROR."
+		if cs.maxPushIDSeen && id < cs.maxPushID {
+			return http3.H3IDError
+		}
+		cs.maxPushID, cs.maxPushIDSeen = id, true
+
+	case http3.FrameGoaway:
+		// §5.2 — "the identifier in each frame MUST NOT be greater than the
+		// identifier in any previous frame, since clients might already have
+		// retried unprocessed requests on another HTTP connection. Receiving a
+		// GOAWAY containing a larger identifier than previously received MUST be
+		// treated as a connection error of type H3_ID_ERROR."
+		//
+		// Only the identifier rule is enforced. Acting on a peer's GOAWAY — and
+		// sending one of this server's own — is issue #80 and group E of #212;
+		// tracking the value is what that will build on.
+		if cs.goawaySeen && id > cs.goawayID {
+			return http3.H3IDError
+		}
+		cs.goawayID, cs.goawaySeen = id, true
+	}
+	return 0
+}
+
+// singleVarintPayload parses a frame payload that RFC 9114 defines as exactly one
+// variable-length integer — CANCEL_PUSH (§7.2.3), MAX_PUSH_ID (§7.2.7) and GOAWAY
+// (§5.2) each carry one identifier and nothing else.
+//
+// It reports false for both ways §7.1 says such a payload can be wrong: "A frame
+// payload that contains additional bytes after the identified fields or a frame
+// payload that terminates before the end of the identified fields MUST be treated
+// as a connection error of type H3_FRAME_ERROR." A zero-length CANCEL_PUSH is the
+// second of those, and was accepted before this.
+func singleVarintPayload(payload []byte) (uint64, bool) {
+	v, n := readVarint(payload)
+	if n == 0 || n != len(payload) {
+		return 0, false
+	}
+	return v, true
+}
+
+// readVarint decodes one QUIC variable-length integer (RFC 9000 §16) and returns
+// it with the number of bytes consumed, or n == 0 if b does not hold a whole one.
+// The two most significant bits of the first byte select the length; the rest of
+// that byte is the top of the value.
+//
+// Written here rather than taken from the codec because poseidon-http-client keeps
+// its varint reader in an internal package. It is a dozen lines and the format is
+// frozen, so a local copy is cheaper than widening the dependency's API.
+func readVarint(b []byte) (v uint64, n int) {
+	if len(b) == 0 {
+		return 0, 0
+	}
+	n = 1 << (b[0] >> 6) // 1, 2, 4 or 8
+	if len(b) < n {
+		return 0, 0
+	}
+	v = uint64(b[0] & 0x3f)
+	for i := 1; i < n; i++ {
+		v = v<<8 | uint64(b[i])
+	}
+	return v, n
 }
 
 // applySettings records the peer settings this server acts on. An identifier it
