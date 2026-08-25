@@ -263,7 +263,24 @@ func (s *Server) handler() http.Handler {
 // its own goroutine, which waits on that stream's readiness. It mirrors how the
 // client drives a connection, so no new concurrency model is introduced.
 func (s *Server) serveConn(ctx context.Context, c *quic.Conn) {
-	defer func() { _ = c.Close() }()
+	// An APPLICATION close, not a transport one.
+	//
+	// quic.Conn.Close is CloseWithError(false, ErrCodeNoError, ""), and the false
+	// selects the transport CONNECTION_CLOSE (frame 0x1c) carrying transport code
+	// 0x00. RFC 9114 §8 requires an HTTP/3 endpoint to communicate why it closed
+	// using an §8.1 code, and §5.2 names which one for an ordinary teardown: "An
+	// endpoint that completes a graceful shutdown SHOULD use the H3_NO_ERROR error
+	// code when closing the connection." That is the application variant (0x1d).
+	//
+	// The difference is not cosmetic to the peer. A transport close is what it
+	// also sees when the transport itself fails, so every normal shutdown of this
+	// server — context cancelled, Serve returning, the Poll loop ending — was
+	// indistinguishable from the connection dying underneath it.
+	//
+	// Idempotent and first-error-wins in the transport, so this runs harmlessly
+	// after an error path already closed with its own §8.1 code; the earlier code
+	// is the one the peer sees.
+	defer func() { _ = c.CloseWithError(true, http3.H3NoError, "") }()
 
 	if err := s.openControlStream(c); err != nil {
 		return
