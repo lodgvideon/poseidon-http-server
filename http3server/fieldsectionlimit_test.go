@@ -22,12 +22,11 @@ import (
 
 // sectionOf builds a QPACK field section of n fields with the given name and
 // value lengths, and returns it with the §4.2.2 size it should be charged.
+// The charge is computed with rfc9114FieldOverhead, the test-local 32, not with
+// the production fieldLineOverhead — clientsettings_test.go spells that constant
+// out precisely "so a wrong one there cannot make these tests agree with it", and
+// borrowing the production value here would hand back that independence.
 func sectionOf(n, nameLen, valLen int) (section []byte, charged uint64) {
-	fields := make([]hpack.HeaderField, 0, n+len(validFields))
-	fields = append(fields, validFields...)
-	for _, f := range validFields {
-		charged += uint64(len(f.Name)) + uint64(len(f.Value)) + fieldLineOverhead
-	}
 	name := make([]byte, nameLen)
 	for i := range name {
 		name[i] = 'a' + byte(i%26)
@@ -36,11 +35,15 @@ func sectionOf(n, nameLen, valLen int) (section []byte, charged uint64) {
 	for i := range val {
 		val[i] = 'x'
 	}
+	extra := make([]hpack.HeaderField, 0, n)
 	for i := range n {
 		// Distinct names, so nothing collapses into one field line.
 		nm := append(append([]byte("x-"), []byte(strconv.Itoa(i))...), name...)
-		fields = append(fields, hpack.HeaderField{Name: nm, Value: val})
-		charged += uint64(len(nm)) + uint64(len(val)) + fieldLineOverhead
+		extra = append(extra, hpack.HeaderField{Name: nm, Value: val})
+	}
+	fields := withFields(extra...)
+	for i := range fields {
+		charged += uint64(len(fields[i].Name)) + uint64(len(fields[i].Value)) + rfc9114FieldOverhead
 	}
 	return encodeSection(fields), charged
 }
@@ -128,8 +131,8 @@ func TestDecodeRequest_SurfacesTheFieldLimit(t *testing.T) {
 	}
 }
 
-// TestOversizeFieldsBody_LengthMatchesItsContentLength guards the same drift the
-// 413's body comment names: §4.1.2 makes a response whose Content-Length
+// TestRefusalBodies_MatchTheirContentLength guards the same drift the 413's body
+// comment names: §4.1.2 makes a response whose Content-Length
 // disagrees with its DATA malformed, and these two are written in different
 // places.
 func TestRefusalBodies_MatchTheirContentLength(t *testing.T) {
@@ -156,13 +159,7 @@ func TestRefusalBodies_MatchTheirContentLength(t *testing.T) {
 			if got := string(fields[0].Value); got != strconv.Itoa(tc.status) {
 				t.Errorf(":status = %s, want %d", got, tc.status)
 			}
-			var declared string
-			for _, f := range fields {
-				if string(f.Name) == "content-length" {
-					declared = string(f.Value)
-				}
-			}
-			if want := strconv.Itoa(rw.body.Len()); declared != want {
+			if want, declared := strconv.Itoa(rw.body.Len()), headerValue(fields, "content-length"); declared != want {
 				t.Errorf("content-length %q but %s body bytes; §4.1.2 makes that malformed", declared, want)
 			}
 		})
@@ -172,13 +169,15 @@ func TestRefusalBodies_MatchTheirContentLength(t *testing.T) {
 // NOT COVERED END TO END: the 431 reaching a peer.
 //
 // The enforcement above is unit-tested; the answer is not driven over a real
-// connection, and the reason is the harness rather than the code. A conformant
-// peer cannot produce the input — http3.Client refuses to send a section past the
-// peer'''s SETTINGS_MAX_FIELD_SECTION_SIZE, which is correct of it — and a
-// hand-rolled dialRawPeer stream deadlocks instead: nothing drives the client
-// connection'''s transmit side while the test blocks waiting to receive, so the
-// request never reaches the server (verified: readRequestStream saw 0 bytes and
-// timed out).
+// connection, and the reason is the harness rather than the code.
+//
+// A conformant peer cannot produce the input: http3.Client refuses to send a
+// section past the peer's SETTINGS_MAX_FIELD_SECTION_SIZE, which is correct of
+// it. A hand-rolled dialRawPeer stream did not work either — with the server
+// instrumented, readRequestStream saw 0 bytes and timed out, so the request never
+// arrived. The mechanism was not run to ground; what is established is only that
+// the existing raw-peer helpers, which every other raw test uses to assert
+// CONNECTION CLOSURE and nothing else, do not support send-then-receive.
 //
 // What that leaves untested is refuseOversizeFields, which is refuseOversizeRequest
 // with a different status and body — and that one IS covered end to end, by

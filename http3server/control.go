@@ -73,10 +73,14 @@ type connState struct {
 	// monotonic, whether or not it acts on them. Neither is a push feature: they
 	// are the state the "MUST NOT go backwards / forwards" rules are checked
 	// against, and without them a peer contradicting itself goes unnoticed.
-	maxPushID     uint64 // highest MAX_PUSH_ID received (§7.2.7); must not decrease
-	maxPushIDSeen bool
-	goawayID      uint64 // last GOAWAY identifier received (§5.2); must not increase
-	goawaySeen    bool
+	// maxPushID needs no "have we seen one" companion: the rule is that the value
+	// must not DECREASE, and 0 is the minimum a varint can carry, so the first
+	// frame can never be below the zero value. goawayID does need one — its rule
+	// is the opposite direction, and without the flag a zero initial value would
+	// reject the first GOAWAY carrying any non-zero identifier.
+	maxPushID  uint64 // highest MAX_PUSH_ID received (§7.2.7); must not decrease
+	goawayID   uint64 // last GOAWAY identifier received (§5.2); must not increase
+	goawaySeen bool
 
 	// The peer's QPACK instruction streams (RFC 9204 §4.2). They are retained and
 	// drained rather than acted on: this server speaks the static-table profile
@@ -342,10 +346,10 @@ func (cs *connState) identifierFault(typ uint64, payload []byte) uint64 {
 		// §7.2.7 — "A server MUST treat receipt of a MAX_PUSH_ID frame that
 		// contains a smaller value than previously received as a connection error
 		// of type H3_ID_ERROR."
-		if cs.maxPushIDSeen && id < cs.maxPushID {
+		if id < cs.maxPushID {
 			return http3.H3IDError
 		}
-		cs.maxPushID, cs.maxPushIDSeen = id, true
+		cs.maxPushID = id
 
 	case http3.FrameGoaway:
 		// §5.2 — "the identifier in each frame MUST NOT be greater than the
@@ -374,35 +378,16 @@ func (cs *connState) identifierFault(typ uint64, payload []byte) uint64 {
 // payload that terminates before the end of the identified fields MUST be treated
 // as a connection error of type H3_FRAME_ERROR." A zero-length CANCEL_PUSH is the
 // second of those, and was accepted before this.
+// http3.ReadStreamType is a plain QUIC varint reader (RFC 9000 §16) despite the
+// name, which is about its first caller rather than its behaviour; routeUni above
+// already uses it for the stream-type prefix. Reusing it keeps one decoder for
+// the format instead of a second that would not receive the codec's fixes.
 func singleVarintPayload(payload []byte) (uint64, bool) {
-	v, n := readVarint(payload)
-	if n == 0 || n != len(payload) {
+	v, n, err := http3.ReadStreamType(payload)
+	if err != nil || n != len(payload) {
 		return 0, false
 	}
 	return v, true
-}
-
-// readVarint decodes one QUIC variable-length integer (RFC 9000 §16) and returns
-// it with the number of bytes consumed, or n == 0 if b does not hold a whole one.
-// The two most significant bits of the first byte select the length; the rest of
-// that byte is the top of the value.
-//
-// Written here rather than taken from the codec because poseidon-http-client keeps
-// its varint reader in an internal package. It is a dozen lines and the format is
-// frozen, so a local copy is cheaper than widening the dependency's API.
-func readVarint(b []byte) (v uint64, n int) {
-	if len(b) == 0 {
-		return 0, 0
-	}
-	n = 1 << (b[0] >> 6) // 1, 2, 4 or 8
-	if len(b) < n {
-		return 0, 0
-	}
-	v = uint64(b[0] & 0x3f)
-	for i := 1; i < n; i++ {
-		v = v<<8 | uint64(b[i])
-	}
-	return v, n
 }
 
 // applySettings records the peer settings this server acts on. An identifier it

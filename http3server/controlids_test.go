@@ -120,14 +120,23 @@ func TestControlStream_IdentifierRules(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			conn, send := controlPeer(ctx, t)
-			send(tc.frames...)
 			t.Logf("expecting %#x per RFC 9114 %s", tc.want, tc.why)
-			wantConnClosed(ctx, t, conn, tc.want)
+			sendControlAndWantClose(t, tc.want, tc.frames...)
 		})
 	}
+}
+
+// sendControlAndWantClose opens a conforming control stream, appends frames to
+// it, and asserts the server closes the connection with want. Both tables below
+// drive it; the shared ctx/timeout and peer setup are the parts that would
+// otherwise drift between them.
+func sendControlAndWantClose(t *testing.T, want uint64, frames ...[]byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, send := controlPeer(ctx, t)
+	send(frames...)
+	wantConnClosed(ctx, t, conn, want)
 }
 
 // TestControlStream_LegalIdentifierSequencesSurvive is the negative control, and
@@ -165,16 +174,12 @@ func TestControlStream_LegalIdentifierSequencesSurvive(t *testing.T) {
 
 	for name, legal := range cases {
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			conn, send := controlPeer(ctx, t)
 			// The legal sequence, then a DATA frame — which §7.2.1 makes
 			// H3_FRAME_UNEXPECTED on a control stream, a code none of the rules
-			// under test can produce.
-			send(append(legal, http3.AppendFrameHeader(nil, http3.FrameData, 0))...)
-			// Reaching H3_FRAME_UNEXPECTED proves the legal frames above did not
-			// close the connection first with H3_ID_ERROR.
-			wantConnClosed(ctx, t, conn, http3.H3FrameUnexpected)
+			// under test can produce. Reaching THAT code proves the legal frames
+			// did not close the connection first with H3_ID_ERROR.
+			sendControlAndWantClose(t, http3.H3FrameUnexpected,
+				append(legal, http3.AppendFrameHeader(nil, http3.FrameData, 0))...)
 		})
 	}
 }

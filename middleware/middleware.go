@@ -56,13 +56,16 @@ type ctxKey int
 
 const requestIDKey ctxKey = 0
 
-// requestIDField is the response field name, precomputed. HTTP/2 and HTTP/3
-// field names are lowercase on the wire (RFC 9113 §8.2.1).
-var requestIDField = []byte("x-request-id")
+// The request-id field name, spelled once. HTTP/2 and HTTP/3 field names are
+// lowercase on the wire (RFC 9113 §8.2.1); http.Header keys its map on the
+// canonical form. Both representations derive from requestIDName so a rename
+// cannot leave one of them behind.
+const (
+	requestIDName   = "x-request-id"
+	requestIDHeader = "X-Request-Id" // http.Header's canonical form of the same name
+)
 
-// requestIDHeader is the same name in http.Header's canonical form, for the
-// stdlib path's map.
-const requestIDHeader = "X-Request-Id"
+var requestIDField = []byte(requestIDName)
 
 // RequestID returns a middleware that injects a unique request ID into the
 // context and echoes it back as an X-Request-ID response header.
@@ -84,7 +87,7 @@ func RequestID() server.Middleware {
 		return server.HandlerFunc(func(ctx context.Context, req *server.Request, w server.ResponseWriter) error {
 			id := ""
 			for _, h := range req.Headers {
-				if string(h.Name) == "x-request-id" {
+				if string(h.Name) == requestIDName {
 					id = string(h.Value)
 					break
 				}
@@ -111,7 +114,7 @@ type requestIDResponseWriter struct {
 // WriteHeaders injects the id on the native path, unless the handler supplied
 // its own.
 func (r *requestIDResponseWriter) WriteHeaders(status int, headers []hpack.HeaderField) error {
-	if r.Written() || fieldPresent(headers, "x-request-id") {
+	if r.Written() || fieldPresent(headers, requestIDName) {
 		return r.ResponseWriter.WriteHeaders(status, headers)
 	}
 	// A fresh slice rather than append(headers, …): the caller owns that array,
