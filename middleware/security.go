@@ -157,7 +157,12 @@ func (s *securityResponseWriter) WriteHeaders(status int, headers []hpack.Header
 	if s.Written() {
 		return s.ResponseWriter.WriteHeaders(status, headers)
 	}
-	merged := headers
+	// A fresh slice rather than append(headers, …): the caller owns that array,
+	// and appending into its spare capacity would write fields into storage it may
+	// still be using. requestIDResponseWriter in middleware.go documents the same
+	// hazard; the two injecting wrappers must not disagree about it.
+	merged := make([]hpack.HeaderField, 0, len(headers)+len(s.headers))
+	merged = append(merged, headers...)
 	for i := range s.headers {
 		sh := &s.headers[i]
 		if fieldPresent(headers, sh.nameStr) {
