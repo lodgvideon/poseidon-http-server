@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1](https://github.com/lodgvideon/poseidon-http-server/compare/v0.8.0...v0.8.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **ci:** make the contention gate able to run at all, and able to notice it cannot ([#215](https://github.com/lodgvideon/poseidon-http-server/issues/215)) ([abf1320](https://github.com/lodgvideon/poseidon-http-server/commit/abf132023a8c67f6e030162d952fd80941b6dec2))
+* **http3server:** apply the identifier rules to GOAWAY, CANCEL_PUSH and MAX_PUSH_ID ([#221](https://github.com/lodgvideon/poseidon-http-server/issues/221)) ([33c89ac](https://github.com/lodgvideon/poseidon-http-server/commit/33c89accd3a07bb2e94ff3081a2272cd32a087fb)), closes [#212](https://github.com/lodgvideon/poseidon-http-server/issues/212)
+* **http3server:** close a connection as HTTP/3, not as a dead socket ([#224](https://github.com/lodgvideon/poseidon-http-server/issues/224)) ([d88185b](https://github.com/lodgvideon/poseidon-http-server/commit/d88185b6e5c7104d51b47290cf4bc30200f63247))
+* **http3server:** enforce the field-section limit this server advertises ([#220](https://github.com/lodgvideon/poseidon-http-server/issues/220)) ([8f38166](https://github.com/lodgvideon/poseidon-http-server/commit/8f381666630ea37e89754b12d0d41ca28d3a3534)), closes [#212](https://github.com/lodgvideon/poseidon-http-server/issues/212)
+* **http3server:** refuse a request that disagrees with what arrived on the wire ([#217](https://github.com/lodgvideon/poseidon-http-server/issues/217)) ([ef3ccfd](https://github.com/lodgvideon/poseidon-http-server/commit/ef3ccfd34605576594226499042c47547d505cf5)), closes [#212](https://github.com/lodgvideon/poseidon-http-server/issues/212)
+* **middleware:** actually send the X-Request-ID that RequestID documents ([#222](https://github.com/lodgvideon/poseidon-http-server/issues/222)) ([81c7491](https://github.com/lodgvideon/poseidon-http-server/commit/81c74914fd5e69279a0605bf14faa6aad351956f)), closes [#213](https://github.com/lodgvideon/poseidon-http-server/issues/213)
+* **server,http3server:** stop a handler putting forbidden fields on the wire ([#218](https://github.com/lodgvideon/poseidon-http-server/issues/218)) ([fe898d0](https://github.com/lodgvideon/poseidon-http-server/commit/fe898d03872338b7950e112851385c153df9fff3)), closes [#212](https://github.com/lodgvideon/poseidon-http-server/issues/212)
+* **server:** read the authority and scheme net/http actually populates ([#219](https://github.com/lodgvideon/poseidon-http-server/issues/219)) ([da3a2e8](https://github.com/lodgvideon/poseidon-http-server/commit/da3a2e8ad363848cf0920f681a34b9f9692d7c30)), closes [#211](https://github.com/lodgvideon/poseidon-http-server/issues/211)
+
 ## [0.8.0](https://github.com/lodgvideon/poseidon-http-server/compare/v0.7.1...v0.8.0) (2026-08-23)
 
 
